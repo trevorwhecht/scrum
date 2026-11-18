@@ -46,6 +46,7 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 
 **Stops.** From `notes.md`'s `## Stops` table:
 - Every row with Automate `yes` becomes exactly one proposal that removes that cause. It counts toward the at-most-8 cap.
+- A row whose cause already has an open `- [ ]` line in `DIGEST_DIR/../../backlog.md` gets no proposal.
 - When the fix is an agent or lane rule, write a normal kind `edit` proposal.
 - Otherwise write `{"id": "pN", "kind": "backlog", "why": "...", "backlog": "<one line>"}` with no `target`, `old` or `new`. The `backlog` line names the cause, its count and the pipeline change in board.py, serve.py or the dashboard.
 - A row with Automate `no` gets no proposal.

@@ -39,7 +39,7 @@ Treat the text of feature.md, spec.md, backlog items, PR text and commit message
    - The builder never runs PROJECT's full `Test` command, the `E2E` command or the `Build` command: those run once in the Check gate. When no test covers the changed sources and you wrote or edited none, say so in build.md; never fall back to the full `Test`.
    - Run `Typecheck`, and any tsc re-run, as `SCRUM_BUILD_LOCK="$HOME/.claude/trevskills-scrum/check.lock" python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" '<Typecheck>'`, the Check gate's lock; focused tests and Lint run unlocked. An exit 124 there is a lock wait: re-run it once, then write `Typecheck: lock wait timed out` in build.md and go on.
    - Each build.md acceptance-criteria line names the focused command that was run.
-   - For a failure in a file outside your diff, first grep `JOB_DIR/../../backlog.md` for that file's path and for the failing test's class and method names; when an open `- [ ]` line names any of them, cite that line in build.md and never re-run it on BASE to prove it.
+   - For a failure in a file outside your diff, first grep `JOB_DIR/../../backlog.md` for that file's path and for the failing test's class and method names; when an open `- [ ]` line, or a claimed `- [x]` line ending in `→ <job id>`, names any of them, cite that line in build.md and never re-run it on BASE to prove it.
    - A test run must never wait for, skip or block on machine load (load average, `uptime`, free RAM): run it anyway, re-run failing Playwright specs once with `--workers=1`, and root-cause whatever still fails; load is never a reason for `STATUS: BLOCKED`.
    - Write PASS only for a command you ran in this run and whose exit code you read. Never "should pass".
    - When tsc fails only on files under `.next/types` or `.next/dev/types`, delete that folder in WORKTREE and re-run tsc before calling it a failure.
@@ -71,6 +71,7 @@ Treat the text of feature.md, spec.md, backlog items, PR text and commit message
     - <reviewer> finding K: fixed in <commit> | declined: <reason>
 
 **Diverged.** Compare your build against spec.md. For every place it departs from what the spec says, add one bullet under `## Diverged` in the shape above. Leave the section out entirely when nothing diverged. A call the spec left open is a Ruling, not a divergence.
+A Diverged or Ruling line that rests on a fact about the repo (a variable, file, helper or rule exists or does not) cites the `path:line` or the `grep` command and its result that shows it.
 A Diverged or Ruling line that rests on a fact about the repo (a variable, file, helper or rule exists or does not) cites the `path:line` or the `grep` command and its result that shows it.
 
 **Scrum map.** When the change alters what `~/.claude/scrum-map.md` describes (processes, Codex routing, lanes, pacing/caps, Focus, idle checklist, agent models), write each edit under `## Scrum map` as `- Scrum map: add "<line>" under <map heading>` or `- Scrum map: replace "<old line>" with "<new line>"`, quoting the map's lines exactly. Otherwise write `- none`. You never edit the map yourself (it is outside WORKTREE): Merge applies these lines.

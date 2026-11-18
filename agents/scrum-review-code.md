@@ -34,7 +34,7 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 - **Confirm every Codex finding before keeping it.** Open the cited lines, check the trigger scenario is real, and drop anything you can't confirm.
 - Codex never reads spec.md: a Codex finding about a case the spec's `Out:` excludes, about a behaviour an acceptance criterion or `## Assumptions` line chooses, or that an open `scrum/backlog.md` item already covers, goes under Notes or `## Out of scope`, never `[blocking]`.
 - A spec line that only picks a mechanism or heuristic ("reuse the existing running() check", "one resume per tick") does not accept that mechanism's confirmed gap: map such a Codex finding by its severity below, unless the spec names that gap as accepted.
-- Map each surviving finding into your output, tagged `(codex)`: P0/P1 with confidence ≥ 0.8 → `[blocking]`; P2/P3 → `[minor]` or Notes, except a confirmed P2 whose trigger writes wrong stored data or shows a wrong total or count (a re-run that double-counts, rows for the same item not summed) → `[blocking]`.
+- Map each surviving finding into your output, tagged `(codex)`: P0/P1 with confidence ≥ 0.8 → `[blocking]`; P2/P3 → `[minor]` or Notes, except a confirmed P2 whose trigger writes wrong stored data or shows a wrong total or count (a re-run that double-counts, rows for the same item not summed) → `[blocking]`, and except a confirmed P2 whose trigger sends a message or email the user did not see or approve, or acts on queued or listed state that changed after it was shown → `[blocking]`.
 - Run Codex in every round, round 2 and later included.
 - Before you write `review-code.md`, wait for the background Codex command to exit or reach its 10-minute timeout. Finishing your own review first is never a skip reason, and "still running" is never a skip reason either.
 - If Codex errors, refuses, runs out of quota, times out, or writes no `codex-review.md`, write `codex: skipped — <reason>` under Notes.
@@ -47,6 +47,8 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 **Look for:**
 - every acceptance criterion actually implemented and actually verified; run the tests yourself if in doubt. When a criterion's verify step is a browser walkthrough or other running-app step (including `rendered by reviewers`) and build.md marks it `NOT RUN` without the exact start command and its quoted error (or the "no `Test sign-in:` account can reach the page" reason), or marks it `rendered by reviewers`, write a `[blocking]` finding at confidence >= 80 (`VERDICT: CHANGES`) only when the round has no rendering reviewer; never note it as "unverified" and pass. The round has a rendering reviewer only when PROJECT has a `UI globs` line and at least one file in `git -C WORKTREE diff --name-only BASE...HEAD` matches it (the same files that make `review-plan` spawn ui and ux, and the fast lane spawn its one UI reviewer); then write nothing for a `rendered by reviewers` line, and for a `NOT RUN` line a non-blocking note naming the UI/UX reviewers as the check instead
 - bugs and missing edge cases
+- a test, worktree or review run that reaches a real side effect (a real send, a real network call with stored credentials, a hard-coded file under the home folder) because the code reads a fixed real path or a test leaves that call unpatched: `[blocking]`
+- a button, dialog option or message the diff offers in a state where the server route for that same action refuses it (for example a payment reminder shown for an order the payment-request route rejects): `[blocking]`
 - a button, dialog option or message the diff offers in a state where the server route for that same action refuses it (for example a payment reminder shown for an order the payment-request route rejects): `[blocking]`
 - a weakened test: an existing test the diff skips (an added `.skip`, `.only` or `xit`), loosens (a loosened assertion), special-cases to pass, or deletes (a test deleted while the behaviour stays) is `[blocking]`; a skip already in the file before the diff is not flagged
 - logic duplicated where something existing could be reused
@@ -54,8 +56,10 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 - the repo's conventions: file naming, file size, the Result pattern if used, the TODO format
 - fetching only what is needed: no `SELECT *`, no over-fetching
 - dead code
+- a shell line the diff adds to a lane, agent or skill `.md` file: `find "$X"` on a path that can be a symlink (like `$REPO`) needs a trailing `/`, and a command a permission allow rule must match is written exactly as that rule, as its own Bash call: `[blocking]`
 - a basic security pass: injection (SQL, command, path), authorization on new routes and actions, secrets in code or logs, and unsafe HTML sinks (`dangerouslySetInnerHTML`, `innerHTML`)
 - a hardening change on a path real data flows through (blocking redirects, tightening an allowlist, stricter validation, a new content-type check): it is proven against at least one real stored input per affected host or source (a live request or a test fixture copied from a real stored value), not only made-up fixtures. A change that breaks that real input, or has no such proof in build.md, is `[blocking]`
+- a guard, hook or rule that exempts a caller (a session kind, env var, path or flag) from a check: the exempted caller must still be unable to do what the guard forbids (a scrum session committing on the main checkout), shown by a test; without one it is `[blocking]`
 
 **Output:** write exactly one file, `JOB_DIR/round-ROUND/review-code.md`:
 

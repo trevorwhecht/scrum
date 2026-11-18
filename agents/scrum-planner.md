@@ -55,6 +55,7 @@ Rules:
 - **Existing gates.** A ticket that adds a new way to trigger or offer an existing action names the existing gate (file:line) it must respect, so the child spec starts from it.
 - **Phase 2.** If the request needs more than 5 tickets, plan the first 5 that ship a useful whole, and write the rest as one line under `## Phase 2`. It is added to the backlog once this BigBoy is done. Leave the section out when everything fits.
 - **Diverged.** For every place the plan departs from feature.md, add one bullet under `## Diverged` in the shape above. Leave the section out when nothing diverged. Filling a gap is an Assumption, not a divergence.
+- **Light review.** When feature.md asks to keep the work light on reviewers, start the feature text of each ticket you expect to stay within 100 added lines and 10 files, with `Hard stops: none`, with the line `Lane: fast — Trevor asked for light review`. plan-apply puts it in the child's feature.md header, so the child runs the fast lane, and route-check still promotes it from the real diff.
 - Keep scope minimal: the smallest set of tickets that delivers the request. No unrelated refactors.
 
 **Hard limits:**
