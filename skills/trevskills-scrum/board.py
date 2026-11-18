@@ -4367,8 +4367,7 @@ def primary_account(now):
     """Name of the account whose seven_day resets_at is the soonest one after `now` (ACCOUNTS order within ties and
     when none has one): its unused quota is lost at reset, so it has no reserve."""
     def at(acc):
-        w = ((read_usage(acc.name) or {}).get("rate_limits") or {}).get("seven_day")
-        v = w.get("resets_at") if isinstance(w, dict) else None
+        v = (seven_day_window(acc.name) or {}).get("resets_at")
         return v if is_num(v) and v > now else float("inf")
     return min(accounts(), key=at).name  # min keeps the first of equal keys
 
@@ -4423,10 +4422,16 @@ def pick_account(now, live=0, prefer=None):
     return room[0][0], None if any(a is None for a in caps) else max(caps)
 
 
+def seven_day_window(account):
+    """The account's usage.json seven_day window dict, None when the file, rate_limits or window is not a dict."""
+    limits = (read_usage(account) or {}).get("rate_limits")
+    w = limits.get("seven_day") if isinstance(limits, dict) else None
+    return w if isinstance(w, dict) else None
+
+
 def seven_day_reset(account):
     """The account's seven_day resets_at as an int string, "" when usage.json has none."""
-    w = ((read_usage(account) or {}).get("rate_limits") or {}).get("seven_day")
-    at = w.get("resets_at") if isinstance(w, dict) else None
+    at = (seven_day_window(account) or {}).get("resets_at")
     return str(int(at)) if is_num(at) else ""
 
 

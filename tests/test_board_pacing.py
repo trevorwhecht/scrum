@@ -440,6 +440,15 @@ class PickAccountTest(AccountEnv):
         self.assertEqual(board.primary_account(NOW), "main")
         self.assertIn("reserve 7d", board.reserve_hit(board.accounts()[1], board.read_usage("owa"), NOW))
 
+    def test_non_dict_rate_limits_never_crash_primary_or_reset(self):
+        """Job 1146: a usage.json whose rate_limits is a list or string must not crash primary_account or seven_day_reset."""
+        self.write(self.main, seven=(95, 90000))
+        for bad in (["x"], "x", 5):
+            (self.owa / "usage.json").write_text(json.dumps({"rate_limits": bad, "written_at": NOW}))
+            self.assertEqual(board.primary_account(NOW), "main")
+            self.assertEqual(board.seven_day_reset("owa"), "")
+            self.assertEqual(board.pick_account(NOW)[0], "main")
+
     def test_default_reserve_holds_the_backup_at_90_seven_day_only(self):
         """Job 1139: ACCOUNTS gives main and owa the same reserve, 90 % 7d and no 5h value: a backup's 5h never holds it."""
         os.environ["SCRUM_ACCOUNTS"] = json.dumps([[n, str(d), r] for (n, _, r), d in zip(board.ACCOUNTS, (self.main, self.owa))])
