@@ -297,6 +297,53 @@ class MachineMeter(unittest.TestCase):
                 + ring("ok", 10, "10%", "Shop shopmac CPU load 10% of 4 cores · read 40s ago") + L("CPU") + cool()),
             plain, plain, plain])
 
+    def hog_meter(self, cases):
+        """renderMachine's innerHTML for each case's hogs value ('missing' leaves the key out)."""
+        return self.node_meter(f"console.log(JSON.stringify({json.dumps(cases)}.map(h => {{\n"
+                               "  const m = {...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, verdict: null};\n"
+                               "  if (h !== 'missing') m.hogs = h;\n"
+                               "  renderMachine(m); return el.innerHTML; })));")
+
+    METER = MAC('<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span>'
+                '<span class="lbl">RAM</span> ' + CPU_NONE + ' <span class="ok">disk 100 GB</span>')
+
+    def test_machine_meter_hogs(self):
+        """Job 1179: one line per CPU hog (serve.py report_hogs) after the meter groups, in list order; a missing name or
+        pct shows —."""
+        hog = lambda name, pct: f'<span class="hog"><span class="hogname" title="{name}">{name}</span> {pct} CPU</span>'
+        out = self.hog_meter([[{"name": "python3", "pid": 4242, "pct": 180, "minutes": 12}],
+                              [{"name": "b", "pid": 2, "pct": 300, "minutes": 11}, {"name": "a", "pid": 1, "pct": 120, "minutes": 10}],
+                              [{"pid": 3, "pct": 150, "minutes": 10}, {"name": "x", "pid": 4, "minutes": 10},
+                               {"name": None, "pid": 5, "pct": None, "minutes": 10}, {"name": "", "pid": 6, "pct": "x"}]])
+        self.assertEqual(out, [self.METER + hog("python3", "180%"),
+                               self.METER + hog("b", "300%") + hog("a", "120%"),
+                               self.METER + hog("—", "150%") + hog("x", "—") + hog("—", "—") + hog("—", "—")])
+        for bad in ("undefined", "null", "NaN"):
+            self.assertNotIn(bad, out[2])
+        text = DASHBOARD.read_text()
+        meter = re.search(r'<span id="machine"[^>]*>', text).group(0)
+        for phrase in ("outside the scrum", "over one core for 10+ minutes", "reported only, never stopped"):
+            self.assertIn(phrase, meter)
+
+    def test_machine_meter_no_hogs(self):
+        out = self.hog_meter([[], "missing", None, "python3", {"name": "x", "pct": 150}])
+        self.assertEqual(out, [self.METER] * 5, "no hogs: the meter is exactly as before")
+
+    def test_machine_meter_long_hog_name(self):
+        name = "Google Chrome Helper (Renderer) & Tools for Very Long Names!"
+        self.assertEqual(len(name), 60)
+        out = self.hog_meter([[{"name": name, "pid": 4242, "pct": 210, "minutes": 10}]])
+        shown = name.replace("&", "&amp;")
+        self.assertEqual(out, [self.METER + f'<span class="hog"><span class="hogname" title="{shown}">{shown}</span> 210% CPU</span>'])
+        text = DASHBOARD.read_text()
+        cut = re.search(r"#meters \.hogname\{[^}]*\}", text)
+        self.assertIsNotNone(cut)
+        for rule in ("max-width:24ch", "overflow:hidden", "text-overflow:ellipsis", "white-space:nowrap"):
+            self.assertIn(rule, cut.group(0), "a long name ends in …, its full text in the title")
+        line = re.search(r"#meters \.hog\{[^}]*\}", text)
+        self.assertIsNotNone(line)
+        self.assertIn("display:block", line.group(0), "each hog on its own line under the groups")
+
     def test_machine_meter_group_titles(self):
         """Row 1's groups each start with a plain title: This Mac, then Shop and the worker's name (escaped), even with
         one worker; the title is uppercased by CSS in the muted colour, so the markup keeps the name as configured."""

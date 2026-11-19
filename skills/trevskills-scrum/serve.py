@@ -3026,6 +3026,90 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
     return stopped
 
 
+HOG_PCT = 100  # report_hogs: % of one core every interval must be strictly above; fixed, not a setting
+HOG_SPAN_S = 600  # report_hogs: seconds a process must stay over HOG_PCT before it is reported; fixed, not a setting
+# ponytail: in-memory, like LEFTOVER_LOGGED; a serve.py restart starts every reading over and may log a hog once more
+HOG_READINGS: dict[tuple[int, str], dict] = {}  # (pid, command) -> {"readings": [(t, cpu min)], "run": t or None, "logged"}
+HOGS: list[dict] = []  # report_hogs' last list, replaced whole (never edited in place) so machine_status can read it
+
+
+def hog_name(cmd: str) -> str:
+    """The basename of the longest leading run of cmd's space-separated words that is a file (a Mac app binary's path
+    holds spaces, so Chrome's helper reads Google Chrome Helper, not Google), else of its first word ("" for "")."""
+    words = cmd.split(" ")
+    for n in range(len(words), 0, -1):
+        if os.path.isfile(" ".join(words[:n])):
+            return os.path.basename(" ".join(words[:n]))
+    return os.path.basename(words[0])
+
+
+def report_hogs(procs: list[tuple[int, int, float, str]] | None = None, now: float | None = None) -> list[dict]:
+    """Waste kind cpu-hog: report, never signal, each process that held more than one core for the whole last
+    HOG_SPAN_S. Per (pid, command) key (HOG_READINGS) each interval's rate, CPU minutes grown * 60 / wall seconds * 100,
+    above HOG_PCT starts or continues a run and any other rate ends it; a call whose now is not past a key's newest
+    reading adds nothing for it. A process qualifies once its run is HOG_SPAN_S old, and becomes {"name": hog_name,
+    "pid", "pct": its % of one core from the anchor (newest reading at or before now - HOG_SPAN_S) to now, "minutes":
+    whole minutes since its run started}, sorted by pct descending, then pid. A run's first report writes one
+    board.log_waste("cpu-hog") line. The list replaces HOGS and is returned. procs defaults to process_scan() and now
+    to time.monotonic(). SCRUM_IDLE_CLEANUP=0 returns [] with no scan, as stop_same_tests."""
+    global HOGS
+    if os.environ.get("SCRUM_IDLE_CLEANUP") == "0":
+        return []
+    procs = process_scan() if procs is None else procs
+    if not procs:  # ps failed: keep every reading, so the next good scan measures across the gap
+        return HOGS
+    now = time.monotonic() if now is None else now
+    live = {(pid, cmd) for pid, _, _, cmd in procs}
+    for key in [k for k in HOG_READINGS if k not in live]:  # gone, or its pid now runs another command
+        del HOG_READINGS[key]
+    due = []
+    for pid, _, cpu, cmd in procs:
+        st = HOG_READINGS.setdefault((pid, cmd), {"readings": [], "run": None, "logged": False})
+        rs = st["readings"]
+        if not rs or now > rs[-1][0]:
+            if rs:
+                t0, c0 = rs[-1]
+                if (cpu - c0) * 60 / (now - t0) * 100 > HOG_PCT:
+                    st["run"] = t0 if st["run"] is None else st["run"]
+                else:
+                    st.update(run=None, logged=False)
+            rs = rs + [(now, cpu)] if st["run"] is not None else [(now, cpu)]  # a reading before the run is never an anchor
+            old = [r for r in rs if r[0] <= now - HOG_SPAN_S]
+            st["readings"] = old[-1:] + [r for r in rs if r[0] > now - HOG_SPAN_S]
+        if st["run"] is not None and now - st["run"] >= HOG_SPAN_S:
+            due.append((pid, cmd))
+    parent, cmds, me = {p: pp for p, pp, _, _ in procs}, {p: c for p, _, _, c in procs}, os.getpid()
+    codex = lambda c: "@openai/codex" in c or any(os.path.basename(w) in ("codex", "codex.js") for w in c.split()[:2])
+
+    def scrum(pid):  # this process, a claude or codex line, or anything below one
+        seen = set()
+        while pid in cmds and pid not in seen:  # a ppid cycle in a bad scan ends the walk
+            if pid == me or board._is_claude(cmds[pid]) or codex(cmds[pid]):
+                return True
+            seen.add(pid)
+            pid = parent[pid]
+        return pid == me
+
+    due = [(pid, cmd) for pid, cmd in due if "/.claude/worktrees/" not in cmd and not scrum(pid)]
+    cwds = proc_cwds(sorted(pid for pid, _ in due)) if due else {}
+    repos = [os.path.realpath(repo) for repo in board.projects().values()] if due else []
+    hogs = []
+    for pid, cmd in due:
+        cwd = cwds.get(pid)  # a cwd lsof cannot read counts as outside the scrum: this pass only reports
+        if cwd and any(cwd == real or cwd.startswith(real + os.sep) for real in repos):
+            continue
+        st = HOG_READINGS[(pid, cmd)]
+        (t0, c0), (t1, c1) = st["readings"][0], st["readings"][-1]
+        pct = round((c1 - c0) * 60 / (t1 - t0) * 100)
+        hogs.append({"name": hog_name(cmd), "pid": pid, "pct": pct, "minutes": int((now - st["run"]) // 60)})
+        if not st["logged"]:
+            st["logged"] = True
+            board.log_waste("cpu-hog", project=None, jobs=[], pids=[], cpu_min=round(c1 - c0, 1), name=hogs[-1]["name"],
+                            pid=pid, pct=pct)
+    HOGS = sorted(hogs, key=lambda h: (-h["pct"], h["pid"]))
+    return HOGS
+
+
 OUTCOME_SKIP =("Permission allow rule",)  # CLI warnings written to the run log before real output
 
 
@@ -3203,6 +3287,7 @@ def watchdog_tick():
     Then stop_leftovers stops claude sessions still running a test, server or build after their job family finished.
     Then stop_two_sessions keeps one owner when two claude sessions work one job and stops the rest (asks when unclear).
     Then stop_same_tests stops the newer of two identical full Test or E2E runs on one clean commit and logs a full E2E rerun of a head e2e-full.json already holds.
+    Then report_hogs lists, never stops, each process outside the scrum over one core for 10+ minutes, for the meter.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard.
@@ -3342,6 +3427,10 @@ def watchdog_tick():
         stop_same_tests()
     except (Exception, SystemExit) as e:
         print(f"watchdog: same tests: {e}", file=sys.stderr, flush=True)
+    try:
+        report_hogs()
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: cpu hogs: {e}", file=sys.stderr, flush=True)
     if claim:
         try:
             auto_continue_tick(busy)
@@ -3830,7 +3919,8 @@ def machine_status():
     """The dashboard's machine-health meter: board.machine_ok's readings, thresholds and verdict. Disk is read on this
     file's volume (the dashboard spans every project, and they share one disk). machine_ok re-reads each value (a few
     ms each) so its verdict is exactly the gate's, whatever checks it grows. "history" and each shop entry's are
-    machine_history's sparkline readings, and each shop entry's "cooldown" is that worker's own flag (job 1185)."""
+    machine_history's sparkline readings, and each shop entry's "cooldown" is that worker's own flag (job 1185).
+    "hogs" is the list the watchdog's last report_hogs stored (no scan here)."""
     r = lambda v: None if v is None else round(v, 1)
     now, ram, cpu = time.time(), r(board.free_ram_pct()), r(board.cpu_load_pct())
     return {"free_ram_pct": ram, "swap_pct": r(board.swap_used_pct()),
@@ -3843,7 +3933,7 @@ def machine_status():
             "restart_waiting": restart_blockers(), "history": machine_history("mac", ram, cpu, now),
             "shop": [{**s, "cooldown": board.cooling_down(s["name"]),
                       "history": machine_history(("shop", s["name"]), s["free_ram_pct"], s["cpu_load_pct"], now)}
-                     for s in shop_stats()]}
+                     for s in shop_stats()], "hogs": HOGS}
 
 
 def machine_usage(now):
