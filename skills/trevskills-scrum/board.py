@@ -2550,11 +2550,11 @@ def _build_start(root, job_id):
     return None
 
 
-def _run_starts(root, job_id):
-    """Sorted epoch secs of every runs/<YYYYMMDD-HHMMSS>-<action>-<job_id>.log (one per board.spawn), any action."""
+def _run_starts(root, job_id, skip=()):
+    """Sorted epoch secs of every runs/<YYYYMMDD-HHMMSS>-<action>-<job_id>.log (one per board.spawn), any action but `skip`."""
     out = []
     for p in (Path(root) / "runs").glob(f"*-{job_id}.log"):
-        if re.fullmatch(r"\d{8}-\d{6}-[a-z]+-" + re.escape(job_id) + r"\.log", p.name):
+        if (m := re.fullmatch(r"\d{8}-\d{6}-([a-z]+)-" + re.escape(job_id) + r"\.log", p.name)) and m[1] not in skip:
             try:
                 out.append(datetime.strptime(p.name[:15], "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc).timestamp())
             except ValueError:
@@ -2595,8 +2595,14 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
     start = _build_start(root, job_id)
     if spec_at and start and start >= spec_at:
         queue = start - spec_at
-    else:
-        start, queue = spec_at, 0 if spec_at else None
+    else:  # no start log (a Run all or BigBoy child): round 1 starts at the claim or first run log after spec.md, the gap is Queue
+        runs = _run_starts(root, job_id, ("resume",))  # a resume continues a session, it never starts round 1
+        try:
+            claim = float((folder / "claimed-at.txt").read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            claim = None
+        first = None if start or not spec_at else claim if claim and claim > spec_at else next((r for r in runs if r > spec_at), None)
+        start, queue = (first, first - spec_at) if first else (spec_at, 0 if spec_at else None)
     times, hwaits, heads, prev = [], [], [], start or created
     mtimes = sorted(t for q in folder.rglob("*") if (t := _mtime(q))) if waits else []
     runs = _run_starts(root, job_id)
