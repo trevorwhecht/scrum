@@ -428,10 +428,23 @@ def held_gate(why):
     return next((tok for pre, tok in PULSE_GATES if pre in why), "other")
 
 
+PULSE_HOLDS: dict[Path, dict[str, float]] = {}  # resolved scrum/ root -> {hold token: epoch s}: what skipped a ready job or run-all start
+PULSE_HOLD_TTL_S = 180  # pulse_tick reports a hold this long after it was last seen (a few watchdog ticks)
+
+
+def note_hold(root, reason):
+    """Remember `reason` (a held-job token or a run-all start hold) for root's project (keyed by its resolved scrum/ path): pulse_tick adds `held:<reason>`
+    to that project's gates, so write_pulse counts the idle minutes as gated and names the gate."""
+    PULSE_HOLDS.setdefault(Path(root).resolve(), {})[reason] = time.time()
+
+
 def note_held(root, reason, job_ids):
-    """note_queue_gate(root, id, reason) for each of `job_ids` (a ready waiting job the tick passed over)."""
+    """note_queue_gate(root, id, reason) for each of `job_ids` (a ready waiting job the tick passed over), and
+    note_hold(root, reason) when there are any."""
     for job_id in job_ids:
         note_queue_gate(root, job_id, reason)
+    if job_ids:
+        note_hold(root, reason)
 
 
 def ready_waiting(root, parent_id=None):
@@ -462,6 +475,8 @@ def start_ready(project, root, parent_id, manual=False):
     if held := out.get("held"):
         tok = held if held == "ram_room" else held_gate(held)
         note_held(root, "usage_allowance" if tok == "other" else tok, ready_waiting(root, parent_id))
+    elif out.get("left") and not out["ready"]:  # `any` children kept for the shop Mac (cmd_ready's shop-first wait)
+        note_held(root, "runs_on_shop", out["left"])
     for child in out["ready"]:
         spawn(project, root, child, "start", f"/trevskills-scrum start {child}", manual=manual)
     return out
@@ -2233,21 +2248,27 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
         if auto_continue(root) is None or project not in busy:
             continue
         try:
+            if running(project, "run-all") and claimable(root):
+                note_hold(root, "run_all_running")  # its children start through start_ready, not a new sweep
             if not running(project, "run-all") and claimable(root):
                 refused = board.machine_ok(root, claim=True)
                 if refused and refused.startswith("free disk"):  # only this project's volume is full: try the next
+                    note_hold(root, held_gate(refused))
                     continue
-                if refused or board.finish_first(root):  # no room on this machine, or work in flight first
+                if refused or (fin := board.finish_first(root)):  # no room on this machine, or work in flight first
+                    note_hold(root, held_gate(refused or fin))
                     SWEEP_HELD.add(project)
                     return
                 live = board.live_sessions()
                 allow = board.pick_account(time.time(), live)[1]
                 if allow is not None and live >= allow:  # the 5h/7d budget is low; retry next tick
+                    note_hold(root, "usage_pace" if "pace 5h" in allow.reason else "usage_allowance")
                     SWEEP_HELD.add(project)
                     return
                 items = tuple(sorted(i["text"] for i in board.backlog_items(root)
                                      if not i["done"] and not i["setup"] and not i["waits"]))
                 if project in SWEEP_HELD and SWEEP_SEEN.get(project) == items:
+                    note_hold(root, "sweep_held")
                     continue  # a gate held since the last sweep and it has nothing new to claim
                 SWEEP_SEEN[project] = items
                 SWEEP_HELD.discard(project)
@@ -3548,7 +3569,9 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     job number, auto (Auto continue is set) and gates (runs_alone / overlap:<id> from board.resume_blocker, only when it
     blocks every one of those waiting jobs), and top-level gates: ram_room when board.ram_room(floor=0) < 1, plus a PULSE_GATES token (other when
     unrecognised) for the first project's machine_ok(claim=True) refusal other than COOLING. A gates list that raised
-    is null. guard: the first project's machine_ok(claim=False) refusal, else the allowance reason when
+    is null. A hold start_ready or auto_continue_tick noted (note_hold: a child left to the shop, finish_first, a running
+    run-all, SWEEP_HELD, a machine or usage hold) in the last PULSE_HOLD_TTL_S adds `held:<token>` to that project's gates, which
+    board.write_pulse counts as gated even beside claimable work. guard: the first project's machine_ok(claim=False) refusal, else the allowance reason when
     board.pick_account has no account or the live count reaches its allowance (the 5h pace included), else null.
     started: spawn's PULSE_STARTS since the last tick (copied and cleared in one step under PULSE_STARTS_LOCK; [] when
     serve.py started nothing). A project whose board.json is unreadable is left out. Unknown readings are null. When the first line is
@@ -3579,6 +3602,7 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
             gates = []
             for hit in hits if hits and all(hits) else []:  # one resumable job means the project is not gated
                 gates += ["runs_alone"] if hit == "this job runs alone" else [f"overlap:{i}" for i in hit.ids]
+            gates += [f"held:{r}" for r, t in PULSE_HOLDS.get(root.resolve(), {}).items() if now - t <= PULSE_HOLD_TTL_S]
             projects[project]["gates"] = list(dict.fromkeys(gates))
         except (Exception, SystemExit) as e:
             print(f"watchdog: pulse: {project}: gates: {e}", file=sys.stderr, flush=True)

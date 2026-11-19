@@ -3658,6 +3658,18 @@ class BoardTest(unittest.TestCase):
         p = self.child(parent)
         self.assertEqual((p["stage"], p.get("reason")), ("running", None))
 
+    def test_ready_blocked_parent_returns_no_shop_left(self):
+        """Job 1215: `left` in cmd_ready's output is only the children kept for the shop, never the BLOCKED branch's list."""
+        parent, (a, b) = self.runall(2)
+        board.cmd_ready(self.root, parent)
+        board.cmd_abort(self.root, a, requeue=False)
+        with board.locked_board(self.root) as bd:
+            board.find(bd, b).update(stage="waiting", depends_on=["ghost-1"])
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual(out["ready"], [])
+        self.assertTrue(self.child(parent)["reason"].startswith("bigboy blocked"), self.child(parent)["reason"])
+        self.assertNotIn("left", out)
+
     def test_runall_ready_parent_waits_and_resumes(self):
         parent, (a, b, c) = self.runall(3)
         board.cmd_ready(self.root, parent)
@@ -5280,6 +5292,18 @@ class BoardTest(unittest.TestCase):
         self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\nGated with claimable work: 0 min\n"
                       "Held by machine guard: 0 min\n"
                       "Idle held by cool down: 2 min\nIdle paused: Auto continue off: 3 min\n", text)
+
+    def test_pulse_held_gate_counts_beside_claimable_work(self):
+        """Job 1215: a `held:<token>` project gate gates a minute even with claimable work, and is named; a plain
+        project gate (overlap, runs_alone) does not."""
+        proj = lambda g: {"app": {"claimable": 2, "waiting": 1, "auto": True, "gates": g}}
+        text = self.pulse_ticks(
+            (0, 0, {"projects": proj(["held:finish_first"])}),  # gated
+            (60, 0, {"projects": proj(["runs_alone"])}),  # claimable work still starts: idle
+            (120, 0, {"projects": proj(["held:finish_first", "held:runs_on_shop"])}),  # gated, both named
+            (180, 1, {}))
+        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\n"
+                      "Gated with claimable work: 2 min (held:finish_first 2, held:runs_on_shop 1)\n", text)
 
     def test_pulse_paused_waits_not_gating(self):
         """Job 906: an auto-off project's ungated waiting work never makes an otherwise all-gated line idle."""
