@@ -1,0 +1,7 @@
+- stop_same_tests twin key now includes the checkout-relative cwd (new checkout_rel helper), so the same relative command run in different subdirectories is not paired
+- tests: different subdirectories are not twins; checkout_rel reads the git prefix
+
+Scrum lane: fast
+Fast lane: check gate + code review. Spec and review: scrum/jobs/1213-serve-py-stop-same-tests-add-the-checkou/
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
