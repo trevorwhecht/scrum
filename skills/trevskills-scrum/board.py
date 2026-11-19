@@ -219,6 +219,7 @@ STOP_TITLES = {
     "DEPENDENCY": "a job this one waited on finished, was aborted or was removed",
     "MD_CONTRADICTION": "a knowledge-save job found a fact that contradicts the target .md or the code",
     "DIGEST": "a weekly digest proposal, a digest edit that failed to apply, or a pipeline-health finding",
+    "TWO_SESSIONS": "two sessions were working the same job at once and the watchdog could not tell which one owns it",
 }
 
 # The scrum commands a needs-human question's option may run (shape only: the id need not be the asked job's).
@@ -1478,6 +1479,7 @@ PROCESSES = (
     ("Disk reclaim", ("reclaim_disk",), ()),
     ("Idle cleanup", ("idle_cleanup", "stop_dev_servers", "stop_orphans", "docker_tick", "prune_worktrees"), ()),
     ("Leftover sessions", ("stop_leftovers", "stop_tree", "process_scan"), ()),
+    ("Two sessions", ("stop_two_sessions",), ()),
     ("E2E lock reaps", ("e2e_lock_reap",), ()),
     ("Digest retry", ("digest_retry_tick",), ()),
     ("Weekly digest", ("weekly_tick",), ()),
