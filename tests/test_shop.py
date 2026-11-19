@@ -1913,6 +1913,8 @@ class StructureTest(unittest.TestCase):
             self.assertIn(phrase, copy, phrase)
         self.assertIn("`clone(<repo folder>, <origin URL>)`, `env_copy()` (copied or none), `profile_copy()` (copied or "
                       "none) and `start()`", text[text.index("## Dispatch"):])
+        self.assertIn("creates `cooldown-<alias>` beside the cool-down flag", text[text.index("## Dispatch"):],
+                      "each worker's own cool-down (job 1185)")
         self.assertIn("On a shop run (`SCRUM_SHOP` set), dispatch has already written `$F/project.md` from the main "
                       "Mac's: keep it, and still run first-run setup steps 1–3, which skip what is already there.",
                       (SKILL / "lanes" / "cloud.md").read_text())

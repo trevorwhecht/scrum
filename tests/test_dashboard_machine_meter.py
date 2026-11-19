@@ -43,6 +43,17 @@ def fn_body(text, name):
     return text[start:text.index("\n}\n", start) + 2]
 
 
+def meter_globals(text):
+    """renderMachine's globals: nothing focused, and no shop Mac's Cool down POST in flight (job 1185)."""
+    line = lambda s: text[text.index(s):text.index("\n", text.index(s))]
+    return "const document = {activeElement: null};\n" + line("const shopCoolPending = ") + "\n" + line("let machineLast = ") + "\n"
+
+
+def cool(worker="shopmac"):
+    """A shop Mac's own Cool down button, at the end of its group."""
+    return f' <button class="btn" type="button" data-worker="{worker}" aria-label="Cool down {worker}">Cool down</button>'
+
+
 class MachineMeter(unittest.TestCase):
     def test_machine_meter_markup_and_poll(self):
         text = DASHBOARD.read_text()
@@ -97,7 +108,7 @@ class MachineMeter(unittest.TestCase):
         cases = [[14, "ram"], [25, "ram"], [40, "ram"], [30, "swap"], [20, "swap"], [5, "swap"],
                  [5, "disk"], [15, "disk"], [100, "disk"], [None, "ram"],
                  [160, "cpu"], [145, "cpu"], [150, "cpu"], [140, "cpu"], [40, "cpu"], [None, "cpu"]]
-        script = (f"const $ = () => globalThis.el;\n{esc}\n{fn_body(text, 'machineLevel')}\n{fn_body(text, 'usagePart')}\n"
+        script = (f"const $ = () => globalThis.el;\n{meter_globals(text)}{esc}\n{fn_body(text, 'machineLevel')}\n{fn_body(text, 'usagePart')}\n"
                   f"{fn_body(text, 'renderMachine')}\n"
                   f"const s = {json.dumps(S)};\n"
                   f"const levels = {json.dumps(cases)}.map(([v, k]) => machineLevel(v, k, s));\n"
@@ -171,7 +182,7 @@ class MachineMeter(unittest.TestCase):
             raise unittest.SkipTest("node not on PATH")
         esc = text[text.index("const esc = "):text.index("\n", text.index("const esc = "))]
         slow = {"routes": {"GET /a": {"p95_ms": 2400, "count": 9}}, "disconnects": 3, "slow": True, "worst": "GET /a"}
-        script = (f"const $ = () => globalThis.el;\n{esc}\n{fn_body(text, 'machineLevel')}\n{fn_body(text, 'usagePart')}\n"
+        script = (f"const $ = () => globalThis.el;\n{meter_globals(text)}{esc}\n{fn_body(text, 'machineLevel')}\n{fn_body(text, 'usagePart')}\n"
                   f"{fn_body(text, 'renderMachine')}\n"
                   f"const s = {json.dumps(S)};\n"
                   "globalThis.el = {hidden: false, innerHTML: ''};\n"
@@ -210,8 +221,8 @@ class MachineMeter(unittest.TestCase):
         esc = text[text.index("const esc = "):text.index("\n", text.index("const esc = "))]
         ago = text[text.index("const ago = "):text.index("\n};\n", text.index("const ago = ")) + 3]
         script = (f"Date.now = () => {NOW} * 1000;\nconst $ = () => globalThis.el;\nglobalThis.el = {{hidden: false, innerHTML: ''}};\n"
-                  f"{esc}\n{ago}\n" + "".join(fn_body(text, f) + "\n" for f in ("machineLevel", "heldUntilText", "resetText", "usagePart",
-                                                                           "aiUsageHtml", "renderMachine"))
+                  f"{meter_globals(text)}{esc}\n{ago}\n" + "".join(fn_body(text, f) + "\n" for f in ("machineLevel", "heldUntilText", "resetText", "usagePart",
+                                                                                         "aiUsageHtml", "renderMachine"))
                   + f"const s = {json.dumps(S)};\n{body}")
         return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True,
                                          env={**os.environ, "TZ": "UTC"}).stdout)
@@ -251,15 +262,15 @@ class MachineMeter(unittest.TestCase):
         ring = lambda lvl, pct, text, tip: f'<span class="ring {lvl}" role="img" style="--pct:{pct}" aria-label="{tip}" title="{tip}">{text}</span>'
         mac = MAC(ring("ok", 60, "40%", "RAM 40% free · swap 1%") + L("RAM") + " " + CPU_NONE + ' <span class="ok">disk 100 GB</span>')
         shop = T("Shop shopmac", ring("ok", 59, "41%", "Shop shopmac RAM 41% free · read 40s ago") + L("RAM") + " "
-                 + ring("ok", 63, "63%", "Shop shopmac CPU load 63% of 4 cores · read 40s ago") + L("CPU"))
+                 + ring("ok", 63, "63%", "Shop shopmac CPU load 63% of 4 cores · read 40s ago") + L("CPU") + cool())
         self.assertEqual(out, [
             mac + shop,
-            mac + T("Shop shopmac", ring("none", 0, "—", "Shop shopmac unreachable · checked 40s ago") + L()),
+            mac + T("Shop shopmac", ring("none", 0, "—", "Shop shopmac unreachable · checked 40s ago") + L() + cool()),
             mac + T("Shop shopmac", ring("danger", 86, "14%", "Shop shopmac RAM 14% free · read 40s ago") + L("RAM") + " "
-                    + ring("danger", 100, "2x", "Shop shopmac CPU load 168% of 4 cores · read 40s ago") + L("CPU")),
+                    + ring("danger", 100, "2x", "Shop shopmac CPU load 168% of 4 cores · read 40s ago") + L("CPU") + cool()),
             mac + T("Shop shopmac", ring("none", 0, "—", "Shop shopmac RAM — · read 40s ago") + L("RAM") + " "
-                    + ring("ok", 63, "63%", "Shop shopmac CPU load 63% of 4 cores · read 40s ago") + L("CPU")),
-            mac + shop + T("Shop mac2", ring("none", 0, "—", "Shop mac2 unreachable · checked 40s ago") + L()),
+                    + ring("ok", 63, "63%", "Shop shopmac CPU load 63% of 4 cores · read 40s ago") + L("CPU") + cool()),
+            mac + shop + T("Shop mac2", ring("none", 0, "—", "Shop mac2 unreachable · checked 40s ago") + L() + cool("mac2")),
             mac, mac])
 
     def test_machine_meter_sparklines(self):
@@ -283,7 +294,7 @@ class MachineMeter(unittest.TestCase):
         self.assertEqual(out, [
             MAC(ram + L("RAM", spark("0,8.2 20,5.8 40,3.4")) + " " + cpu + L("CPU", spark("0,10.6 40,1")) + disk)
             + T("Shop shopmac", ring("ok", 50, "50%", "Shop shopmac RAM 50% free · read 40s ago") + L("RAM", spark("0,7 40,7")) + " "
-                + ring("ok", 10, "10%", "Shop shopmac CPU load 10% of 4 cores · read 40s ago") + L("CPU")),
+                + ring("ok", 10, "10%", "Shop shopmac CPU load 10% of 4 cores · read 40s ago") + L("CPU") + cool()),
             plain, plain, plain])
 
     def test_machine_meter_group_titles(self):

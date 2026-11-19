@@ -57,6 +57,7 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
         sparks: [...document.querySelectorAll("#meters .spark")].filter(s => s.checkVisibility()).length,
         bars: [...document.querySelectorAll("#meters .bar")].filter(s => s.checkVisibility()).length,
         usage: document.getElementById("aiUsage").textContent,
+        shopBtns: [...document.querySelectorAll("#machine button[data-worker]")].map(box),  // job 1185
         selects: Object.fromEntries(["filter", "laneFilter"].map(i => { const el = document.getElementById(i), c = document.createElement("span");
           c.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;font:" + getComputedStyle(el).font;
           c.textContent = el.selectedOptions[0].textContent; document.body.append(c); const w = c.getBoundingClientRect().width; c.remove();
@@ -169,7 +170,7 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         registry = Path(self.tmp.name) / "projects.json"
         registry.write_text(json.dumps([str(repo)]))
         patcher = mock.patch.dict(os.environ, CLAUDE_HOME=str(user), CLAUDE_MANAGED_DIR=str(managed), SCRUM_REGISTRY=str(registry),
-                                  SCRUM_USAGE=str(home / "no-usage.json"))
+                                  SCRUM_USAGE=str(home / "no-usage.json"), SCRUM_COOLDOWN=str(home / "no-cooldown"))
         patcher.start()
         self.addCleanup(patcher.stop)
         import serve  # noqa: E402
@@ -237,8 +238,10 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         got = self.browse("header")
         # 358 before job 550; 204 after; 215 with job 648's 44 px controls; 233 with job 1116's shop rings (a 2nd meter line),
         # still 235 with its usage bars, sparklines and the Checks button; 305 with job 1171's two titled rows (row 2 is
-        # 4 lines at 390 px: each account's or window's reading with its reset is about 200 px, so one fits per line)
-        self.assertLessEqual(got["height"], 310, got)
+        # 4 lines at 390 px: each account's or window's reading with its reset is about 200 px, so one fits per line);
+        # 322 (+12, measured 305 -> 317) with job 1185's 44 px Cool down button closing the Shop group, whose own line
+        # was the rings' 32 px
+        self.assertLessEqual(got["height"], 322, got)
         by = {c["id"]: c for c in got["children"]}
         # Job 1171: with the Codex button gone from the controls, Backlog and Digest close the second row and Pipelines and
         # AI-Settings share the third; the 10 controls still take 3 rows.
@@ -249,8 +252,8 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
 
     def test_header_held_and_fable_390px(self):
         """Job 1136: with the Claude group at its longest (allowance 0, held until, Fable near limit) the header stays
-        within the phone cap (job 1171's two rows: 319 px measured, as the held and Fable notes add a line to row 2), and
-        both selects are wide enough for their label."""
+        within the phone cap (job 1171's two rows: 319 px measured, as the held and Fable notes add a line to row 2; 331 px
+        with job 1185's 44 px Cool down button on the Shop group's line), and both selects are wide enough for their label."""
         import serve
         held = {"accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": time.time() + 86400, "max_pct": 90},
                              {"name": "owa", "seven_day_pct": 90, "resets_at": time.time() + 86400, "max_pct": 90}],
@@ -258,7 +261,7 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         with mock.patch.object(serve, "machine_usage", return_value=held):
             serve.MACHINE_CACHE.clear()
             got = self.browse("header")
-        self.assertLessEqual(got["height"], 325, got)
+        self.assertLessEqual(got["height"], 337, got)
         self.assertIn("held until", got["usage"], got)
         for i in ("filter", "laneFilter"):
             self.assertGreaterEqual(got["selects"][i]["clientWidth"], got["selects"][i]["labelWidth"], got)
@@ -296,6 +299,15 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         self.assertTrue(controls[0]["top"] >= ai["bottom"] - 0.5 or controls[0]["left"] >= got["meters"]["right"], got)
         self.assertGreaterEqual(ai["height"], 44, got)
         self.assertLessEqual(got["height"], 200, got)
+        self.shop_button_fits(got, controls)
+
+    def shop_button_fits(self, got, controls):
+        """Job 1185: the shop Mac's own Cool down button is a 44x44 tap target that stays on screen and above the buttons row."""
+        self.assertEqual(len(got["shopBtns"]), 1, got)
+        for b in got["shopBtns"]:
+            self.assertGreaterEqual(min(b["width"], b["height"]), 44, b)
+            self.assertGreaterEqual(b["top"], 0, b)
+            self.assertLessEqual(b["bottom"], min(c["top"] for c in controls), (b, got))
 
     def test_header_one_row_wide(self):
         """Job 1171: where everything fits (2200 px), the title and the two stacked meter rows sit on the left and the
@@ -334,6 +346,8 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         for c in controls:
             self.assertGreaterEqual(c["height"], 44, c)
             self.assertLessEqual(c["right"], 390 - 12 + 0.5, c)
+        self.shop_button_fits(got, controls)
+        self.assertLessEqual(got["shopBtns"][0]["right"], 390 - 12 + 0.5, got)
 
     def test_viewer_tabs_close_44_flush_right(self):
         got = self.browse("tabs")

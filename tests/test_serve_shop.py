@@ -169,6 +169,64 @@ class ShopTickTest(unittest.TestCase):
         self.assertEqual(out, "shop: mm: 043-a: started on shopmac (pid 4242, account owa)\n")
         self.assertEqual(self.job(root, "043-a")["stage"], "cloud")
 
+    def test_cooled_worker_gets_no_new_work(self):
+        """Job 1185: a worker whose own flag (cooldown-<alias> beside board.cooldown_path()) exists is skipped by
+        shop_worker, unprobed, so neither shop_tick nor shop-room.json sends it work; without the flag it is back.
+        Its flag never cools this Mac, and this Mac's flag never cools a worker."""
+        self.workers("shopmac 2 owa,main\nnewmac 1 main\n")
+        flag = self.base / "cooldown"
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
+            (self.base / "cooldown-shopmac").write_text("")
+            self.assertEqual([w.alias for w, _ in self.serve.shop_worker()], ["newmac"])
+            self.assertEqual(self.sh.ready.call_args_list, [mock.call(alias="newmac")], "a cooled worker is not probed")
+            self.assertFalse(self.board.cooling_down(), "a worker's flag is not this Mac's cool-down")
+            self.serve.write_shop_room()
+            self.assertEqual(self.room_file()["workers"], ["newmac"])
+            root = self.project("mm", self.runall({"id": "043-a", "parallel": True, "likely": ["src/a.py"]},
+                                                  {"id": "044-b", "parallel": True, "likely": ["src/b.py"]}))
+            self.assertEqual(self.tick(), (True, "shop: mm: 043-a: started on newmac (pid 4242, account main)\n", ""))
+            self.sh.reset_mock()
+            self.assertEqual(self.tick(), (False, "", ""), "newmac full, shopmac cooled")
+            self.assertEqual(self.calls(), [])
+            self.assertEqual(self.job(root, "044-b")["stage"], "waiting")
+            (self.base / "cooldown-shopmac").unlink()
+            flag.write_text("")  # this Mac's cool-down on: the shop still works
+            self.assertEqual([w.alias for w, _ in self.serve.shop_worker()], ["shopmac"])
+            self.assertEqual(self.tick(), (True, "shop: mm: 044-b: started on shopmac (pid 4242, account owa)\n", ""))
+
+    def test_cooldown_api_per_worker(self):
+        """Job 1185: set_cooldown(on, worker=<alias>) sets only that worker's flag, explicitly on or off; a worker that is
+        not a current shop.workers() alias is a 400 that touches nothing; no worker is this Mac's flag, as before.
+        machine_status's shop entries carry each worker's cooldown."""
+        self.workers("shopmac 2 owa,main\nnewmac 1 main\n")
+        flag = self.base / "state" / "cooldown"
+        names = lambda: sorted(p.name for p in flag.parent.iterdir()) if flag.parent.is_dir() else []
+        bad = (400, {"error": "worker must be a current shop Mac"})
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
+            for _ in range(2):  # idempotent
+                self.assertEqual(self.serve.set_cooldown(True, "newmac"), (200, {"cooldown": True, "worker": "newmac"}))
+            self.assertEqual(names(), ["cooldown-newmac"], "creates the dir and only newmac's flag")
+            self.assertEqual([self.board.cooling_down(w) for w in ("newmac", "shopmac", None)], [True, False, False])
+            for worker in ("third", "../cooldown", "-newmac", "newmac/x", "", 3, ["newmac"], True):
+                with self.subTest(worker=worker):
+                    self.assertEqual(self.serve.set_cooldown(False, worker), bad)
+                    self.assertEqual(names(), ["cooldown-newmac"], "left as it was")
+            self.assertEqual(self.serve.set_cooldown("yes", "newmac"), (400, {"error": "on must be true or false"}))
+            self.assertEqual(self.serve.set_cooldown(True), (200, {"cooldown": True}))
+            self.assertEqual(names(), ["cooldown", "cooldown-newmac"], "no worker: this Mac's own flag, as before")
+            stats = [{"name": "shopmac", "free_ram_pct": 40.0, "cpu_load_pct": 10.0, "cpu_cores": 4, "at": 1000.0},
+                     {"name": "newmac", "free_ram_pct": None, "cpu_load_pct": None, "cpu_cores": None, "at": 1000.0}]
+            with mock.patch.object(self.serve, "shop_stats", return_value=stats), \
+                    mock.patch.object(self.serve, "machine_history", return_value={}):
+                status = self.serve.machine_status()
+            self.assertEqual([(e["name"], e["cooldown"]) for e in status["shop"]], [("shopmac", False), ("newmac", True)])
+            self.assertIs(status["cooldown"], True)
+            self.assertEqual(self.serve.set_cooldown(False, "newmac"), (200, {"cooldown": False, "worker": "newmac"}))
+            self.assertEqual(names(), ["cooldown"], "removes only newmac's flag")
+            self.workers("newmac 1 main\n")  # shopmac left workers.txt: its button is refused, not a stray flag
+            self.assertEqual(self.serve.set_cooldown(True, "shopmac"), bad)
+            self.assertEqual(names(), ["cooldown"])
+
     def test_fast_job_goes_before_older_standard_job(self):
         root = self.project("mm", self.runall({"id": "043-a", "lane": "standard"}, {"id": "090-b", "lane": "fast"}))
         flag = self.base / "cooldown"
