@@ -4617,16 +4617,18 @@ def account_reserve(acc, now):
 
 def reserve_hit(acc, usage, now):
     """Why the account's reserve (account_reserve) keeps it for Trevor, or None: a window with resets_at > now whose
-    used % is at or above its reserve value (a None value never holds). written_at is ignored (used % only grows
-    inside one window)."""
+    used % is at or above its reserve value. A None value, or no reserve at all (the primary), holds only a used-up
+    window (100 %, job 1216: Claude refuses it, so no account is ever picked full). written_at is ignored (used %
+    only grows inside one window)."""
     limits = usage.get("rate_limits") if isinstance(usage, dict) else None
-    if not isinstance(limits, dict) or not (reserve := account_reserve(acc, now)):
+    if not isinstance(limits, dict):
         return None
-    for (key, label), cap in zip(WINDOWS, reserve):
+    for (key, label), cap in zip(WINDOWS, account_reserve(acc, now) or (None, None)):
+        cap = 100 if cap is None else cap
         w = limits.get(key)
-        if cap is not None and isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) \
+        if isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) \
                 and w["resets_at"] > now and w["used_percentage"] >= cap:
-            return f"reserve {label} {round(w['used_percentage'])}% used (keeps {cap}%)"
+            return f"reserve {label} {round(w['used_percentage'])}% used (keeps {cap}%)" if cap < 100 else f"{label} used up"
     return None
 
 
@@ -4635,7 +4637,7 @@ def pick_account(now, live=0, prefer=None):
     first (no future 7d window last, ACCOUNTS order within ties), else (None, Allowance(0, reason)) naming every account and why. Room: no limit_until marker ahead, usage_allowance None or above the live
     count (`live` an int or a list), and no
     reserve window reached (reserve_hit). With a backup listed, the primary (primary_account) skips usage_allowance
-    (job 1182: no pace, hold or taper), so it stops only on its limit marker or PRIMARY_RESERVE (job 1208); a lone account keeps them. allowance is the claims cap across every account with room (job 1130):
+    (job 1182: no pace, hold or taper), so it stops only on its limit marker, PRIMARY_RESERVE (job 1208) or a used-up window (job 1216); a lone account keeps them. allowance is the claims cap across every account with room (job 1130):
     None when any of them has no taper, else the largest of their allowances."""
     accs = accounts()
     why, room = [], []
