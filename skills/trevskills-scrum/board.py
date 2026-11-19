@@ -3808,7 +3808,7 @@ def feature_text(text: str) -> str:
     hdr = {}
     for m in re.finditer(r"\b(Lane|Complex):\s*(\w+\b.*?)(?=\s+(?:Lane|Complex):|\Z)", text, re.S):
         key, rest = m[1].title(), " ".join(m[2].split())
-        if rest.split()[0].lower() in (LANES if key == "Lane" else ("yes", "no")):
+        if re.match(r"\w+", rest)[0].lower() in (LANES if key == "Lane" else ("yes", "no")):  # "debug," / "no." count
             hdr[key] = rest
     first, _, more = text.rstrip("\n").partition("\n")
     return first + "\n" + "".join(f"{k}: {v}\n" for k, v in hdr.items()) + (more + "\n" if more else "")
