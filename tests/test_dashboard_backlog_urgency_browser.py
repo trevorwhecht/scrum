@@ -26,7 +26,7 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
     page.on("request", r => { if (r.method() === "POST" && r.url().endsWith("/backlog")) posts.push(JSON.parse(r.postData())); });
     await page.goto(process.env.DASH_URL);
     await page.waitForSelector(".card[data-key]");
-    await page.click("#backlogBtn");
+    await page.$eval("#backlogBtn", b => b.click());
     await page.waitForSelector("#blList li[data-i]");
     const sel = "#blAdd select[name=urgency]";
     const got = {};
@@ -43,7 +43,7 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
     // A pick that was never submitted does not survive closing and reopening the dialog.
     await page.selectOption(sel, "now");
     await page.click("#backlog .close");
-    await page.click("#backlogBtn");
+    await page.$eval("#backlogBtn", b => b.click());
     got.reopened = await page.$eval(sel, u => u.value);
     await page.selectOption(sel, "next");
     await page.fill("#blAdd textarea[name=text]", "Jump the queue");

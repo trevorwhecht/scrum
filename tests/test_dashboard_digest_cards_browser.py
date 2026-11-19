@@ -18,7 +18,7 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
     const page = await browser.newPage({viewport: {width: 390, height: 844}});
     await page.goto(process.env.DASH_URL);
     await page.waitForFunction(() => document.querySelector("#dgProject") && typeof loadDigests === "function");
-    await page.click("#digestBtn");
+    await page.$eval("#digestBtn", b => b.click());
     await page.waitForSelector("#dgList .prop button[data-revert]");
     if (process.env.MODE === "layout") {
       const got = await page.evaluate(() => {

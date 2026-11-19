@@ -133,7 +133,7 @@ class ChecksMarkup(unittest.TestCase):
         # shares their row (job 1171: the Codex button moved into the meters' row 2).
         self.assertLess(text.index('id="autoOff"'), btn.start())
         self.assertLess(text.index('<div id="controls">'), btn.start())
-        self.assertLess(btn.start(), text.index('id="filter"'))
+        self.assertLess(text.index('<div id="menu">'), btn.start())  # job 1225: the buttons sit in the #menu panel after the selects
         self.assertLess(btn.start(), text.index("</header>"))
         dialog = text[text.index('<dialog id="checks" aria-label="Checks">'):]
         dialog = dialog[:dialog.index("</dialog>")]

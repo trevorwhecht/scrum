@@ -15,7 +15,7 @@ class ProjectRankDialog(unittest.TestCase):
     def test_markup_and_click(self):
         text = DASHBOARD.read_text()
         header = text[text.index("<header>"):text.index("</header>")]
-        self.assertRegex(header, r'<select id="filter"[^>]*>.*?</select>\s*<button class="btn" id="rankBtn" type="button"[^>]*>Rank</button>')
+        self.assertRegex(header, r'id="checksBtn"[^>]*>Checks</button>\s*<button class="btn" id="rankBtn" type="button"[^>]*>Rank</button>')  # job 1225: in the #menu panel
         dialog = text[text.index('<dialog id="rank" aria-label="Project rank">'):]
         dialog = dialog[:dialog.index("</dialog>")]
         self.assertRegex(dialog, r'<p class="error" id="rankError" aria-live="polite"></p>')
