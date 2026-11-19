@@ -168,6 +168,7 @@ class LaunchCpuGate(ServeBase):
         path.write_text(gate + "\n")
         old = path.stat().st_mtime - age_secs
         os.utime(path, (old, old))
+        self.addCleanup(lambda: [self.edit_job(j, stage="done") for j in (child, parent)])  # the board root is shared
         return child
 
     def cpu_first_here(self):

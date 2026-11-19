@@ -180,6 +180,8 @@ def note_queue_gate(root, job_id, gate, name="queue-gates.txt"):
         if head(gate) not in (map(head, path.read_text(encoding="utf-8").split()) if path.exists() else []):
             with path.open("a", encoding="utf-8") as f:
                 f.write(gate + "\n")
+        else:
+            os.utime(path)  # held again: the file's mtime is when the gate was last hit (gate_heads reads it)
     except OSError:
         pass
 
@@ -263,10 +265,17 @@ def cpu_held(root, job):
     return "cpu_load" in gate_heads(root, job)
 
 
+GATE_FRESH_SECS = 900  # a queue-gates.txt untouched this long names no current hold (note_queue_gate touches it each time)
+
+
 def gate_heads(root, job):
-    """The gate names (text before `(`) in queue-gates.txt; empty when unreadable."""
+    """The gate names (text before `(`) in queue-gates.txt; empty when unreadable or last noted over GATE_FRESH_SECS ago
+    (the file keeps every gate a job ever hit, so an old line is not a current hold: job 1222)."""
     try:
-        gates = (Path(root) / "jobs" / str(job["id"]) / "queue-gates.txt").read_text(encoding="utf-8").split()
+        path = Path(root) / "jobs" / str(job["id"]) / "queue-gates.txt"
+        if time.time() - path.stat().st_mtime > GATE_FRESH_SECS:
+            return set()
+        gates = path.read_text(encoding="utf-8").split()
     except OSError:
         return set()
     return {g.split("(", 1)[0] for g in gates}
@@ -723,6 +732,9 @@ def idle_claim(project, root, jobs) -> bool:
     if not ok:
         return False
     pick = min(ok, key=lambda j: (len(files[j["id"]]), j["id"]))
+    head = cpu_first()  # spawn holds every other start behind it, so it must be a job some path starts (job 1222)
+    if head and head[0] == project and (lead := next((j for j in ok if j["id"] == head[1]), None)):
+        pick = lead
     if cpu_hot(bool(pick.get("queued_launch") and pick.get("play_queued_manual"))) \
             or not take_room():
         return False
