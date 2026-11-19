@@ -40,6 +40,7 @@ Find each name with `grep -n 'def <name>'`; never trust a line number. Every fun
 ## Tests
 - `tests/test_board.py` covers board.py; `tests/test_serve.py` covers serve.py (`AutoResumeTest` covers `auto_resume`).
 - Find a function's tests with `grep -n '<name>' tests/*.py`.
+- A new serve.py watchdog pass (a `*_tick` def, or a function `watchdog_tick` calls) needs a `(name, (funcs,), (scrum files,))` entry in board.py `PROCESSES`, or `ProcessCoverageTest` in `tests/test_processes.py` fails; each new entry also raises that file's three section-count pins by one (`text.count("\n## ")` and both `Runs: none logged since the last digest` counts).
 
 ## dashboard.html (`skills/trevskills-scrum/dashboard.html`)
 - One static file served by serve.py. Locate code by grepping element ids, CSS classes or function names, never line numbers.
