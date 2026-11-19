@@ -3054,7 +3054,12 @@ def report_hogs(procs: list[tuple[int, int, float, str]] | None = None, now: flo
     to time.monotonic()."""
     global HOGS
     procs = process_scan() if procs is None else procs
+    if not procs:  # ps failed: keep every reading, so the next good scan measures across the gap
+        return HOGS
     now = time.monotonic() if now is None else now
+    live = {(pid, cmd) for pid, _, _, cmd in procs}
+    for key in [k for k in HOG_READINGS if k not in live]:  # gone, or its pid now runs another command
+        del HOG_READINGS[key]
     due = []
     for pid, _, cpu, cmd in procs:
         st = HOG_READINGS.setdefault((pid, cmd), {"readings": [], "run": None, "logged": False})
@@ -3071,8 +3076,26 @@ def report_hogs(procs: list[tuple[int, int, float, str]] | None = None, now: flo
             st["readings"] = old[-1:] + [r for r in rs if r[0] > now - HOG_SPAN_S]
         if st["run"] is not None and now - st["run"] >= HOG_SPAN_S:
             due.append((pid, cmd))
+    parent, cmds, me = {p: pp for p, pp, _, _ in procs}, {p: c for p, _, _, c in procs}, os.getpid()
+    codex = lambda c: "@openai/codex" in c or any(os.path.basename(w) in ("codex", "codex.js") for w in c.split()[:2])
+
+    def scrum(pid):  # this process, a claude or codex line, or anything below one
+        seen = set()
+        while pid in cmds and pid not in seen:  # a ppid cycle in a bad scan ends the walk
+            if pid == me or board._is_claude(cmds[pid]) or codex(cmds[pid]):
+                return True
+            seen.add(pid)
+            pid = parent[pid]
+        return pid == me
+
+    due = [(pid, cmd) for pid, cmd in due if "/.claude/worktrees/" not in cmd and not scrum(pid)]
+    cwds = proc_cwds(sorted(pid for pid, _ in due)) if due else {}
+    repos = [os.path.realpath(repo) for repo in board.projects().values()] if due else []
     hogs = []
     for pid, cmd in due:
+        cwd = cwds.get(pid)  # a cwd lsof cannot read counts as outside the scrum: this pass only reports
+        if cwd and any(cwd == real or cwd.startswith(real + os.sep) for real in repos):
+            continue
         st = HOG_READINGS[(pid, cmd)]
         (t0, c0), (t1, c1) = st["readings"][0], st["readings"][-1]
         pct = round((c1 - c0) * 60 / (t1 - t0) * 100)
