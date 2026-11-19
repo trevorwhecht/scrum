@@ -1,0 +1,7 @@
+- Cloud-home tail now runs Merge step 7's Scrum map and, for a job with a parent, BigBoy chaining, after Fast-forward main and before the Digest check, for a done job only
+- Pinned in test_skill_cloud_lane (order, parent condition, done paragraph)
+
+Scrum lane: fast
+Fast lane: check gate + code review. Spec and review: scrum/jobs/1204-cloud-home-tail-misses-two-merge-step-7/
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
