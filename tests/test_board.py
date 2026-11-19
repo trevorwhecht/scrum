@@ -12076,6 +12076,12 @@ class TranscriptTokensTest(unittest.TestCase):
                                (5, "subagent", "125-z", "trevskills-scrum"),
                                (6, "subagent", None, None)])
 
+    def test_transcript_tokens_symlinked_project_dir_read_once(self):
+        self.write("p/s1.jsonl", [prompt("hi"), reply(T0, "m", input_tokens=1)])
+        self.write("p/s1/subagents/agent-aa.jsonl", [reply(T0 + 1, "x", input_tokens=2)])
+        (self.dir / "alias").symlink_to(self.dir / "p", target_is_directory=True)
+        self.assertEqual([r["input_tokens"] for r in self.rows()], [1, 2])
+
     def test_transcript_tokens_malformed_lines(self):
         good = reply(T0, "ok", input_tokens=9, output_tokens="lots", cache_read_input_tokens=None,
                      cache_creation_input_tokens=True)
