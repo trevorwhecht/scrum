@@ -1301,8 +1301,9 @@ def auto_resume(project, root, jobs):
     reason, or a job paused by Trevor, is left on the board. A refused restart costs nothing. A job held in its
     stage (limitResetAt) is resumed 120 s after that reset, under the same slot cap and try counter; a limit-killed
     job stalled in a WATCHED stage is moved back to that stage and held the same way (as respawn_exited does). True
-    when it resumed a job this tick or a limit-stalled job is still in its auto-resume window (waiting for its reset,
-    its next try or a free slot), so watchdog_tick claims nothing new this tick. Each resume first takes a session
+    when it resumed a job this tick, moved a limit-killed job into its hold, or a stalled job waits for a free slot or
+    a queue, so watchdog_tick claims nothing new this tick; a job that only waits for its next try or its reset is not
+    busy (job 1219), so the claim paths run and start work or name their hold. Each resume first takes a session
     from the tick's budget (take_room); with none left the job waits on a slot without spending a try. A job parked
     on the E2E queue also waits, spending no try, while another job sits in check (not paused, not stalled, not
     limit-held: a limit-held check job runs nothing and holds nothing) in this project or in any registered project
@@ -1445,8 +1446,7 @@ def auto_resume(project, root, jobs):
                 AUTO_RESUME[key] = [tries + 1, now]
                 resume_job(project, root, job, jobs)
             continue
-        if now < due:
-            busy = True
+        if now < due:  # waits for its next try: holds no claim (job 1219)
             continue
         hit, reset, fixed = limit_reset(root, job)
         if not hit:
@@ -1475,15 +1475,16 @@ def auto_resume(project, root, jobs):
                 if resume_job(project, root, job, jobs):  # a launch that raised (CLI missing) or was queued spends no retry
                     stall_mark(key, m)
             continue
-        busy = True  # a limit-stalled job in its window: resumed now, or waiting for its reset or a slot
         stage = board.stall_stage(job)
         if stage in board.WATCHED:  # a reset already past (or none named) waits AUTO_RESUME_EVERY
+            busy = True  # moved into its limit hold this tick
             hold_limited(root, job, int(reset) if reset and reset + 120 > now else int(now) + AUTO_RESUME_EVERY,
                          stage, fixed=fixed)
             continue
         if reset and reset + 120 > now and due < reset + 120:
-            AUTO_RESUME[key] = [tries, reset + 120]  # wait for the reset itself, not a blind retry
+            AUTO_RESUME[key] = [tries, reset + 120]  # wait for the reset itself, not a blind retry; holds no claim
             continue
+        busy = True  # resumed now, or waiting for a slot
         if refused(job) or not room(job):  # no slot: retry next tick without spending a try
             continue
         AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
@@ -1561,7 +1562,7 @@ def resume_held(project, root, job, jobs, now):
     """auto_resume for a limit-held job: wait for reset + 120 s and a free slot, then resume it in its stage; at AUTO_RESUME_MAX
     tries it is parked for Trevor (park_spent). Before the reset it resumes at once when board.pick_account offers an
     account other than the one the job ran on (board.spawn records the new one). True when it resumed the job
-    or still waits for the reset or a slot."""
+    or waits for a slot; waiting for the reset is not busy (job 1219)."""
     key = f"{project}/{job['id']}"
     tries = AUTO_RESUME.get(key, [0, 0.0])[0]
     if running(project, job["id"]):
@@ -1569,7 +1570,7 @@ def resume_held(project, root, job, jobs, now):
     if now < job["limitResetAt"] + 120:
         other = board.pick_account(now)[0]  # job 1184: no prefer, so a backup job resumes early on the primary
         if other in (None, job.get("account") or board.accounts()[0].name):
-            return True
+            return False  # waits for its reset: holds no claim; the claim paths name a usage hold (job 1219)
     if tries >= AUTO_RESUME_MAX:
         park_spent(root, job, job["stage"], AUTO_RESUME_MAX)
         return False
@@ -2232,7 +2233,8 @@ SWEEP_HELD: set[str] = set()  # projects a machine gate held since that start
 
 
 def auto_continue_tick(busy: dict[str, bool]) -> None:
-    """watchdog_tick calls this only when its resume pass resumed nothing, nothing waits and nothing was auto-played.
+    """watchdog_tick calls this only when its resume pass resumed nothing, nothing waits on a slot or queue (a stall
+    waiting only for its next try or reset does not count) and nothing was auto-played.
     Start one headless run-all in every opted-in project (`- Auto continue: <n>`; n orders nothing) with no
     auto-started run-all still running and a claimable backlog line, in rank order: board.projects() order, which the
     dashboard's Rank dialog sets. A live, paused or stalled tree never holds it (job 751): cmd_ready keeps the new
@@ -3315,7 +3317,8 @@ def watchdog_tick():
        then, in its own guard, a due UI sweep there (ui_sweep_tick).
        Each parked Terminal batch gets its lilguy window opened once (terminal_batch_tick). After every project's
        resumes, in each project where none of the three started anything, idle_claim starts one long-held job.
-    2. Auto-play: when nothing was resumed and nothing waits, and no headless session runs, Play the oldest paused job.
+    2. Auto-play: when nothing was resumed and nothing waits on a slot or queue (a stall waiting only for its next try or
+       reset does not count), and no headless session runs, Play the oldest paused job.
     3. Claim: only when passes 1 and 2 started nothing and nothing waits (and, in each claim, board.finish_first finds
        no job anywhere on the Check or E2E queue or stalled on the machine gate), start the ready siblings of flagged children,
        start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run

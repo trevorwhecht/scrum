@@ -10295,11 +10295,15 @@ class AutoContinueTest(unittest.TestCase):
         self.assertEqual(self.tick(), [("a", root, "001-x", "resume", "/trevskills-scrum resume 001-x")])
 
     def test_limit_stalled_pending_counts_busy(self):
-        self.limit_stalled("rate_limit: rejected (five_hour) resets_at=4102444800")  # the reset is years away
-        self.assertEqual(self.tick(), [], "deferred to the reset: no run-all beside it")
+        """Job 1219: a stall that only waits for its reset or its next try holds no claim."""
+        root = self.limit_stalled("rate_limit: rejected (five_hour) resets_at=4102444800")  # the reset is years away
+        self.assertEqual(self.tick(), [("a", root, "run-all", "run-all", "/trevskills-scrum run-all")],
+                         "deferred to the reset: the run-all starts beside it")
         self.limit_stalled("rate_limit: rejected (five_hour) resets_at=1700000000")
         self.serve.AUTO_RESUME["a/001-x"] = [1, time.time() + 600]  # tried once, next try in 10 min
-        self.assertEqual(self.tick(), [], "between tries: no run-all beside it")
+        self.serve.SWEEP_SEEN.clear()
+        self.assertEqual(self.tick(), [("a", root, "run-all", "run-all", "/trevskills-scrum run-all")],
+                         "between tries: the run-all starts beside it")
 
     def test_exhausted_stall_parks_and_non_limit_stall_resumes(self):
         root = self.limit_stalled("rate_limit: rejected (five_hour) resets_at=1700000000")
@@ -10323,6 +10327,77 @@ class AutoContinueTest(unittest.TestCase):
         with mock.patch("sys.stderr", new=__import__("io").StringIO()) as e:
             self.assertEqual(self.tick(), self.started("good"))
         self.assertTrue(e.getvalue().startswith("watchdog: bad: "), e.getvalue())
+
+
+class WatchdogIdleClaimableTest(unittest.TestCase):
+    """Job 1219 (digest 128): a stalled job that only waits for its next try or its reset no longer holds new claims
+    silently. With claimable work and no session, a watchdog tick starts the run-all or names the hold in the pulse."""
+
+    def setUp(self):
+        import serve
+        self.serve, self.board = serve, serve.board
+        self.base = Path(tempfile.mkdtemp())
+        self.repo = self.base / "app"
+        self.root = self.repo / "scrum"
+        (self.root / "jobs").mkdir(parents=True)
+        (self.root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n")
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Open item one\n- [ ] Open item two\n")
+        now = self.board.now()
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "1617-shop", "stage": "cloud", "shop": "4242", "worker": "shopmac", "account": "main",
+             "started_by": "shop", "updatedAt": now, "reason": None},
+            {"id": "1600-net", "stage": "build", "stalled": True, "reason": "stalled: no live session",
+             "runlog": "runs/1600-net.log", "updatedAt": now}]}))
+        (self.root / "runs").mkdir()
+        (self.root / "runs" / "1600-net.log").write_text("working...\nError: getaddrinfo ENOTFOUND api.anthropic.com\n")
+        self.pulse = self.base / "pulse.log"
+        env = mock.patch.dict(os.environ, SCRUM_REGISTRY=str(self.base / "projects.json"), SCRUM_PULSE=str(self.pulse),
+                              SCRUM_USAGE=str(self.base / "no-usage.json"))
+        env.start(); self.addCleanup(env.stop)
+        s = serve
+        s.PULSE_HOLDS.clear(); s.SWEEP_SEEN.clear(); s.SWEEP_HELD.clear(); s.IDLE_SINCE.clear()
+        s.AUTO_RESUME["app/1600-net"] = [1, time.time() + s.NET_RETRY_EVERY]  # resumed once: its next try is 5 min away
+        self.addCleanup(s.AUTO_RESUME.pop, "app/1600-net", None)
+        self.addCleanup(s.PULSE_HOLDS.clear)
+        self.addCleanup(lambda: [s.RUNS.pop(k, None) for k in list(s.RUNS) if k.startswith("app/")])
+
+    def tick(self, machine_ok=None, spawn=None):
+        b, s = self.board, self.serve
+        with mock.patch.object(b, "projects", return_value={"app": self.repo}), \
+                mock.patch.object(b, "session_alive_fn", return_value=lambda job: False), \
+                mock.patch.object(b, "live_sessions", return_value=0), \
+                mock.patch.object(b, "machine_ok", side_effect=machine_ok or (lambda *a, **kw: None)), \
+                mock.patch.object(b, "finish_first", return_value=None), \
+                mock.patch.object(b, "pick_account", return_value=("main", None)), \
+                mock.patch.object(b, "cmd_cloud_sync", return_value={"moved": [], "error": None}), \
+                mock.patch.object(s.shop, "ended", return_value=None), \
+                mock.patch.object(s, "cpu_hot", return_value=False), \
+                mock.patch.object(s, "shop_tick", return_value=False), \
+                mock.patch.object(s, "run_terminal"), \
+                mock.patch.object(s, "spawn", side_effect=spawn, return_value="runs/x.log") as sp:
+            s.watchdog_tick()
+        return [c.args[2:4] for c in sp.call_args_list]
+
+    def gates(self):
+        line = json.loads(self.pulse.read_text().splitlines()[-1])
+        return line["projects"]["app"]["gates"]
+
+    def test_watchdog_tick_idle_with_claimable_work_starts_or_notes_hold(self):
+        self.assertEqual(self.tick(), [("run-all", "run-all")], "every gate passes: the run-all starts beside the wait")
+
+    def test_watchdog_tick_idle_with_claimable_work_gate_still_holds(self):
+        ram = lambda *a, **kw: "free RAM 12% (< 20%)" if kw.get("claim") else None
+        self.assertEqual(self.tick(machine_ok=ram), [], "a free-RAM refusal holds the claim")
+        self.assertIn("held:ram", self.gates())
+
+    def test_watchdog_tick_idle_with_claimable_work_no_double_start(self):
+        def record(project, root, job_id, action, prompt, **kw):
+            proc = mock.Mock(); proc.poll.return_value = None  # the run-all is still running next tick
+            self.serve.RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc}
+            return "runs/x.log"
+        starts = self.tick(spawn=record) + self.tick(spawn=record)
+        self.assertEqual(starts, [("run-all", "run-all")], "one run-all over two ticks")
+        self.assertIn("held:run_all_running", self.gates())
 
 
 class MainFocusMigrationTest(unittest.TestCase):
