@@ -4158,6 +4158,13 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             "never its number alone, another branch or the bare Merge summary title",
             "an untagged title is matched by its head"):
             self.assertIn(phrase, cloud, phrase)
+        tail = cloud[cloud.index("When the job is `done`"):]
+        tail = tail[:tail.index("\n")]
+        ff, sm, bc, dd = (tail.index(x) for x in ("**Fast-forward main**", "**Scrum map**", "**BigBoy chaining** (**BigBoy lane** step 5", "`B digest-due`"))
+        self.assertLess(ff, sm)
+        self.assertLess(sm, bc)
+        self.assertLess(bc, dd)
+        self.assertIn("when the job has a `parent`", tail)
         self.assertNotIn("B next", cloud)  # dispatch claims through cloud-claim's overlap check, never blind next calls
         self.assertIn("first run **Cloud lane** **Sync**", self.section(text, "## Commands", "## New job"))
         self.assertIn("`cloud`, `cloud-job`", self.section(text, "## Setup", "## Commands"))
