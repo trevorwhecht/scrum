@@ -157,6 +157,34 @@ class LaunchCpuGate(ServeBase):
             self.edit_job(light, lane="standard")
             self.assertEqual(tuple(self.serve.cpu_first()), ("repo", std))
 
+    def waiting_child_with_gate(self, gate, age_secs):
+        """A light waiting child of a running run-all parent whose queue-gates.txt holds `gate`, last noted age_secs ago."""
+        b = self.serve.board
+        parent = b.cmd_new(self.root, "Runall parent")
+        self.edit_job(parent, stage="running", lane="runall")
+        child = b.cmd_new(self.root, "Light waiting child")
+        self.edit_job(child, stage="waiting", parent=parent, lane="fast")
+        path = self.root / "jobs" / child / "queue-gates.txt"
+        path.write_text(gate + "\n")
+        old = path.stat().st_mtime - age_secs
+        os.utime(path, (old, old))
+        return child
+
+    def cpu_first_here(self):
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base)
+        (base / "scrum").symlink_to(self.root)
+        b = self.serve.board
+        with mock.patch.object(b, "projects", return_value={"repo": base}), mock.patch.object(b, "ram_room", return_value=1):
+            return self.serve.cpu_first()
+
+    def test_cpu_first_ignores_stale_memory_gate(self):
+        """Job 1222: a waiting child's vm_pressure line from an earlier launch (hours old) is no current hold."""
+        child = self.waiting_child_with_gate("vm_pressure(80%)", 20 * 3600)
+        self.assertIsNone(self.cpu_first_here())
+        self.serve.note_queue_gate(self.root, child, "vm_pressure(70%)")  # held again now: the line is current
+        self.assertEqual(tuple(self.cpu_first_here()), ("repo", child))
+
     def ram_blocked_setup(self):
         """A standard CPU-held job older than a fast one; board.projects() names this test's board as project repo."""
         std = self.cpu_held_job("Ram std", "standard", "2020-01-01T00:00:00+00:00")
