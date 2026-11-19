@@ -493,6 +493,17 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, check, phrase)
         self.assertGreaterEqual(check.count("the approver still adds its Follow-up"), 3)
 
+    def test_check_gate_prisma_generate_before_tests(self):
+        check = self.section(skill_text(), "## Check gate", "## Review (WAIT FOR ALL)")
+        for phrase in (
+            "`npx prisma generate` runs first, to completion, before Typecheck, Lint or Test start",
+            "Build starts only after Test has exited, never overlapping it",
+            "ENOENT on `.prisma/client/default.js`",
+        ):
+            self.assertIn(phrase, check, phrase)
+        self.assertEqual(check.count("When `$WT/prisma/schema.prisma` exists"), 1)
+        self.assertNotIn("exists, run `npx prisma generate`. ", check)
+
     def test_check_gate_runs_full_test_in_background(self):
         check = self.section(skill_text(), "## Check gate", "## Review (WAIT FOR ALL)")
         for phrase in (
