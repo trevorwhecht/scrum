@@ -4191,6 +4191,33 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_abort(self.root, bb_a, False, cascade=True), [bb_a, bb_b])
         self.assertEqual((self.root / "backlog.md").read_text(), before)
 
+    def test_cloud_abort_requeues_runall_child_only(self):
+        """Job 1226: job 1197, a Run-all child, lost its backlog item when its shop session ended without a PR."""
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Add schema\n- [ ] Add API\n- [ ] Add page\n")
+        schema, api, page = board.cmd_runall_start(self.root)["children"]
+        bb, bb_a, orphan = (board.cmd_new(self.root, t) for t in ("bb", "bb a", "orphan"))
+        self.edit_jobs(**{schema: {"stage": "cloud"}, api: {"stage": "cloud"}, page: {"stage": "cloud"},
+                          bb: {"lane": "bigboy", "stage": "running", "children": [bb_a]},
+                          bb_a: {"parent": bb, "stage": "cloud"}, orphan: {"parent": "999-gone", "stage": "cloud"}})
+        reason = "requeue: shop session ended without a PR"
+        board._cloud_abort(self.root, schema, None, True, reason)
+        self.assertEqual((self.by_id()[schema]["stage"], self.by_id()[schema]["reason"]), ("aborted", reason))
+        self.assertEqual((self.root / "backlog.md").read_text().splitlines()[-1], "- [ ] Add schema")
+        for job_id, requeue in ((api, False), (bb_a, True), (orphan, True)):
+            before = (self.root / "backlog.md").read_text()
+            board._cloud_abort(self.root, job_id, None, requeue, reason)
+            self.assertEqual(self.by_id()[job_id]["stage"], "aborted", job_id)
+            self.assertEqual((self.root / "backlog.md").read_text(), before, job_id)
+        with board.locked_board(self.root) as b:
+            jobs = {j["id"]: j for j in b["jobs"]}
+            self.assertTrue(board.runall_child(b, jobs[page]))
+            self.assertFalse(board.runall_child(b, jobs[bb_a]))
+            self.assertFalse(board.runall_child(b, jobs[orphan]))
+            self.assertFalse(board.runall_child(b, jobs[bb]))
+        src = Path(board.__file__).read_text()
+        self.assertEqual(len(re.findall(r"(?<!def )runall_child\(board, ", src)), 2, "both paths call it")
+
     # --- pause ---
     def test_pause_records_stage_in_reason_and_keeps_fields(self):
         job_id = board.cmd_new(self.root, "x")

@@ -85,8 +85,10 @@ class ChecksRed(unittest.TestCase):
                 self.assertTrue(self.danger({"at": NOW - 60, "head": "x", "result": result}, key), (result, key))
 
     def test_good_results_are_not_red(self):
-        for result in ("pass", "running", None):
+        for result in ("pass", "running", "busy", None):
             self.assertFalse(self.danger({"at": NOW - 60, "head": "x", "result": result}), result)
+        el = render([{"e2eFull": {"at": NOW - 60, "head": "1a2b3c4d5e", "result": "busy"}}])
+        self.assertEqual(el["rows"], "<li><span>E2E main busy 1a2b3c4 1m ago</span></li>")
 
     def test_stale_running_is_red(self):
         self.assertTrue(self.danger({"at": NOW - 7200, "head": "x", "result": "running"}))

@@ -826,16 +826,21 @@ def cmd_abort(root, job_id, requeue, reason=None, cascade=False):
         abort_job(root, job, requeue, reason or f"Aborted by Trevor {now()}")
         aborted = [job_id]
         if cascade:
-            jobs = {j["id"]: j for j in board["jobs"]}
             for gone in aborted:  # grows while it runs: each aborted dependent is followed in turn
                 for kid in board["jobs"]:
                     if gone in (kid.get("depends_on") or []) and kid["stage"] not in ("done", "aborted") \
                             and (kid["stage"] in ("waiting", "needs-human") or kid.get("paused") or kid.get("play_queued")
                                  or stalled(kid)):
-                        parent = jobs.get(kid.get("parent")) or {}
-                        abort_job(root, kid, parent.get("lane") == "runall", f"Removed with {job_id}")
+                        abort_job(root, kid, runall_child(board, kid), f"Removed with {job_id}")
                         aborted.append(kid["id"])
     return aborted
+
+
+def runall_child(board, job) -> bool:
+    """True when job's parent on board is a Run-all job (lane runall); no parent, or one missing from the board, is
+    False. Caller holds the board lock."""
+    parent = job.get("parent")
+    return bool(parent) and any(j["id"] == parent and j.get("lane") == "runall" for j in board["jobs"])
 
 
 def abort_job(root, job, requeue, reason):
@@ -6470,8 +6475,8 @@ def _cloud_plan(repo, job_id, prs):
 
 
 def _cloud_abort(root, job_id, url, requeue, reason, lane=None):
-    """Record pr= (and lane= when given) and abort a job still in stage cloud, atomically; requeue skips a BigBoy
-    child (Auto-abort rule)."""
+    """Record pr= (and lane= when given) and abort a job still in stage cloud, atomically. With requeue, a BigBoy child
+    is aborted without a requeue (Auto-abort rule); a Run-all child is requeued, as cmd_abort's cascade does."""
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         if job["stage"] != "cloud":
@@ -6479,7 +6484,7 @@ def _cloud_abort(root, job_id, url, requeue, reason, lane=None):
         job["pr"] = url
         if lane:
             job["lane"] = lane
-        abort_job(root, job, requeue and not job.get("parent"), reason)
+        abort_job(root, job, requeue and (not job.get("parent") or runall_child(board, job)), reason)
 
 
 def cmd_cloud_sync(root: Path) -> dict:
