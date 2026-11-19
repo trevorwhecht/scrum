@@ -79,6 +79,12 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 - Otherwise it is the **Backlog fallback**, naming the code to change (a serve.py tick, an E2E spec or seed data).
 - A `None` section gets no proposal. It counts toward the at-most-8 cap.
 
+**Waste.** From `notes.md`'s `## Waste` section:
+- Every line becomes exactly one proposal whose `why` starts `Waste:` and names the kind and its catch count.
+- It is a text edit to the lane or agent whose step let the waste happen (for example a second session started on one job, or the same tests run twice) when one would stop it.
+- Otherwise it is the **Backlog fallback**.
+- A `None` section gets no proposal. It counts toward the at-most-8 cap.
+
 **Backlog fallback.** When no agent, lane or `SKILL.md` text edit would fix an entry's cause:
 - Write `{"id": "pN", "kind": "backlog", "why": "...", "backlog": "<one line>"}` with no `target`, `old` or `new`.
 - The `backlog` line names the cause, its count, its job ids and the pipeline change in board.py, serve.py or the dashboard, with each file it changes and its test file as a backticked repo path (`skills/trevskills-scrum/board.py`, `tests/test_board.py`), never a possessive like board.py's.
@@ -124,7 +130,7 @@ How they land, so you can judge the cost: an edit to a file inside a registered 
 - Read step 3 uses each such project's `scrum/project.md`.
 - Propose only kind `edit`, with a `target` inside a registered repo (one listed in `~/.claude/trevskills-scrum/projects.json`): an agent, a `SKILL.md`, a lane, a project's `CLAUDE.md` or `.claude/rules/`; or a global file: `~/.claude/CLAUDE.md`, `~/.claude/rules/` or `/Users/trevorhecht/Developer/repos/.claude/rules/`. Never a memory file, a new skill or a backlog proposal.
 - Each `why` names the projects and job ids the finding came from.
-- Write `WEEKLY_DIR/proposals.json` in the **Output** shape above. The at-most-8 cap and every rule for each proposal still hold. **Default picks**, **Recurring blockers**, **Pipeline fit**, **Usage windows**, **Stops**, **Time sinks**, **Process health**, **Pulse**, **Escapes**, **Backlog fallback**, **New skill** and **Processes** read `notes.md`, so they do not apply.
+- Write `WEEKLY_DIR/proposals.json` in the **Output** shape above. The at-most-8 cap and every rule for each proposal still hold. **Default picks**, **Recurring blockers**, **Pipeline fit**, **Usage windows**, **Stops**, **Time sinks**, **Process health**, **Pulse**, **Escapes**, **Backlog fallback**, **New skill**, **Processes** and **Waste** read `notes.md`, so they do not apply.
 - How they land differs: each proposal goes to Trevor one by one as a question, and none is applied here. A repo edit asks on its target repo's board, and one he picks runs as a normal job. A global edit asks on the trevskills-scrum board with **Apply it**, which writes it in place after a backup.
 
 **Hard limits:**

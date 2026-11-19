@@ -1779,7 +1779,43 @@ class ContractTest(unittest.TestCase):
                        "a serve.py tick, an E2E spec or seed data", "A `None` section gets no proposal", "at-most-8 cap"):
             self.assertIn(phrase, procs, phrase)
         weekly = digester[digester.index("**Weekly mode**"):digester.index("**Hard limits:**")]
-        self.assertIn("**Escapes**, **Backlog fallback**, **New skill** and **Processes** read `notes.md`", weekly)
+        self.assertIn("**Escapes**, **Backlog fallback**, **New skill**, **Processes** and **Waste** read `notes.md`", weekly)
+
+    def test_digest_reads_waste(self):
+        """Job 1175: the digest reads the machine-wide waste.log through $D/waste.md."""
+        step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))
+        last = step1[step1.rindex(". ", 0, len(step1) - 1) + 2:]
+        for phrase in ("`$D/processes.md`", "`$D/waste.md`", "waste.log"):
+            self.assertIn(phrase, last, phrase)
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        read = reader[reader.index("**Read**"):reader.index("**Look for repeats.**")]
+        bullet = "- `DIGEST_DIR/waste.md`, read once per digest: `board.py digest-start` wrote it"
+        self.assertIn(bullet, read)
+        self.assertLess(read.index("- `DIGEST_DIR/processes.md`"), read.index(bullet))
+        line = read[read.index(bullet):]
+        line = line[:line.index("\n")]
+        for phrase in ("`## Counts`", "`## Catches`", "`No catches"):
+            self.assertIn(phrase, line, phrase)
+        self.assertIn("    ## Waste\n    - <kind> — catches: <n> — projects: <names> — jobs: <ids, or none> — CPU: "
+                      "<total cpu_min> min\n", reader)
+        self.assertLess(reader.index("    ## Processes\n"), reader.index("    ## Waste\n"))
+        self.assertLess(reader.index("    ## Waste\n"), reader.index("    ## Escapes\n"))
+        start = reader.index("For `## Waste`, use `DIGEST_DIR/waste.md`:")
+        self.assertLess(reader.index("For `## Processes`, use `DIGEST_DIR/processes.md`:"), start)
+        rule = reader[start:]
+        rule = rule[:rule.index("\n\n")]
+        for phrase in ("every kind caught 2 or more times", "counted by catch, not by job",
+                       "Write `None` when the file is missing, says `No catches`",
+                       "exempt from the 2 or more different jobs rule"):
+            self.assertIn(phrase, rule, phrase)
+        digester = (ROOT / "agents" / "scrum-digester.md").read_text()
+        self.assertLess(digester.index("**Processes.**"), digester.index("**Waste.**"))
+        self.assertLess(digester.index("**Waste.**"), digester.index("**Backlog fallback.**"))
+        waste = digester[digester.index("**Waste.**"):digester.index("**Backlog fallback.**")]
+        for phrase in ("exactly one proposal whose `why` starts `Waste:`", "names the kind and its catch count",
+                       "the lane or agent whose step let the waste happen", "**Backlog fallback**",
+                       "A `None` section gets no proposal", "at-most-8 cap"):
+            self.assertIn(phrase, waste, phrase)
 
     def test_digest_reads_trevor(self):
         step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))
