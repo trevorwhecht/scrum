@@ -14,7 +14,8 @@ class BacklogTest(unittest.TestCase):
         self.root = Path(self.tmp.name) / "scrum"
         self.root.mkdir()
         # an empty registry keeps finish_first off the real projects' live jobs
-        patch = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "projects.json")})
+        patch = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "projects.json"),
+                                              "SCRUM_COOLDOWN": str(Path(self.tmp.name) / "no-cooldown")})  # never this Mac's real cool-down flag
         patch.start()
         self.addCleanup(patch.stop)
         (self.root / "backlog.md").write_text(
