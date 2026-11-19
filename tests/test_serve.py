@@ -10484,6 +10484,23 @@ class IdleClaimTest(unittest.TestCase):
         self.assertEqual(self.started(spawn), [("003-small", "start", True)])
         self.assertNotIn("ic", s.IDLE_SINCE)
 
+    def test_idle_claim_claims_the_cpu_first_head(self):
+        """Job 1222: a light waiting child at the head of cpu_first (a current vm_pressure hold) is claimed even when
+        another held child has fewer Likely files, so the head is never a job no path starts."""
+        self.write({"id": "004-x", "stage": "done"})
+        jobs = self.jobs()
+        jobs[1]["lane"] = "fast"  # 002-big: light
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        (self.root / "jobs" / "002-big" / "queue-gates.txt").write_text("vm_pressure(80%)\n")
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base)
+        (base / "scrum").symlink_to(self.root)
+        with mock.patch.object(self.board, "projects", return_value={"ic": base}), \
+                mock.patch.object(self.board, "ram_room", return_value=1):
+            got, spawn = self.claim()
+        self.assertIs(got, True)
+        self.assertEqual(self.started(spawn), [("002-big", "start", True)])
+
     def test_idle_claim_holds_at_hot_load(self):
         """Job 899: idle_claim re-reads CPU load right before claiming; over MAX_LAUNCH_CPU_LOAD_PCT the held job stays
         held, except a manual queued launch."""
