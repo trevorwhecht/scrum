@@ -320,6 +320,21 @@ class SameTestsTest(unittest.TestCase):
         self.ages = {101: 20.0, 201: 2.0}
         self.assert_left_alone(procs)
 
+    def test_watchdog_failure_is_contained(self):
+        s = serve
+        with mock.patch.object(s.board, "projects", return_value={}), \
+                mock.patch.object(s, "stop_leftovers"), mock.patch.object(s, "stop_two_sessions") as two, \
+                mock.patch.object(s, "stop_same_tests", side_effect=RuntimeError("boom")) as same, \
+                mock.patch.object(s, "window_tick") as window, mock.patch.object(s, "idle_cleanup"), \
+                mock.patch.object(s, "auto_continue_tick"), mock.patch.object(s.board, "record_cpu_sample"), \
+                mock.patch.object(s, "weekly_tick"), mock.patch.object(s, "pulse_tick"), \
+                mock.patch.object(s, "cooldown_chime"), mock.patch("sys.stderr", new=io.StringIO()) as err:
+            s.watchdog_tick()
+        two.assert_called_once_with()
+        same.assert_called_once_with()
+        window.assert_called_once()
+        self.assertIn("watchdog: same tests: boom", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3202,6 +3202,7 @@ def watchdog_tick():
     Then idle_cleanup stops leaked dev servers of idle projects and quits Docker Desktop once its projects idle 10 min.
     Then stop_leftovers stops claude sessions still running a test, server or build after their job family finished.
     Then stop_two_sessions keeps one owner when two claude sessions work one job and stops the rest (asks when unclear).
+    Then stop_same_tests stops the newer of two identical full Test or E2E runs on one clean commit and logs a full E2E rerun of a head e2e-full.json already holds.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard.
@@ -3337,6 +3338,10 @@ def watchdog_tick():
         stop_two_sessions()
     except (Exception, SystemExit) as e:
         print(f"watchdog: two sessions: {e}", file=sys.stderr, flush=True)
+    try:
+        stop_same_tests()
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: same tests: {e}", file=sys.stderr, flush=True)
     if claim:
         try:
             auto_continue_tick(busy)

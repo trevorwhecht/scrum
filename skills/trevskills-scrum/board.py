@@ -1480,6 +1480,7 @@ PROCESSES = (
     ("Idle cleanup", ("idle_cleanup", "stop_dev_servers", "stop_orphans", "docker_tick", "prune_worktrees"), ()),
     ("Leftover sessions", ("stop_leftovers", "stop_tree", "process_scan"), ()),
     ("Two sessions", ("stop_two_sessions",), ()),
+    ("Same tests", ("stop_same_tests",), ()),
     ("E2E lock reaps", ("e2e_lock_reap",), ()),
     ("Digest retry", ("digest_retry_tick",), ()),
     ("Weekly digest", ("weekly_tick",), ()),
