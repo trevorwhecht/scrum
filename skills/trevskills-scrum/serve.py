@@ -3939,12 +3939,12 @@ def machine_status():
 def machine_usage(now):
     """The meter's usage segment: one weekly reading per board.accounts() account, {"name", "seven_day_pct",
     "resets_at", "max_pct"} (claude_usage's weekly %, whatever its age; max_pct, where its red starts, is its 7d
-    reserve, else board.USAGE_HOLD_PCT), then board.pick_account's claims cap, board.fable_state and the later reset
+    board.account_reserve, else board.USAGE_HOLD_PCT), then board.pick_account's claims cap, board.fable_state and the later reset
     of a held window, which need usage.json under USAGE_STALE_SECS old (else null, "unknown", null). "unknown" when no
     account has a weekly reading."""
     accounts = [{"name": a.name, "seven_day_pct": (u := claude_usage(now, a.name))["weekly"],
                  "resets_at": u["weekly_resets_at"],
-                 "max_pct": dict(zip((k for k, _ in board.WINDOWS), a.reserve or ())).get("seven_day", board.USAGE_HOLD_PCT)}
+                 "max_pct": dict(zip((k for k, _ in board.WINDOWS), board.account_reserve(a, now) or ())).get("seven_day", board.USAGE_HOLD_PCT)}
                 for a in board.accounts()]
     if all(a["seven_day_pct"] is None for a in accounts):
         return "unknown"

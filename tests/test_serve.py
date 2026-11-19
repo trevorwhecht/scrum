@@ -2156,24 +2156,28 @@ class ServeTest(unittest.TestCase):
 
     def test_machine_usage_one_weekly_reading_per_account(self):
         """main 49% from a day-old file, owa 90% with its 80/90 reserve: each account's weekly %, its reset and the
-        used % its red starts at (owa: its 7d reserve; main, no reserve: board.USAGE_HOLD_PCT)."""
+        used % its red starts at (owa: its 7d reserve, or PRIMARY_RESERVE's 97 while primary; main, no reserve:
+        board.USAGE_HOLD_PCT)."""
         base = Path(tempfile.mkdtemp(dir=self.tmp.name))
         (base / "main").mkdir()
         (base / "owa").mkdir()
         now = time.time()
         (base / "main" / "usage.json").write_text(json.dumps({"written_at": now - 86400, "rate_limits": {
-            "seven_day": {"used_percentage": 49, "resets_at": now + 2 * 86400}}}))
+            "seven_day": {"used_percentage": 49, "resets_at": now + 86400}}}))
         (base / "owa" / "usage.json").write_text(json.dumps({"written_at": now, "rate_limits": {
-            "seven_day": {"used_percentage": 90, "resets_at": now + 86400}}}))
+            "seven_day": {"used_percentage": 90, "resets_at": now + 2 * 86400}}}))
         accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [80, 90]]])
         with mock.patch.dict(os.environ, SCRUM_ACCOUNTS=accounts, SCRUM_USAGE=str(base / "main" / "usage.json")):
             self.assertEqual(self.serve.machine_usage(now), {
-                "accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": now + 2 * 86400, "max_pct": 90},
-                             {"name": "owa", "seven_day_pct": 90, "resets_at": now + 86400, "max_pct": 90}],
+                "accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": now + 86400, "max_pct": 90},
+                             {"name": "owa", "seven_day_pct": 90, "resets_at": now + 2 * 86400, "max_pct": 90}],
                 "allowance": None, "fable": "unknown", "hold_until": None})
             accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [70, 85]]])
             with mock.patch.dict(os.environ, SCRUM_ACCOUNTS=accounts):
                 self.assertEqual(self.serve.machine_usage(now)["accounts"][1]["max_pct"], 85, "the 7d reserve, not the 5h one")
+            (base / "owa" / "usage.json").write_text(json.dumps({"written_at": now, "rate_limits": {
+                "seven_day": {"used_percentage": 90, "resets_at": now + 3600}}}))  # job 1208: owa primary
+            self.assertEqual(self.serve.machine_usage(now)["accounts"][1]["max_pct"], 97)
             (base / "owa" / "usage.json").unlink()
             self.assertEqual(self.serve.machine_usage(now)["accounts"][1],
                              {"name": "owa", "seven_day_pct": None, "resets_at": None, "max_pct": 90})

@@ -4295,8 +4295,11 @@ def resume_first(jobs: list[dict]) -> int:
 
 # The Claude accounts automated sessions may run on, in order: (name, config dir, reserve) where reserve is
 # (5h used %, 7d used %) at which a backup account is kept for Trevor (None for a window it never holds on), or None.
-# The primary account (primary_account) is never held. SCRUM_ACCOUNTS (JSON) replaces it.
+# The primary account (primary_account) is held only at its PRIMARY_RESERVE. SCRUM_ACCOUNTS (JSON) replaces ACCOUNTS.
 ACCOUNTS = (("main", "~/.claude", (None, 90)), ("owa", "~/.claude-owa", (None, 90)))
+# (5h, 7d) used % at which an account is held while it is primary_account; an unlisted account has no primary cap.
+# Trevor 2026-11-18 (job 1208): OWA as primary hands new work to main at 97% 7d, keeping room for messageManager and his chats.
+PRIMARY_RESERVE = {"owa": (None, 97)}
 Account = namedtuple("Account", "name dir reserve")
 ACCOUNT_RE = re.compile(r"[a-z0-9-]{1,20}")
 
@@ -4594,14 +4597,20 @@ def primary_account(now):
     return min(accounts(), key=at).name  # min keeps the first of equal keys
 
 
+def account_reserve(acc, now):
+    """The (5h, 7d) reserve that holds the account now: PRIMARY_RESERVE's (None when unlisted) for primary_account,
+    else acc.reserve."""
+    return PRIMARY_RESERVE.get(acc.name) if primary_account(now) == acc.name else acc.reserve
+
+
 def reserve_hit(acc, usage, now):
-    """Why the account's reserve keeps it for Trevor, or None: a backup account (not primary_account) with a window
-    with resets_at > now whose used % is at or above its reserve value (a None value never holds). written_at is
-    ignored (used % only grows inside one window)."""
+    """Why the account's reserve (account_reserve) keeps it for Trevor, or None: a window with resets_at > now whose
+    used % is at or above its reserve value (a None value never holds). written_at is ignored (used % only grows
+    inside one window)."""
     limits = usage.get("rate_limits") if isinstance(usage, dict) else None
-    if not acc.reserve or not isinstance(limits, dict) or primary_account(now) == acc.name:
+    if not isinstance(limits, dict) or not (reserve := account_reserve(acc, now)):
         return None
-    for (key, label), cap in zip(WINDOWS, acc.reserve):
+    for (key, label), cap in zip(WINDOWS, reserve):
         w = limits.get(key)
         if cap is not None and isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) \
                 and w["resets_at"] > now and w["used_percentage"] >= cap:
@@ -4614,7 +4623,7 @@ def pick_account(now, live=0, prefer=None):
     first (no future 7d window last, ACCOUNTS order within ties), else (None, Allowance(0, reason)) naming every account and why. Room: no limit_until marker ahead, usage_allowance None or above the live
     count (`live` an int or a list), and no
     reserve window reached (reserve_hit). With a backup listed, the primary (primary_account) skips usage_allowance
-    (job 1182: no pace, hold or taper), so it stops only on its limit marker; a lone account keeps them. allowance is the claims cap across every account with room (job 1130):
+    (job 1182: no pace, hold or taper), so it stops only on its limit marker or PRIMARY_RESERVE (job 1208); a lone account keeps them. allowance is the claims cap across every account with room (job 1130):
     None when any of them has no taper, else the largest of their allowances."""
     accs = accounts()
     why, room = [], []
