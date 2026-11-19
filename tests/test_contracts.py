@@ -1036,7 +1036,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26740, "newjob.md")  # +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26800, "newjob.md")  # +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -3819,6 +3819,11 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         check = self.section(skill, "## Check gate", "## Review (WAIT FOR ALL)")
         self.assertIn('Build runs as `python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" --project "$F/project.md"`', check)
         self.assertNotIn("'<Build>'", check)
+        # job 1227: a held Build can outlast the 600 s Bash timeout, and its 124 parks on the Check queue
+        for phrase in ('--project "$F/project.md"` with the Bash tool\'s `run_in_background` (wait for it to exit)',
+                       "A Test, Typecheck, Lint, Build or E2E run that exits 124 timed out on the lock: re-run it once",
+                       "(for `check.lock` or Build, `'waiting on the Check queue'`"):
+            self.assertIn(phrase, check, phrase)
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
         step4 = self.section(builder, "4. Run the focused tests", "5. Commit on your branch")
         self.assertNotIn("--project", step4)
