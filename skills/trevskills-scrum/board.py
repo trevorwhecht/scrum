@@ -4470,12 +4470,17 @@ def transcript_tokens(start, end, projects_dir=None):
         return where[cwd]
 
     files = sorted(root.glob("*/*.jsonl")) + sorted(root.glob("*/*/subagents/agent-*.jsonl"))
+    seen = set()
     for path in files:  # main sessions first, so a subagent finds its parent's tags
         try:
             if path.stat().st_mtime < start:
                 continue
+            real = path.resolve()
         except OSError:
             continue
+        if real in seen:  # a symlinked project dir lists the same transcript again
+            continue
+        seen.add(real)
         rows, first = read_transcript(path)
         job, skill = first_prompt_tags(first)
         if path.parent.name == "subagents":
