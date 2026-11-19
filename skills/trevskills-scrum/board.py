@@ -1394,6 +1394,10 @@ def cmd_digest_start(root):
         write_processes(root, digest_id)
     except (SystemExit, OSError, ValueError, TypeError) as e:
         print(f"digest-start: processes: {e}", file=sys.stderr)
+    try:
+        write_waste(root, digest_id)
+    except (SystemExit, OSError, ValueError, TypeError) as e:
+        print(f"digest-start: waste: {e}", file=sys.stderr)
     return out
 
 
@@ -1492,22 +1496,16 @@ def processes_path():
     return pulse_path().with_name("processes.log")
 
 
-def log_process(process: str, result: str, **fields) -> None:
-    """Append one {"t", "process", "result", **fields} JSON line to processes_path(): one PROCESSES entry's run, for
-    the digest's processes.md (write_processes). When the first line is older than PULSE_KEEP_SECS plus a day (or
-    unreadable, or has no numeric t), the file is first rewritten (tmp + os.replace) to the last PULSE_KEEP_SECS, like
-    serve.pulse_tick does pulse.log; no lock, so a line appended during a rotation may be lost. Never raises: an OSError prints one `processes: ` stderr line. Under
-    unittest the real default ~/.claude/trevskills-scrum/processes.log is never written (a silent return)."""
-    path = processes_path()
-    if "unittest" in sys.modules and path == Path.home() / ".claude" / "trevskills-scrum" / "processes.log":
-        return  # a test run would add fixture runs to the live log the digest reads
-    now = int(time.time())
-    if "repo" in fields:
-        try:
-            fields["repo"] = os.path.realpath(str(fields["repo"]))  # a relative repo would resolve against the digest's cwd
-        except (OSError, ValueError):
-            pass  # unresolvable: keep as given, never raise
-    line = json.dumps({"t": now, "process": process, "result": result, **fields}, default=str)
+def _append_log(path: Path, record: dict, label: str) -> None:
+    """Append record as one JSON line to path (log_process, log_waste). When the first line is older than
+    PULSE_KEEP_SECS plus a day (or unreadable, or has no numeric t), the file is first rewritten (<name>.tmp +
+    os.replace) to the last PULSE_KEEP_SECS, like serve.pulse_tick does pulse.log; no lock, so a line appended during a
+    rotation may be lost. Never raises: an OSError prints one `<label>: ` stderr line. Under unittest the real default
+    ~/.claude/trevskills-scrum/<name> is never written (a silent return)."""
+    if "unittest" in sys.modules and path == Path.home() / ".claude" / "trevskills-scrum" / path.name:
+        return  # a test run would add fixture lines to the live log the digest reads
+    now = record["t"]
+    line = json.dumps(record, default=str)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -1519,13 +1517,45 @@ def log_process(process: str, result: str, **fields) -> None:
             first = {"t": None}  # a malformed first line never ages out by itself: rotate it away
         if first and not (isinstance(first, dict) and is_num(first.get("t")) and first["t"] >= now - PULSE_KEEP_SECS - 86400):
             keep = [l for l in _json_lines(path) if is_num(l.get("t")) and l["t"] >= now - PULSE_KEEP_SECS]
-            tmp = path.with_name("processes.log.tmp")
+            tmp = path.with_name(path.name + ".tmp")
             tmp.write_text("".join(json.dumps(l) + "\n" for l in keep))
             os.replace(tmp, path)
         with open(path, "a") as f:
             f.write(line + "\n")
     except OSError as e:
-        print(f"processes: {e}", file=sys.stderr)
+        print(f"{label}: {e}", file=sys.stderr)
+
+
+def log_process(process: str, result: str, **fields) -> None:
+    """Append one {"t", "process", "result", **fields} JSON line to processes_path() through _append_log (rotation,
+    never raises, `processes: ` stderr prefix, unittest guard): one PROCESSES entry's run, for the digest's
+    processes.md (write_processes). A `repo` field is stored as its realpath."""
+    if "repo" in fields:
+        try:
+            fields["repo"] = os.path.realpath(str(fields["repo"]))  # a relative repo would resolve against the digest's cwd
+        except (OSError, ValueError):
+            pass  # unresolvable: keep as given, never raise
+    _append_log(processes_path(), {"t": int(time.time()), "process": process, "result": result, **fields}, "processes")
+
+
+WASTE_KINDS = ("two-sessions", "same-tests", "leftover", "cpu-hog")  # log_waste: the wasted-work catches (BigBoy 1165)
+
+
+def waste_path():
+    """The machine-wide wasted-work catch log (one JSON line a catch, log_waste), beside pulse.log (SCRUM_PULSE moves it)."""
+    return pulse_path().with_name("waste.log")
+
+
+def log_waste(kind: str, project, jobs, pids, cpu_min, **fields) -> None:
+    """Append one {"t", "kind", "project", "jobs", "pids", "cpu_min", **fields} JSON line to waste_path() through
+    _append_log, for the digest's waste.md (write_waste). project is a registered project name or None; jobs and pids
+    are lists. A kind not in WASTE_KINDS writes nothing and prints one `waste: unknown kind '<kind>'` stderr line.
+    Never raises."""
+    if kind not in WASTE_KINDS:
+        print(f"waste: unknown kind {kind!r}", file=sys.stderr)
+        return
+    _append_log(waste_path(), {"t": int(time.time()), "kind": kind, "project": project, "jobs": jobs, "pids": pids,
+                               "cpu_min": cpu_min, **fields}, "waste")
 
 
 def pulse_auto(lines, project=None):
@@ -1767,6 +1797,32 @@ def write_processes(root, digest_id):
                 out.append(f"- {f}: " + ("missing" if not p.exists() else "changed since the last digest"
                                          if changed(p) else "unchanged"))
     (Path(root) / "digests" / digest_id / "processes.md").write_text("\n".join(out) + "\n")
+
+
+def write_waste(root, digest_id):
+    """digests/<NNN>/waste.md: every project's waste.log catches since the last digest (_pulse_since; none: every
+    line). A catch counts when its t is numeric (not a bool) and at or after the cutoff and its kind is in WASTE_KINDS.
+    `## Counts` gives each kind's catches in WASTE_KINDS order (zeros too; a catch naming two jobs counts once), then
+    `## Catches` one line per catch, oldest first (file order on ties): `- <UTC time> <kind>` and every other key as
+    key=value, strings bare and other values as JSON. With no catch the file is `No catches since the last digest`."""
+    since = _pulse_since(root, digest_id)
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="minutes")
+    show = lambda v: v if isinstance(v, str) else json.dumps(v, default=str)
+    catches = [l for l in _json_lines(waste_path()) if is_num(l.get("t")) and (since is None or l["t"] >= since)
+               and isinstance(l.get("kind"), str) and l["kind"] in WASTE_KINDS]
+    catches = [l for _, l in sorted(enumerate(catches), key=lambda x: (x[1]["t"], x[0]))]  # time order, file order on ties
+    path = Path(root) / "digests" / digest_id / "waste.md"
+    if not catches:
+        path.write_text("No catches since the last digest\n")
+        return
+    out = [f"# Waste: digest {digest_id}", "", f"Since: {iso(since)}" if since is not None else "Since: the start",
+           "", "## Counts"]
+    out += [f"- {k}: {sum(1 for l in catches if l['kind'] == k)}" for k in WASTE_KINDS]
+    out += ["", "## Catches"]
+    for l in catches:
+        rest = " ".join(f"{k}={show(v)}" for k, v in l.items() if k not in ("t", "kind"))
+        out.append(f"- {iso(l['t'])} {l['kind']}" + (f" {rest}" if rest else ""))
+    path.write_text("\n".join(out) + "\n")
 
 
 def weekly_ran(resets_at):
