@@ -2432,7 +2432,7 @@ class ContractTest(unittest.TestCase):
         steps = self.section(text, "2. **Which reviewers run.**", "4. **WAIT FOR ALL.**")
         render = next(l for l in steps.splitlines() if l.lstrip().startswith("- **Shared render"))
         for phrase in ("Only when `round-$N/dev-url.txt` holds a URL, run `B render-paths $ID`",
-                       "render.py <url> \"$F/jobs/$ID/round-$N/render\" <paths>", "Bash timeout 300000",
+                       "render.py <url> \"$F/jobs/$ID/round-$N/render\" <paths>", "Bash timeout 600000",
                        "`- Render auth: <repo-relative path>`", "--cookies \"$WT/<path>\"",
                        "any other exit, or an empty `paths`, passes none"):
             self.assertIn(phrase, render, phrase)
@@ -2461,7 +2461,7 @@ class ContractTest(unittest.TestCase):
         base = next(l for l in lines if l.startswith("- **Shared base render"))
         self.assertLess(lines.index(next(l for l in lines if l.startswith("- **Shared render"))), lines.index(base))
         for phrase in ("Only when **Shared render** exited 0", "round-$N/render-base", "render.py <base-url>",
-                       "/tmp/scrum-base-$ID", "cat-file -e $BASE:<path>",
+                       "/tmp/scrum-base-$ID", "<the same paths>` with Bash timeout 600000", "cat-file -e $BASE:<path>",
                        "stop that server and run `git -C \"$WT\" worktree remove --force /tmp/scrum-base-$ID` "
                        "on every outcome"):
             self.assertIn(phrase, base, phrase)
@@ -2715,7 +2715,7 @@ class ContractTest(unittest.TestCase):
         lane = (SKILL_DIR / "lanes" / "uisweep.md").read_text()
         for phrase in ("SWEEP_DIR=", "- Unrendered: <path>", "B ui-sweep-record", "RENDER_CAP", "--cookies",
                        "**Shared dev server**", "never 8765 or 3001", "on every outcome",
-                       "- Unrendered: <path> — needs customer session"):
+                       "- Unrendered: <path> — needs customer session", "<paths>` with Bash timeout 600000"):
             self.assertIn(phrase, lane, phrase)
         self.assertLess(lane.index("render.py"), lane.index("Spawn `scrum-review-ui`"))
         self.assertLess(lane.index("Spawn `scrum-review-ui`"), lane.index("Run `B ui-sweep-record"))

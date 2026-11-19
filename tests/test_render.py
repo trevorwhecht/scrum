@@ -7,6 +7,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
+os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty: main()'s hold (job 1227) never reads this machine's swap
+os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly nil: main()'s hold never waits on this machine's load
 import render  # noqa: E402
 
 PAGE = b"<!doctype html><title>t</title><h1>hi</h1><script>console.error('boom')</script>"
@@ -178,6 +180,21 @@ class RenderUnitTest(unittest.TestCase):
         code, _, err = run_main(["http://127.0.0.1:1", str(self.out), "/"])
         self.assertEqual(code, 2)
         self.assertTrue((self.out / "notes.txt").exists())
+
+    def test_main_holds_before_render(self):
+        """Job 1227: main() waits out board.heavy_hold (buildlock.hold) before render() starts Chrome."""
+        calls, board = [], object()
+        hold = mock.patch.object(render.buildlock, "hold", side_effect=lambda *a: calls.append(("hold", *a)) or 0.0)
+        fake = mock.patch.object(render, "render", side_effect=lambda *a: calls.append(("render",)) or {"pages": []})
+        with hold, fake, mock.patch.object(render.buildlock, "board_module", return_value=board):
+            self.assertEqual(run_main(["http://127.0.0.1:1", str(self.out), "/"])[0], 0)
+            self.assertEqual(calls, [("hold", board, "render.py"), ("render",)])
+            calls.clear()
+            self.assertEqual(run_main(["http://127.0.0.1:1", str(self.out)])[0], 2, "usage error")
+            self.out.mkdir()
+            (self.out / "notes.txt").write_text("keep")
+            self.assertEqual(run_main(["http://127.0.0.1:1", str(self.out), "/"])[0], 2, "refused out_dir")
+            self.assertEqual(calls, [])
 
 
 @unittest.skipUnless(render.find_chrome(), "no Chrome found")
