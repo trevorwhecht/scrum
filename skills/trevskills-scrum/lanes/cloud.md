@@ -65,18 +65,21 @@ Runs backlog jobs in Claude Code cloud sessions (claude.ai/code), paid by Trevor
    Then run the **Cloud-home tail** for every job in `moved` and every id in `arrived`, in this session, one job at a time with `ID=<its id>`.
 
    **Cloud-home tail** (`/trevskills-scrum cloud-home <id>`: serve.py starts it headless; interactive Sync runs the same steps for every moved or arrived job). The job must be one `B cloud-sync` already moved or listed in `arrived`: `done`, or `needs-human` or `aborted` with a `pr`. Otherwise **refuse** and stop. Load it from `$F/board.json`: `<url>` is its `pr`, `<baseRefName>` is its `base` without `origin/`, and "the worktree add succeeded" means it has a `worktree`. Then run these steps unchanged, in order:
-   - **Artifacts home.** For a `MERGED`, `scrum:needs-human` or `CLOSED` PR, right after its `B set` (and before **Schema auto-migrate** starts the detached approve), bring the job folder home. A missing branch means the fetch fails: extract nothing, report no error, and go on. The copy never overwrites the local `feature.md`: it copies all but `feature.md`. The branch is deleted only after the copy succeeds, and never force:
+   - **Artifacts home.** For a `MERGED`, `scrum:needs-human` or `CLOSED` PR, right after its `B set` (and before **Schema auto-migrate** starts the detached approve), bring the job folder home. The step fetches into the job's own ref `refs/scrum-home/$ID`, never the shared `FETCH_HEAD`, because serve.py runs several cloud-home sessions at once in the same checkout and a parallel fetch overwrites `FETCH_HEAD` in between. A missing branch means the fetch fails: extract nothing, report no error, and go on. The branch is copied and deleted only when the ref's commit subject is exactly `[scrum $ID] artifacts` (the **Artifacts** push's subject); otherwise the block prints the `artifacts: kept ...` line, the final report quotes it, and the branch stays for a human. The copy never overwrites the local `feature.md`: it copies all but `feature.md`. The branch is deleted only after the copy succeeds, and never force. The ref is always dropped at the end:
      ```bash
-     cd "$REPO"
-     if git fetch origin scrum-artifacts/$ID 2>/dev/null; then
+     cd "$REPO"; H="refs/scrum-home/$ID"
+     if git fetch origin "+refs/heads/scrum-artifacts/${ID}:$H" 2>/dev/null; then
        T=$(mktemp -d)
-       if git archive FETCH_HEAD scrum/jobs/$ID 2>/dev/null | tar -x -C "$T" 2>/dev/null && [ -d "$T/scrum/jobs/$ID" ]; then
+       if [ "$(git log -1 --format=%s "$H")" != "[scrum $ID] artifacts" ]; then
+         echo "artifacts: kept scrum-artifacts/$ID, its commit is not [scrum $ID] artifacts"
+       elif git archive "$H" scrum/jobs/$ID 2>/dev/null | tar -x -C "$T" 2>/dev/null && [ -d "$T/scrum/jobs/$ID" ]; then
          rm -f "$T/scrum/jobs/$ID/feature.md" && mkdir -p "$F/jobs/$ID" &&
            cp -R "$T/scrum/jobs/$ID/." "$F/jobs/$ID/" && git push origin --delete scrum-artifacts/$ID
        else git push origin --delete scrum-artifacts/$ID  # an empty artifacts branch: nothing to copy
        fi
        rm -rf "$T"
      fi
+     git update-ref -d "$H" 2>/dev/null
      ```
    - **Unreviewed merge.** Then, for a `MERGED` PR whose job `lane` is `fast` or `standard`, when `ls "$F"/jobs/$ID/round-*/review-code.md "$F/jobs/$ID/decision.md" "$F/jobs/$ID/human-approval.md" 2>/dev/null` prints nothing (a session that merged by `gh api` never ran `B set $ID stage=merging`), run `B backlog-add --top -- 'Unreviewed cloud merge: job $ID merged PR <url> with no code review; review that diff on main'` and name it in the final report.
    - **Follow-ups.** Then, as **Approve** step 3 (including its Fallback) does on its own board: when `$F/jobs/$ID/followups/*.md` exist, run `B backlog-spec $ID`, and when it succeeds run `B rank-backlog` once (a `rank-backlog` failure is named in the final report only and never stops the sync); otherwise, when `decision.md` has a non-empty `## Follow-ups` section that is not just `- none`, run the **Rank** (SKILL.md New job 3c, `jev-gate.py rank`) on each bullet, then `B backlog-add "<item> (from $ID)" ...`, one argument per bullet (one call per item when ranked items differ in N). Separately, when `decision.md` has a non-empty `## Manual checks` section that is not just `- none`, run `B manual-add "<item> (from $ID)" ...`, one argument per bullet, whatever `## Follow-ups` holds; a failing `manual-add` never blocks the sync. Spawn no spec writer here.
