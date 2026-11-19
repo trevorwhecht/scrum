@@ -169,7 +169,8 @@ class RunsOnTest(unittest.TestCase):
             self.assertEqual(board.main_only_terms(), ["VectorCraft", "MCP", "printer", ".env.prod"])
         (self.base / "workers.txt").unlink()  # shopmac, today's real notes file
         terms = board.main_only_terms()
-        for term in ("VectorCraft", "PhotoCraft", "claude-in-chrome", "computer use", "MCP", "logged-in Chrome",
+        self.assertNotIn("VectorCraft", terms)  # installed on the shop by hand, 2026-11-19
+        for term in ("PhotoCraft", "claude-in-chrome", "computer use", "MCP", "logged-in Chrome",
                      ".env.prod", "/trevskills-migrate", "/trevskills-datafix", "film printing", "iMessage",
                      "Keychain", "Homebrew", "brew", "PR merge"):
             self.assertIn(term, terms)
