@@ -1,6 +1,7 @@
 // Playwright config wrapper for a machine without Playwright's own Chromium (the shop Mac). From the repo root,
 //   SCRUM_PW_CHANNEL=chrome npx playwright test --config "$HOME/.claude/skills/trevskills-e2e/channel.config.mjs"
-// runs the repo's own playwright.config.* with use.channel set on its chromium projects. Playwright resolves a config's
+// runs the repo's own playwright.config.* with use.channel set on its chromium projects, or with a non-blank
+// SCRUM_CHROME as their launchOptions.executablePath instead. Playwright resolves a config's
 // relative paths against the config file's folder (this one), so each of them is pinned to the repo here instead.
 import fs from "node:fs";
 import path from "node:path";
@@ -15,6 +16,7 @@ const mod = await import(pathToFileURL(file).href);
 let config = mod.default ?? mod;
 if (config.__esModule && config.default) config = config.default; // CommonJS `exports.default`, as a .ts transpiles to
 const channel = (process.env.SCRUM_PW_CHANNEL ?? "").trim();
+const chrome = (process.env.SCRUM_CHROME ?? "").trim(); // a worker's Chrome for Testing binary: wins over the channel
 const at = (p) => (typeof p === "string" && p ? path.resolve(repo, p) : p);
 const projects = Array.isArray(config.projects) ? config.projects : [];
 
@@ -51,16 +53,20 @@ if (config.reporter) {
   });
 }
 
-if (channel) {
+if (channel || chrome) {
   // Playwright's own order: use is the top-level use under the project's, and browserName defaults to
   // defaultBrowserType, which defaults to chromium.
   const top = config.use ?? {};
   const browser = (use = {}) =>
     use.browserName ?? top.browserName ?? use.defaultBrowserType ?? top.defaultBrowserType ?? "chromium";
+  // A project's own launchOptions replace the top-level ones, so the binary goes on whichever applies.
+  const pin = (use = {}) => (chrome
+    ? { ...use, launchOptions: { ...(use.launchOptions ?? top.launchOptions), executablePath: chrome } }
+    : { ...use, channel });
   if (config.projects) {
-    for (const p of projects) if (browser(p.use) === "chromium") p.use = { ...p.use, channel };
+    for (const p of projects) if (browser(p.use) === "chromium") p.use = pin(p.use);
   } else if (browser() === "chromium") {
-    config.use = { ...top, channel };
+    config.use = pin(top);
   }
 }
 

@@ -1597,18 +1597,20 @@ class ChannelConfigTest(unittest.TestCase):
         self.repo = os.path.realpath(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.repo, True)
 
-    def load(self, files, channel="chrome"):
+    def load(self, files, channel="chrome", chrome=None):
         for name, text in files.items():
             Path(self.repo, name).write_text(text)
-        env = {k: v for k, v in os.environ.items() if k != "SCRUM_PW_CHANNEL"}
+        env = {k: v for k, v in os.environ.items() if k not in ("SCRUM_PW_CHANNEL", "SCRUM_CHROME")}
         if channel is not None:
             env["SCRUM_PW_CHANNEL"] = channel
+        if chrome is not None:
+            env["SCRUM_CHROME"] = chrome
         return REAL_RUN(["node", "--input-type=module", "-e",
                          "const m = await import(process.argv[1]); console.log(JSON.stringify(m.default))",
                          WRAPPER.as_uri()], cwd=self.repo, env=env, capture_output=True, text=True)
 
-    def config(self, files, channel="chrome"):
-        r = self.load(files, channel)
+    def config(self, files, channel="chrome", chrome=None):
+        r = self.load(files, channel, chrome)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
 
@@ -1639,6 +1641,32 @@ class ChannelConfigTest(unittest.TestCase):
         os.remove(Path(self.repo, "playwright.config.mjs"))
         got = self.config({"playwright.config.cjs": 'exports.__esModule = true;\nexports.default = { testDir: "c" };\n'})
         self.assertEqual(got["testDir"], f"{self.repo}/c")
+
+    def test_chrome_path_overrides_channel(self):
+        """Job 1227: a non-blank SCRUM_CHROME (a worker's Chrome for Testing) launches that binary on chromium
+        projects, keeping their launchOptions, with no channel; blank or unset leaves today's channel output."""
+        bin_ = "/h/.local/share/cft/Google Chrome for Testing"
+        files = {"playwright.config.mjs": self.PROJECTS.replace(
+            'use: { baseURL: "http://localhost:1" }', 'use: { baseURL: "http://localhost:1", launchOptions: { args: ["--a"] } }'
+        ).replace('{ name: "setup" }', '{ name: "setup", use: { launchOptions: { slowMo: 5 } } }')}
+        got = self.config(files, chrome=f"  {bin_} ")
+        self.assertEqual(got["use"], {"baseURL": "http://localhost:1", "launchOptions": {"args": ["--a"]}})
+        self.assertEqual([p.get("use") for p in got["projects"]], [
+            {"launchOptions": {"slowMo": 5, "executablePath": bin_}},
+            {"browserName": "chromium", "launchOptions": {"args": ["--a"], "executablePath": bin_}},
+            {"defaultBrowserType": "chromium", "viewport": {"width": 1},
+             "launchOptions": {"args": ["--a"], "executablePath": bin_}},
+            {"browserName": "firefox"}, {"defaultBrowserType": "webkit"}])
+        bare = "export default { use: { headless: true, launchOptions: { args: ['--b'] } } };\n"
+        self.assertEqual(self.config({"playwright.config.mjs": bare}, None, bin_)["use"],
+                         {"headless": True, "launchOptions": {"args": ["--b"], "executablePath": bin_}})
+        self.assertEqual(self.config({"playwright.config.mjs": "export default {};\n"}, chrome=bin_)["use"],
+                         {"launchOptions": {"executablePath": bin_}})
+        for chrome in ("", "  "):
+            with self.subTest(chrome=chrome):
+                self.assertEqual(self.config(files, chrome=chrome), self.config(files))
+        self.assertEqual([p.get("use") for p in self.config(files)["projects"]][:2], [
+            {"launchOptions": {"slowMo": 5}, "channel": "chrome"}, {"browserName": "chromium", "channel": "chrome"}])
 
     def test_custom_reporter_resolved_from_repo(self):
         r = self.repo
@@ -1700,7 +1728,9 @@ PROMPT = f"/trevskills-scrum cloud-job 964-shop-x Build it.\n$(touch pwned) `tou
 START = ('cd ~/scrum-work/onewitharts && (umask 077 && mkdir -p .git/scrum-shop && cat > .git/scrum-shop/964-shop-x.prompt)'
          ' || exit 1; export CLAUDE_CONFIG_DIR="$HOME/.claude-owa"; [ -r "$HOME/.claude-owa/oauth-token" ] && export '
          'CLAUDE_CODE_OAUTH_TOKEN="$(cat "$HOME/.claude-owa/oauth-token")"; [ -r "$HOME/.config/typesafe/key" ] && export '
-         'TYPESAFE_API_KEY="$(cat "$HOME/.config/typesafe/key")"; export SCRUM_PW_CHANNEL=chrome SCRUM_SHOP=1 '
+         'TYPESAFE_API_KEY="$(cat "$HOME/.config/typesafe/key")"; export SCRUM_PW_CHANNEL=chrome SCRUM_CHROME='
+         '"$HOME/.local/share/chrome-for-testing-150.0.7871.125/chrome-mac-x64/Google Chrome for Testing.app/Contents/'
+         'MacOS/Google Chrome for Testing" SCRUM_SHOP=1 '
          'CLAUDE_NOTIFIER_DISABLE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0; nohup claude -p "$(cat '
          '.git/scrum-shop/964-shop-x.prompt)" --permission-mode acceptEdits --model \'claude-opus-4-5[1m]\' < /dev/null > '
          '.git/scrum-shop/964-shop-x.log 2>&1 & echo $!')
@@ -1747,8 +1777,8 @@ class DispatchTest(SetupCase):
         (clone / ".git").mkdir(parents=True)
         (h / ".local" / "bin").mkdir(parents=True)
         claude = h / ".local" / "bin" / "claude"
-        claude.write_text('#!/bin/sh\necho $$ > "$HOME/pid"\nprintf "%s|%s|%s|%s|%s|%s|%s|%s\\n" "$CLAUDE_CONFIG_DIR" '
-                          '"$CLAUDE_CODE_OAUTH_TOKEN" "${TYPESAFE_API_KEY-unset}" "$SCRUM_PW_CHANNEL" "$SCRUM_SHOP" '
+        claude.write_text('#!/bin/sh\necho $$ > "$HOME/pid"\nprintf "%s|%s|%s|%s|%s|%s|%s|%s|%s\\n" "$CLAUDE_CONFIG_DIR" '
+                          '"$CLAUDE_CODE_OAUTH_TOKEN" "${TYPESAFE_API_KEY-unset}" "$SCRUM_PW_CHANNEL" "$SCRUM_CHROME" "$SCRUM_SHOP" '
                           '"$CLAUDE_NOTIFIER_DISABLE" "$CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" "$PWD" > "$HOME/env"\n'
                           'for a in "$@"; do printf "%s\\n--\\n" "$a"; done > "$HOME/args"\necho session-out\n'
                           'touch "$HOME/done"\n')
@@ -1770,6 +1800,7 @@ class DispatchTest(SetupCase):
                 time.sleep(0.05)
             self.assertEqual(out.getvalue(), "")
             return pid
+        cft = f"{h}/.local/share/chrome-for-testing-150.0.7871.125/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
         pid = start()
         self.assertEqual(self.calls, [(START, 60, PROMPT.encode())])
         self.assertFalse([a for a in self.argv if TOKEN in " ".join(a) or "touch" in " ".join(a)])
@@ -1778,11 +1809,11 @@ class DispatchTest(SetupCase):
         self.assertEqual((h / "args").read_text(),
                          "-p\n--\n/trevskills-scrum cloud-job 964-shop-x Build it.\n$(touch pwned) `touch pwned2` "
                          f"{TOKEN}\n--\n--permission-mode\n--\nacceptEdits\n--\n--model\n--\nclaude-opus-4-5[1m]\n--\n")
-        self.assertEqual((h / "env").read_text(), f"{h}/.claude-owa|tok-owa-964|tsk-1075|chrome|1|1|0|{clone}\n")
+        self.assertEqual((h / "env").read_text(), f"{h}/.claude-owa|tok-owa-964|tsk-1075|chrome|{cft}|1|1|0|{clone}\n")
         jev_key.unlink()  # no key file: nothing exported, and the session still starts
         pid = start()
         self.assertEqual((h / "pid").read_text(), f"{pid}\n")
-        self.assertEqual((h / "env").read_text(), f"{h}/.claude-owa|tok-owa-964|unset|chrome|1|1|0|{clone}\n")
+        self.assertEqual((h / "env").read_text(), f"{h}/.claude-owa|tok-owa-964|unset|chrome|{cft}|1|1|0|{clone}\n")
         self.assertEqual(sorted(p.name for p in h.rglob("pwned*")), [])
         logs = clone / ".git" / "scrum-shop"
         self.assertEqual(((logs / "964-shop-x.prompt").read_text(), (logs / "964-shop-x.log").read_text()),
