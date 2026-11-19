@@ -2935,7 +2935,13 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
     Twins: 2+ runs with one project, command and head. One proc_ages call ages them all (a group with a pid it lacks is
     skipped); the oldest, or on a tie the lower pid, is kept, and each other run gets stop_tree and one
     board.log_waste("same-tests", ..., kept=, head=, command=) line.
-    procs defaults to process_scan(). Returns every pid signalled."""
+    Rerun: a run of its project's E2E command that this call did not stop, on the head of a finished (pass or fail)
+    e2e-full.json record, gets one log_waste line with pids [] and rerun=True, and no signal.
+    A line is written once per run pid (SAME_TESTS_LOGGED); a survivor gets stop_tree again. procs defaults to
+    process_scan(). Returns every pid signalled. SCRUM_IDLE_CLEANUP=0, or no project with a command, returns [] with
+    no scan."""
+    if os.environ.get("SCRUM_IDLE_CLEANUP") == "0":
+        return []
     repos, cmds = {}, {}
     for name, repo in board.projects().items():
         try:
@@ -2989,7 +2995,8 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
             hit.add(pid)
             pids, cpu = stop_tree(pid, procs)
             stopped += [p for p in pids if p not in stopped]
-            if pids:
+            if pids and pid not in SAME_TESTS_LOGGED:
+                SAME_TESTS_LOGGED.add(pid)
                 board.log_waste("same-tests", name, job_ids(cwd, kept_cwd), pids, cpu, kept=kept, head=head,
                                 command=c)
     kids: dict[int, list[int]] = {}

@@ -250,6 +250,70 @@ class SameTestsTest(unittest.TestCase):
                 self.record(rec)
                 self.assert_left_alone(procs)
 
+    def test_survivor_logged_once(self):
+        self.record({"at": 1, "head": HEAD, "result": "pass", "exit": 0, "failed": [], "lastGreen": HEAD})
+        procs = self.twin_pair(E2E)
+        for _ in range(2):  # the newer run survived SIGTERM: stopped again, never logged again
+            got, killed = self.run_pass(procs)
+            self.assertEqual(killed, [201, 202, 203])
+            self.assertEqual(sorted(got), [201, 202, 203])
+        stops = [l for l in self.lines() if not l.get("rerun")]
+        reruns = [l for l in self.lines() if l.get("rerun")]
+        self.assertEqual([(l["jobs"], l["kept"]) for l in stops], [(["2002-b", "2001-a"], 101)])
+        self.assertEqual([(l["jobs"], l["pids"]) for l in reruns], [(["2001-a"], [])])  # the kept run only
+
+    def test_off_when_idle_cleanup_disabled(self):
+        procs = self.twin_pair()
+        with mock.patch.dict(os.environ, SCRUM_IDLE_CLEANUP="0"), \
+                mock.patch.object(serve, "process_scan") as scan, mock.patch.object(serve.os, "kill") as kill:
+            self.assertEqual(serve.stop_same_tests(), [])
+            self.assertEqual(serve.stop_same_tests(procs), [])
+        scan.assert_not_called()
+        kill.assert_not_called()
+        self.assertEqual(self.lines(), [])
+
+    def test_no_commands_no_scan(self):
+        repo2 = self.base / "two"
+        (repo2 / "scrum").mkdir(parents=True)
+        (repo2 / "scrum" / "project.md").write_text(f"- Test: {TEST}\n")
+        (self.base / "projects.json").write_text(json.dumps([str(self.repo), str(repo2)]))
+        real = serve.e2e_command
+
+        def unreadable(root, label="E2E"):
+            if root == repo2 / "scrum":
+                raise PermissionError("project.md")
+            return real(root, label)
+
+        for text, scans in (("- Test: none\n- E2E:\n- Lint: none\n", 0), ("- Test: NONE\n- E2E: None\n", 0),
+                            (f"- Test: {TEST}\n- E2E: none\n", 1)):
+            with self.subTest(text=text):
+                (self.root / "project.md").write_text(text)
+                with mock.patch.object(serve, "e2e_command", side_effect=unreadable), \
+                        mock.patch.object(serve, "process_scan", return_value=[]) as scan:
+                    self.assertEqual(serve.stop_same_tests(), [])
+                self.assertEqual(scan.call_count, scans)
+
+    def test_ps_lsof_or_age_failure_stops_nothing(self):
+        procs = self.twin_pair()
+        with mock.patch.object(serve, "process_scan", return_value=[]) as scan:
+            self.assert_left_alone(None)  # ps failed
+        scan.assert_called_once_with()
+        cwds, ages = dict(self.cwds), dict(self.ages)
+        for case in ("lsof failed", "ps etime failed", "a twin's age missing", "no clean head"):
+            with self.subTest(case=case):
+                self.cwds, self.ages, self.heads = dict(cwds), dict(ages), {}
+                if case == "lsof failed":
+                    self.cwds = {}
+                elif case == "ps etime failed":
+                    self.ages = {}
+                elif case == "a twin's age missing":
+                    del self.ages[201]
+                else:
+                    self.heads = {str(self.wt["2001-a"]): None, str(self.wt["2002-b"]): None}
+                self.assert_left_alone(procs)
+        self.cwds, self.ages, self.heads = cwds, ages, {}
+        self.assertEqual(self.run_pass(procs)[1], [201, 202, 203])  # the same fixture with nothing failing stops one
+
     def test_test_and_e2e_not_twins(self):
         procs = [*bash_run(100, TEST), *bash_run(200, E2E)]
         self.cwds = {101: self.wt["2001-a"], 201: self.wt["2002-b"]}
