@@ -5756,6 +5756,35 @@ class DigestTest(unittest.TestCase):
         self.assertEqual([c.kwargs["account"] for c in bspawn.call_args_list], ["main", "owa"])
         self.assertEqual(s.RUNS["reg/digest"]["account"], "owa")
 
+    def test_window_tick_notes_the_limit_of_any_exited_run(self):
+        """Job 1216: any run (here cloud-home) that exited on a usage limit marks its account limited, the board job's
+        account when the run kept none, and each run's log is read once."""
+        s, base = self.serve, Path(self.tmp.name)
+        main, owa = base / "main", base / "owa"
+        main.mkdir()
+        owa.mkdir()
+        job_id = self.board.cmd_new(self.scrum, "shop work")
+        self.board.cmd_set(self.scrum, job_id, ["account=owa"])
+        reset = int(time.time()) + 7200
+        (self.scrum / "runs").mkdir(exist_ok=True)
+        (self.scrum / "runs" / "h.log").write_text(f"You've hit your weekly limit · resets_at={reset}\n")
+        proc = mock.Mock()
+        proc.poll.return_value = 1
+        s.RUNS[f"reg/{job_id}"] = {"action": "cloud-home", "started": time.time(), "proc": proc, "log": "runs/h.log",
+                                   "account": None}
+        self.addCleanup(s.RUNS.pop, f"reg/{job_id}", None)
+        accounts = json.dumps([["main", str(main), None], ["owa", str(owa), [80, 90]]])
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(main / "usage.json"), SCRUM_ACCOUNTS=accounts), \
+                mock.patch.object(self.board, "cmd_window_report", return_value=[]), \
+                mock.patch.object(self.board, "cmd_digest_due", return_value={"reason": "not due"}), \
+                mock.patch.object(s, "limit_reset", wraps=s.limit_reset) as read:
+            s.window_tick()
+            s.window_tick()
+            now = time.time()
+            self.assertEqual(self.board.limited_until("owa", now), reset)
+            self.assertIsNone(self.board.limited_until("main", now))
+        self.assertEqual(read.call_count, 1)
+
     def test_spawn_runs_an_off_board_id_on_the_given_account(self):
         """Job 1130: spawn(account=) runs an id not on the board on that account, not on pick_account's."""
         s = self.serve

@@ -1967,7 +1967,7 @@ def respawn_exited(project, root):
         alive = alive or board.session_alive_fn()  # one ps scan, only when something exited mid-stage
         if alive(job):
             continue  # another session (e.g. a Terminal) has the job; look again next tick
-        run["handled"] = True
+        run["handled"] = run["limit_noted"] = True  # hold_limited below notes the limit, not note_run_limits
         hit, reset, fixed = limit_reset(root, job)
         if hit:  # a reset already past (or none named) waits AUTO_RESUME_EVERY, so a resume never loops every tick
             now = time.time()
@@ -3492,28 +3492,40 @@ def window_tick():
     """board.cmd_window_report for every project, each in its own guard. Every tick, whether or not a scorecard was
     written, when digest-due's reason is a bad window, start the digest through digest_now (DIGEST_LOCK; no spawn
     while one runs), so a busy or failed start is retried next tick. Cool-down skips it: the scorecard is still
-    written, the skipped digest waits for cool-down to end (the dashboard Digest button is not held). A digest run
-    that exited on a usage limit marks its account limited (board.note_limit, once per run), and no digest starts
-    while board.pick_account finds no account with room, so the next one fails over to another account."""
+    written, the skipped digest waits for cool-down to end (the dashboard Digest button is not held). Each tick first
+    runs note_run_limits, and no digest starts while board.pick_account finds no account with room, so the next one
+    fails over to another account."""
     for project, repo in board.projects().items():
         try:
             root = repo / "scrum"
             board.cmd_window_report(root)
+            note_run_limits(project, root)
             now = time.time()
-            with RUNS_LOCK:
-                run = RUNS.get(f"{project}/digest")
-                run = run if run and not run.get("limit_noted") and run["proc"].poll() is not None else None
-            if run:
-                hit, reset, _ = limit_reset(root, {"runlog": run["log"]})
-                if hit:
-                    run["limit_noted"] = True
-                    board.note_limit(run.get("account") or board.accounts()[0].name,
-                                     reset if reset and reset > now else now + AUTO_RESUME_EVERY)
             if not board.cooling_down() and str(board.cmd_digest_due(root)["reason"]).startswith("bad window") \
                     and board.pick_account(now)[0] is not None:
                 digest_now(project, root)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: window report: {e}", file=sys.stderr, flush=True)
+
+
+def note_run_limits(project, root):
+    """Job 1216: read the log of every run of `project` that exited since the last tick, any action (start, resume,
+    cloud-home, run-all, ui-sweep, digest), once. One that ended on a usage limit marks its account limited
+    (board.note_limit) until the reset it names, or AUTO_RESUME_EVERY from now: the run's account, else its board
+    job's, else the first. So pick_account fails the next spawn over on every Mac even while usage.json lags."""
+    with RUNS_LOCK:
+        runs = [(k, r) for k, r in RUNS.items() if k.startswith(f"{project}/") and not r.get("limit_noted")
+                and r["proc"].poll() is not None]
+        for _, run in runs:
+            run["limit_noted"] = True
+    for key, run in runs:
+        hit, reset, _ = limit_reset(root, {"runlog": run["log"]})
+        if not hit:
+            continue
+        jobs = [] if run.get("account") else board.read_board(root).get("jobs", [])
+        account = run.get("account") or next((j.get("account") for j in jobs if j["id"] == key.split("/", 1)[1]), None)
+        now = time.time()
+        board.note_limit(account or board.accounts()[0].name, reset if reset and reset > now else now + AUTO_RESUME_EVERY)
 
 
 def weekly_tick():

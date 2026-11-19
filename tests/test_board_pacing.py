@@ -425,6 +425,17 @@ class PickAccountTest(AccountEnv):
             self.write(self.owa, seven=(90, 600000))  # the backup still stops at its 90 % reserve
             self.assertIsNone(board.pick_account(NOW)[0])
 
+    def test_full_primary_fails_over_without_a_marker(self):
+        """Job 1216: a primary at 100 % of a window that has not reset has no room, limit marker or not."""
+        self.write(self.main, seven=(100, 50000))  # resets first: primary
+        self.write(self.owa, seven=(11, 600000))
+        self.assertEqual(board.primary_account(NOW), "main")
+        self.assertEqual(board.pick_account(NOW)[0], "owa")
+        self.write(self.main, five=(100, 9000), seven=(40, 50000))  # a full five-hour window refuses too
+        self.assertEqual(board.pick_account(NOW)[0], "owa")
+        self.write(self.main, five=(100, -10), seven=(40, 50000))  # that window reset: main has room again
+        self.assertEqual(board.pick_account(NOW), ("main", None))
+
     def test_owa_as_primary_hands_work_to_main_at_97(self):
         """Job 1208: OWA as primary is held at 97 % 7d (PRIMARY_RESERVE); main as primary has no cap."""
         self.write(self.main, seven=(10, 600000))
