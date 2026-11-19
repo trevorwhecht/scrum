@@ -1,0 +1,12 @@
+{
+  "fit": false,
+  "why": "not tiny: no points, no Jev model answer",
+  "parent": null,
+  "points": null,
+  "hard_stop": null,
+  "estimate": {
+    "files": 0,
+    "lines": 0
+  },
+  "jev": null
+}
