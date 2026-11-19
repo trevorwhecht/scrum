@@ -13895,6 +13895,13 @@ class AsyncBacklogAddTest(_OwnServer, unittest.TestCase):
         self.assertIn('backlog spool: dropped {"text": "  ", "top": false}: backlog item text is empty', err.getvalue())
         self.assertNotIn(str(self.root), self.serve.SPOOL_DRAINING)
 
+    def test_startup_drain_skips_missing_spool_silently(self):
+        self.spool.unlink(missing_ok=True)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.serve.drain_all_spools()
+        self.assertEqual(err.getvalue(), "")
+
     def test_startup_drain_applies_leftover_line(self):
         self.spool.write_text('{"text": "Left over", "top": false, "points": 8}\n')
         self.serve.drain_all_spools()
