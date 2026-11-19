@@ -2582,6 +2582,10 @@ class ContractTest(unittest.TestCase):
             "3. Click through the new feature end to end, and in a refactor every existing flow whose request "
             "or output the diff changes, signed in as PROJECT's `Test sign-in:` account, including every save "
             "the diff adds or reroutes"), step)
+        # onewitharts job 1587: a value fill hid a grid typeahead stealing letters from a text box.
+        self.assertIn("by real key presses, never a value fill; the whole phrase must land with focus still in the field", step)
+        e2e = (ROOT / "skills" / "trevskills-e2e" / "SKILL.md").read_text()
+        self.assertIn("It types into a free-text field with `pressSequentially`, never only `fill`", e2e)
 
     def test_review_ui_signin_before_harness(self):
         text = (ROOT / "agents" / "scrum-review-ui.md").read_text()
