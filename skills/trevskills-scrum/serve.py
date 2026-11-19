@@ -2980,17 +2980,42 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
     twins = {key: runs for key, runs in groups.items() if len(runs) > 1}
     ages = proc_ages(sorted(pid for runs in twins.values() for pid, _ in runs)) if twins else {}
     job_ids = lambda *dirs: list(dict.fromkeys(j["id"] for j in map(job_for_cwd, dirs) if j and j.get("id")))
-    stopped = []
+    stopped, hit = [], set()
     for (name, c, head), runs in sorted(twins.items()):
         if any(pid not in ages for pid, _ in runs):
             continue
         (kept, kept_cwd), *rest = sorted(runs, key=lambda r: (-ages[r[0]], r[0]))
         for pid, cwd in rest:
+            hit.add(pid)
             pids, cpu = stop_tree(pid, procs)
             stopped += [p for p in pids if p not in stopped]
             if pids:
                 board.log_waste("same-tests", name, job_ids(cwd, kept_cwd), pids, cpu, kept=kept, head=head,
                                 command=c)
+    kids: dict[int, list[int]] = {}
+    for p, pp, _, _ in procs:
+        kids.setdefault(pp, []).append(p)
+    cpu_of, records = {p: c for p, _, c, _ in procs}, {}
+    for (name, c, head), runs in sorted(groups.items()):
+        if c != cmds[name].get("E2E"):
+            continue
+        if name not in records:
+            records[name] = e2e_full_record(repos[name][0] / "scrum") or {}
+        rec = records[name]
+        if rec.get("head") != head or rec.get("result") not in ("pass", "fail"):
+            continue
+        for pid, cwd in runs:
+            if pid in hit or pid in SAME_TESTS_LOGGED:
+                continue
+            SAME_TESTS_LOGGED.add(pid)
+            tree, todo = [], [pid]
+            while todo:
+                p = todo.pop()
+                if p not in tree:
+                    tree.append(p)
+                    todo += kids.get(p, [])
+            board.log_waste("same-tests", name, job_ids(cwd), [], round(sum(cpu_of.get(p, 0.0) for p in tree), 1),
+                            rerun=True, head=head, command=c)
     return stopped
 
 

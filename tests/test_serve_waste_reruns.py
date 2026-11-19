@@ -196,10 +196,65 @@ class SameTestsTest(unittest.TestCase):
 
     def test_dirty_checkout_not_a_twin(self):
         procs = self.twin_pair()
-        for dirty in ("2002-b", "2001-a"):
+        for dirty in (["2002-b"], ["2001-a"], ["2001-a", "2002-b"]):
             with self.subTest(dirty=dirty):
-                self.heads = {str(self.wt[dirty]): None}
+                self.heads = {str(self.wt[k]): None for k in dirty}
                 self.assert_left_alone(procs)
+
+    def test_two_commits_left_alone(self):
+        procs = self.twin_pair()
+        self.heads = {str(self.wt["2002-b"]): "beef002"}
+        self.assert_left_alone(procs)
+
+    def test_focused_run_beside_full_left_alone(self):
+        procs = [*bash_run(100, TEST), *bash_run(200, f"{TEST} -k cmd_ready"),
+                 *bash_run(300, E2E), *bash_run(400, f"{E2E} e2e/cart.spec.ts")]
+        self.cwds = {101: self.wt["2001-a"], 201: self.wt["2002-b"], 301: self.wt["2003-c"], 401: self.repo}
+        self.ages = {101: 20.0, 201: 2.0, 301: 20.0, 401: 2.0}
+        self.assert_left_alone(procs)
+
+    def record(self, rec):
+        path = self.root / "e2e-full.json"
+        path.unlink(missing_ok=True)
+        if rec is not None:
+            path.write_text(rec if isinstance(rec, str) else json.dumps(rec))
+
+    def rerun_procs(self):
+        """A full E2E run in worktree 2003-c and a full Test run in 2001-a, each alone."""
+        self.cwds.update({401: self.wt["2003-c"], 101: self.wt["2001-a"]})
+        self.ages.update({401: 3.0, 101: 3.0})
+        return [(400, 1, 5.0, cl("2003-c")), *bash_run(400, E2E, cpu=6.0), *bash_run(100, TEST)]
+
+    def test_rerun_on_fresh_head_logged_once(self):
+        procs = self.rerun_procs()
+        for result in ("pass", "fail"):
+            with self.subTest(result=result):
+                serve.SAME_TESTS_LOGGED.clear()
+                self.waste.unlink(missing_ok=True)
+                self.record({"at": 1, "head": HEAD, "result": result, "exit": 0, "failed": [], "lastGreen": None})
+                self.assertEqual(self.run_pass(procs), ([], []))
+                self.assertEqual(self.run_pass(procs), ([], []))
+                (line,) = self.lines()
+                line.pop("t")
+                self.assertEqual(line, {"kind": "same-tests", "project": "app", "jobs": ["2003-c"], "pids": [],
+                                        "cpu_min": 6.1, "rerun": True, "head": HEAD, "command": E2E})
+
+    def test_no_fresh_result_not_a_rerun(self):
+        procs = self.rerun_procs()
+        for state, rec in (("running", {"head": HEAD, "result": "running"}),
+                           ("loaded", {"head": HEAD, "result": "loaded"}),
+                           ("error", {"head": HEAD, "result": "error"}),
+                           ("other head", {"head": "beef002", "result": "pass"}),
+                           ("missing", None), ("unreadable", "{not json")):
+            with self.subTest(state=state):
+                self.record(rec)
+                self.assert_left_alone(procs)
+
+    def test_test_and_e2e_not_twins(self):
+        procs = [*bash_run(100, TEST), *bash_run(200, E2E)]
+        self.cwds = {101: self.wt["2001-a"], 201: self.wt["2002-b"]}
+        self.ages = {101: 20.0, 201: 2.0}
+        self.assert_left_alone(procs)
 
 
 if __name__ == "__main__":
