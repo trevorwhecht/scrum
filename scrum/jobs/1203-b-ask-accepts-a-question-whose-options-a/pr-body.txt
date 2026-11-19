@@ -1,0 +1,9 @@
+- `B ask` (CLI) now refuses a question whose options are all `resume`/`abort`, with `ask refused: add a followup <id> "<fix>" option, or run B wait-on <id> <blocker> instead of asking`. Guard, queue, CI billing and agent-types asks stay exempt.
+- New `resume_abort_only` helper shared with `cmd_process_health`.
+- Lane text audit: newjob.md (3 asks), merge.md step 5 and commands.md (bigboy blocked) gain a `File the fix as a follow-up` option.
+- Tests in tests/test_board.py and tests/test_contracts.py.
+
+Scrum lane: fast
+Fast lane: check gate + code review. Spec and review: scrum/jobs/1203-b-ask-accepts-a-question-whose-options-a/
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
