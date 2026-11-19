@@ -5279,6 +5279,19 @@ def machine_ok(path, manual=False, claim=False, own_load=False):
     return None
 
 
+def heavy_hold() -> str | None:
+    """machine_ok's swap reason, else its CPU load reason, else None: the only two checks a heavy step of a running job
+    (buildlock.py on build.lock and e2e.lock, render.py) waits out (job 1227). Free RAM alone, memory pressure, disk,
+    CPU busy, the session ceiling and cool-down never hold it. An unknown reading passes."""
+    swap = swap_used_pct()
+    if swap_pressing(free_ram_pct(), swap, MAX_SWAP_PCT):
+        return f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
+    load = cpu_load_pct()
+    if load is not None and load > MAX_CPU_LOAD_PCT:
+        return f"CPU load {load:.0f}% of {os.cpu_count()} cores (> {MAX_CPU_LOAD_PCT}%)"
+    return None
+
+
 LIGHT_LANES = ("fast", "lilguy")  # light_job: lanes that run no E2E, so ram_room sizes them at LIGHT_SESSION_RAM_PCT
 
 
