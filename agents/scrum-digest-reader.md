@@ -98,13 +98,14 @@ For `## Builder model`, use the `jev.log` of every job read:
 
 For `## Repeated questions`, read every `JOBS_DIR/../questions.log` line inside the 7-day cutoff above, not only the jobs in `jobs.txt`:
 - A line that is not valid JSON, or has neither `question` nor `pick`, is skipped.
+- Skip a line with `"auto": true`, and every `Terminal batch: project .claude edits` ask and its pick: `SKILL.md` `## Lilguy lane` already makes `Run it in a Terminal window` its default.
 - Join each ask line to the next pick line for the same job that comes after it in the file, unless that job asks a different normalised question first: a pick never answers an earlier, different question. An ask with no later pick still counts as asked, with pick `unanswered`; an `unanswered` pick never wins.
 - Group picks by label after trimming and lowercasing.
 - Normalise question text before grouping: lowercase it, then strip numbers, job ids, branch names, file paths and commit hashes.
 - List every normalised question asked 3 or more times (count ask lines, not jobs), sorted by count, highest first. Add ` — DEFAULT: <label>` when one pick won 3 or more times, and ` (unanimous)` after it when that same pick won every time.
 - This section is exempt from the 2 or more different jobs rule. Write `None` when no question qualifies.
 
-For `## Recurring blockers`, read the whole `JOBS_DIR/../questions.log`, not only the jobs in `jobs.txt`:
+For `## Recurring blockers`, read every `JOBS_DIR/../questions.log` line inside the 7-day cutoff above, not only the jobs in `jobs.txt`:
 - Only lines with a `blocker` key count. A line that is not valid JSON, or has an empty `blocker`, is skipped.
 - Normalise `blocker` text like questions before grouping: lowercase it, then strip numbers, job ids, branch names, file paths and commit hashes.
 - An entry needs 2 or more different jobs. Count lines; `kinds` and `verdicts` count the `kind` and `verdict` values of its lines.
