@@ -1,7 +1,7 @@
 """Job 1179 (BigBoy 1165, waste kind `cpu-hog`): serve.py report_hogs finds a process outside the scrum that held more
 than one core for every interval of the last 10 minutes, reports it in /api/machine "hogs", logs it once per run to
 waste.log and never signals it."""
-import copy, json, os, tempfile, unittest
+import copy, io, json, os, tempfile, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -175,6 +175,54 @@ class HogsTest(unittest.TestCase):
         self.assertEqual(len(self.lines()), 1, "never logged again in between")
         self.assertEqual(self.run_pass(scan(1260), 1260), [{**hog, "minutes": 10}])
         self.assertEqual([l["pct"] for l in self.lines()], [150, 150], "logged again after a full span back over the line")
+
+    def test_machine_status_carries_hogs(self):
+        status = lambda: serve.machine_status()["hogs"]
+        no_scan = (mock.patch.object(serve, "process_scan", side_effect=AssertionError("ps")),
+                   mock.patch.object(serve, "proc_cwds", side_effect=AssertionError("lsof")),
+                   mock.patch.object(serve, "shop_stats", return_value=[]),
+                   mock.patch.object(serve, "machine_history", return_value={}))
+        for p in no_scan:
+            p.start()
+        self.assertEqual(status(), [], "no report_hogs call yet")
+        for p in no_scan:
+            p.stop()
+        self.series(lambda t: [steady(4242, 150, SPIN)(t)], range(0, 601, 60))
+        for p in no_scan:
+            p.start()
+            self.addCleanup(p.stop)
+        self.assertEqual(status(), [{"name": "spin", "pid": 4242, "pct": 150, "minutes": 10}])
+
+    def test_watchdog_runs_report_hogs(self):
+        import inspect
+        src = inspect.getsource(serve.watchdog_tick)
+        self.assertIn("report_hogs()", src)
+        self.assertLess(src.index("stop_same_tests()"), src.index("report_hogs()"))
+        same = [n for n, _, _ in board.PROCESSES].index("Same tests")
+        self.assertEqual(board.PROCESSES[same + 1], ("CPU hogs", ("report_hogs",), ()))
+        s = serve
+        with mock.patch.object(s.board, "projects", return_value={}), \
+                mock.patch.object(s, "stop_leftovers"), mock.patch.object(s, "stop_two_sessions"), \
+                mock.patch.object(s, "stop_same_tests") as same_tests, \
+                mock.patch.object(s, "report_hogs", side_effect=RuntimeError("boom")) as hogs, \
+                mock.patch.object(s, "window_tick") as window, mock.patch.object(s, "idle_cleanup"), \
+                mock.patch.object(s, "auto_continue_tick"), mock.patch.object(s.board, "record_cpu_sample"), \
+                mock.patch.object(s, "weekly_tick"), mock.patch.object(s, "pulse_tick"), \
+                mock.patch.object(s, "cooldown_chime"), mock.patch("sys.stderr", new=io.StringIO()) as err:
+            s.watchdog_tick()
+        same_tests.assert_called_once_with()
+        hogs.assert_called_once_with()
+        window.assert_called_once()
+        self.assertIn("watchdog: cpu hogs: boom", err.getvalue(), "its own guard: a failure skips nothing after it")
+
+    def test_off_switch(self):
+        with mock.patch.dict(os.environ, SCRUM_IDLE_CLEANUP="0"), \
+                mock.patch.object(serve, "process_scan") as scan, mock.patch.object(serve, "proc_cwds") as cwds:
+            self.assertEqual(serve.report_hogs(), [])
+            self.assertEqual(serve.report_hogs([steady(4242, 150, SPIN)(0)], now=0), [])
+        scan.assert_not_called()
+        cwds.assert_not_called()
+        self.assertEqual(serve.HOG_READINGS, {})
 
 
 if __name__ == "__main__":

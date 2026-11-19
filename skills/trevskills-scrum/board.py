@@ -1481,6 +1481,7 @@ PROCESSES = (
     ("Leftover sessions", ("stop_leftovers", "stop_tree", "process_scan"), ()),
     ("Two sessions", ("stop_two_sessions",), ()),
     ("Same tests", ("stop_same_tests",), ()),
+    ("CPU hogs", ("report_hogs",), ()),
     ("E2E lock reaps", ("e2e_lock_reap",), ()),
     ("Digest retry", ("digest_retry_tick",), ()),
     ("Weekly digest", ("weekly_tick",), ()),

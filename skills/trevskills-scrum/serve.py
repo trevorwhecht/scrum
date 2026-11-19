@@ -3051,8 +3051,10 @@ def report_hogs(procs: list[tuple[int, int, float, str]] | None = None, now: flo
     "pid", "pct": its % of one core from the anchor (newest reading at or before now - HOG_SPAN_S) to now, "minutes":
     whole minutes since its run started}, sorted by pct descending, then pid. A run's first report writes one
     board.log_waste("cpu-hog") line. The list replaces HOGS and is returned. procs defaults to process_scan() and now
-    to time.monotonic()."""
+    to time.monotonic(). SCRUM_IDLE_CLEANUP=0 returns [] with no scan, as stop_same_tests."""
     global HOGS
+    if os.environ.get("SCRUM_IDLE_CLEANUP") == "0":
+        return []
     procs = process_scan() if procs is None else procs
     if not procs:  # ps failed: keep every reading, so the next good scan measures across the gap
         return HOGS
@@ -3285,6 +3287,7 @@ def watchdog_tick():
     Then stop_leftovers stops claude sessions still running a test, server or build after their job family finished.
     Then stop_two_sessions keeps one owner when two claude sessions work one job and stops the rest (asks when unclear).
     Then stop_same_tests stops the newer of two identical full Test or E2E runs on one clean commit and logs a full E2E rerun of a head e2e-full.json already holds.
+    Then report_hogs lists, never stops, each process outside the scrum over one core for 10+ minutes, for the meter.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard.
@@ -3424,6 +3427,10 @@ def watchdog_tick():
         stop_same_tests()
     except (Exception, SystemExit) as e:
         print(f"watchdog: same tests: {e}", file=sys.stderr, flush=True)
+    try:
+        report_hogs()
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: cpu hogs: {e}", file=sys.stderr, flush=True)
     if claim:
         try:
             auto_continue_tick(busy)
@@ -3912,7 +3919,8 @@ def machine_status():
     """The dashboard's machine-health meter: board.machine_ok's readings, thresholds and verdict. Disk is read on this
     file's volume (the dashboard spans every project, and they share one disk). machine_ok re-reads each value (a few
     ms each) so its verdict is exactly the gate's, whatever checks it grows. "history" and each shop entry's are
-    machine_history's sparkline readings, and each shop entry's "cooldown" is that worker's own flag (job 1185)."""
+    machine_history's sparkline readings, and each shop entry's "cooldown" is that worker's own flag (job 1185).
+    "hogs" is the list the watchdog's last report_hogs stored (no scan here)."""
     r = lambda v: None if v is None else round(v, 1)
     now, ram, cpu = time.time(), r(board.free_ram_pct()), r(board.cpu_load_pct())
     return {"free_ram_pct": ram, "swap_pct": r(board.swap_used_pct()),
@@ -3925,7 +3933,7 @@ def machine_status():
             "restart_waiting": restart_blockers(), "history": machine_history("mac", ram, cpu, now),
             "shop": [{**s, "cooldown": board.cooling_down(s["name"]),
                       "history": machine_history(("shop", s["name"]), s["free_ram_pct"], s["cpu_load_pct"], now)}
-                     for s in shop_stats()]}
+                     for s in shop_stats()], "hogs": HOGS}
 
 
 def machine_usage(now):
