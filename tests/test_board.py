@@ -5391,6 +5391,12 @@ class BoardTest(unittest.TestCase):
         (runs / f"{stamp(t0 + 1800)}-resume-j.log").write_text("x")  # not a start log
         self.assertEqual((row()[3], row()[6]), ("20m", "40m"))
         self.assertEqual(board._timing_row(self.root, "none", {}, {})[0][3], "-")
+        (runs / f"{stamp(t0 + 1200)}-start-j.log").unlink()  # no start log: first run log after spec.md starts round 1
+        self.assertEqual(row()[3], "0m")  # a resume log is not a start
+        (runs / f"{stamp(t0 + 1800)}-run-j.log").write_text("x")
+        self.assertEqual((row()[3], row()[6]), ("30m", "30m"))
+        (self.root / "jobs/j/claimed-at.txt").write_text(f"{t0 + 2400}\n")  # a later claim wins
+        self.assertEqual((row()[3], row()[6]), ("40m", "20m"))
 
     def timing_cell(self, waits, files=((6600, "round-1/a.md"), (7200, "round-1/head.txt"))):
         """Round-1 time cell for a 2h round (spec.md at t0) with the given wait starts (secs after t0)."""
@@ -5632,7 +5638,7 @@ class BoardTest(unittest.TestCase):
         os.utime(self.root / "jobs/j/feature.md", (t0, t0))
         os.utime(self.root / "jobs/j/spec.md", (t0 + 3 * 3600 + 600, t0 + 3 * 3600 + 600))
         claimed = self.root / "jobs/j/claimed-at.txt"
-        for bad in ("", "soon", f"{t0 + 4 * 3600}", f"{t0 - 60}"):  # empty, non-numeric, after spec.md, before feature.md
+        for bad in ("", "soon", f"{t0 - 60}"):  # empty, non-numeric, before feature.md (a claim after spec.md starts round 1: see test_timing_build_start_from_run_log)
             claimed.write_text(bad)
             self.assertEqual(board._timing_row(self.root, "j", {}, {})[0][2:4], ["3h10m", "0m"], bad)
 
