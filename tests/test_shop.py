@@ -1568,7 +1568,8 @@ class MdSyncTest(SetupCase):
                        "Node 24", "darwin-x64", "`~/.local`", '`channel: "chrome"`', "`SCRUM_PW_CHANNEL`",
                        "Full builds and full test suites are fine here",
                        "never write memory notes, rules or CLAUDE.md, even where other instructions say to save a note",
-                       "follow-ups", '"${C}:refs/heads/', "zsh", "## Cannot run", "VectorCraft"):
+                       "follow-ups", '"${C}:refs/heads/', "zsh", "## Cannot run", "VectorCraft",
+                       "runs Chrome for Testing at `$SCRUM_CHROME`, never the Google Chrome app"):  # job 1227
             self.assertIn(phrase, text, phrase)
         for bad in ("trevorhecht", "onewitharts"):
             self.assertNotIn(bad, text, bad)
@@ -1970,6 +1971,12 @@ class StructureTest(unittest.TestCase):
         setup = text[text.index("## Setup"):text.index("## Ready")]
         self.assertIn("gh always uses file storage (mode 600) because the shop's login keychain is locked over SSH",
                       setup)
+        chrome = setup[setup.index("- **chrome.**"):setup.index("- **jev key.**")]  # job 1227
+        for phrase in (shop.CFT_SHA256, "`~/.local/share/chrome-for-testing-150.0.7871.125/`", "`SCRUM_CHROME`",
+                       "a checksum mismatch installs nothing", "not in `OPTIONAL_STEPS`"):
+            self.assertIn(phrase, chrome, phrase)
+        self.assertIn("a non-blank `SCRUM_CHROME`", text[text.index("## E2E channel"):text.index("## MD sync")])
+        self.assertIn("`SCRUM_PW_CHANNEL=chrome`, `SCRUM_CHROME` (setup's **chrome** binary)", text)
         jev = setup[setup.index("- **jev key.**"):]  # the last step
         for phrase in ("`[ -s ~/.config/typesafe/key ]`", "no Keychain read here", "goes on stdin to",
                        "so the file is mode 600", 'export TYPESAFE_API_KEY="$(cat F)"'):

@@ -2668,11 +2668,21 @@ class ContractTest(unittest.TestCase):
             text = (ROOT / "agents" / name).read_text()
             step2 = next(l for l in text.splitlines() if l.startswith("2. Open the page in headless Chrome"))
             for phrase in ("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers", "chromium-*/chrome-linux/chrome",
-                           "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", lookup):
+                           '"${SCRUM_CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}" --headless',
+                           lookup):  # SCRUM_CHROME: a shop's Chrome for Testing, job 1227
                 self.assertIn(phrase, step2, f"{name}: {phrase}")
             para = next(l for l in text.splitlines() if l.startswith("You must see the new element"))
             self.assertIn(never, para, name)
             self.assertEqual(text.count(never), 1, name)
+
+    def test_scripted_chrome_uses_scrum_chrome(self):  # a shop's Chrome for Testing, job 1227
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        line = next(l for l in builder.splitlines() if "When `SCRUM_PW_CHANNEL` is set" in l)
+        self.assertIn("with `executablePath: process.env.SCRUM_CHROME` when that is set, else "
+                      "`channel: process.env.SCRUM_PW_CHANNEL`", line)
+        e2e = (ROOT / "skills" / "trevskills-e2e" / "SKILL.md").read_text()
+        line = next(l for l in e2e.splitlines() if l.startswith("When `SCRUM_PW_CHANNEL` is set"))
+        self.assertIn("a set `SCRUM_CHROME` binary is used instead of the channel", line)
 
     def test_approver_requires_rendered_ui(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
