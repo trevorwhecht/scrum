@@ -1036,7 +1036,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26603, "newjob.md")  # +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26740, "newjob.md")  # +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -2926,6 +2926,24 @@ class ContractTest(unittest.TestCase):
         import shlex
         return shlex.split(span)[3]  # B ask <id> <question> ...
 
+    def test_ask_lines_not_resume_abort_only(self):
+        """`board.py ask` refuses an ask offering only resume/abort unless it is an automatic (exempt) ask."""
+        import shlex
+        exempt = ("Unpushed commits in ", " main checkout is on ", "waiting on the E2E queue", "failed account payments")
+        spans = self.ask_spans()
+        self.assertGreaterEqual(len(spans), 30)  # spans split over lines are read too ([^`]+ crosses newlines)
+        seen_exempt = set()
+        for name, span in spans:
+            words = shlex.split(span)
+            question = words[3]
+            commands = [words[i + 1].partition("=")[2] for i, w in enumerate(words) if w in ("--a", "--b", "--c")]
+            hit = next((e for e in exempt if e in question), None)
+            if hit:
+                seen_exempt.add(hit)
+                continue
+            self.assertFalse(all(c.startswith(("resume ", "abort ")) for c in commands), f"{name}: {span}")
+        self.assertEqual(seen_exempt, set(exempt))
+
     def test_ask_prefixes_unchanged(self):
         questions = [self.ask_question(sp) for _, sp in self.ask_spans()]
         for prefix in ("Hard stop: schema — ", "blocked: ", "bigboy off track: ",
@@ -3116,7 +3134,8 @@ class ContractTest(unittest.TestCase):
         self.assertIn("Allow at most **2** attempts; only after both fail, run `B ask $ID \"merge conflicts with "
                       "$DEFAULT after 2 tries: newer changes on $DEFAULT edit the same lines as this job, and two automatic attempts to "
                       "combine them failed.\" --kind conflict --a \"Put back on the backlog=abort $ID --requeue\" "
-                      "--b \"Remove this job=abort $ID --cascade\" --title MERGE_CONFLICT --recommend <key> '<why>'` and stop.", step5)
+                      "--b \"Remove this job=abort $ID --cascade\" --c \"File the fix as a follow-up=followup $ID \\\"<fix>\\\"\" "
+                      "--title MERGE_CONFLICT --recommend <key> '<why>'` and stop.", step5)
         for phrase in ("git -C \"$WT\" merge \"origin/$DEFAULT\" --no-edit", "go to **Check gate**"):
             self.assertIn(phrase, step5, phrase)
         for phrase in ("git -C \"$WT\" rev-parse HEAD", "diff --name-only <pre-merge HEAD> HEAD -- package-lock.json",
@@ -3253,7 +3272,8 @@ class ContractTest(unittest.TestCase):
         self.assertIn("only the `waiting` children that depend (directly or through another `waiting` child) on an "
                       "aborted sibling", resume)
         self.assertIn("If none do, run `B ask <id> '<its reason>' --a \"Carry on=resume <id>\" "
-                      "--b \"Remove this job=abort <id> --cascade\" --title BIGBOY_BLOCKED --recommend <key> '<why>'`", resume)
+                      "--b \"Remove this job=abort <id> --cascade\" --c \"File the fix as a follow-up=followup <id> \\\"<fix>\\\"\" "
+                      "--title BIGBOY_BLOCKED --recommend <key> '<why>'`", resume)
         self.assertEqual(resume.count("same question, options, `--title` and --recommend"),1)
         self.assertNotIn("after Trevor picks Throw away the changes", resume)
         for phrase in ("**Answered question** (any other reason)", "must be in the job's board `options` (else **refuse**)",

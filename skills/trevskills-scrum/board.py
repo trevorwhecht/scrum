@@ -2245,6 +2245,11 @@ def unreadable_question(question):
     return len(question.split()) > 40 or bool(HEALTH_UNREADABLE_RE.search(question))
 
 
+def resume_abort_only(commands):
+    """True when an ask offers options and every option command is a `resume ` or `abort ` (lanes/stops.md)."""
+    return bool(commands) and all(isinstance(c, str) and c.startswith(("resume ", "abort ")) for c in commands)
+
+
 HEALTH_STOP_KINDS = ("ask", "stall", "machine", "refused", "bigboy")
 HEALTH_TEST_ROLES = ("review-e2e", "review-ui", "review-ux")
 
@@ -2349,8 +2354,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
         if kind not in (None, "ask"):
             continue
         opts = q.get("options") if isinstance(q.get("options"), list) else []
-        if opts and all(isinstance(o, dict) and str(o.get("command") or "").startswith(("resume ", "abort "))
-                        for o in opts):
+        if resume_abort_only([str(o.get("command") or "") if isinstance(o, dict) else None for o in opts]):
             hits["resume_abort_stops"].append(job)
         question = str(q.get("question") or "")
         if unreadable_question(question):
@@ -7683,6 +7687,13 @@ def main(argv=None):
         if unreadable_question(a.question):
             raise SystemExit("ask refused: keep the question to 40 words or fewer, with no file path or "
                              "\"rule N\"; move the detail into stop.md and ask again.")
+        commands = [o.partition("=")[2].strip() for o in (a.a, a.b, a.c) if o is not None]
+        q = a.question.strip()  # cmd_ask stores it stripped
+        # the automatic asks process_health already ignores keep Carry on=resume / Remove this job=abort
+        exempt = is_guard_ask(q) or QUEUE_ASK_RE.match(q) or CI_BILLING_RE.search(q) or AGENT_TYPES_RE.search(q)
+        if resume_abort_only(commands) and not exempt:
+            raise SystemExit('ask refused: add a followup <id> "<fix>" option, or run B wait-on <id> <blocker> '
+                             'instead of asking')
         out = cmd_ask(a.dir, a.id, a.question, [o for o in (a.a, a.b, a.c) if o is not None], a.kind,
                       a.recommend, title=a.title)
         if a.kind is not None:

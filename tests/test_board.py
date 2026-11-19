@@ -467,6 +467,43 @@ class BoardTest(unittest.TestCase):
         self.assertTrue(board.unreadable_question("per rule 3"))
         self.assertFalse(board.unreadable_question(" ".join(["w"] * 40)))
 
+    RESUME_ABORT_REFUSAL = ('ask refused: add a followup <id> "<fix>" option, or run B wait-on <id> <blocker> '
+                            'instead of asking')
+
+    def resume_abort_args(self, job_id, question="Q?", *extra):
+        return ["--dir", str(self.root), "ask", job_id, question, "--a", f"Go=resume {job_id}",
+                "--b", f"Stop=abort {job_id}", *extra, "--title", "MERGE_CONFLICT"]
+
+    def test_ask_refuses_resume_abort_only(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build", "reason=working"])
+        with self.assertRaises(SystemExit) as cm:
+            board.main(self.resume_abort_args(job_id))
+        self.assertEqual(str(cm.exception.code), self.RESUME_ABORT_REFUSAL)
+        job = self.jobs()[0]
+        self.assertEqual(job["stage"], "build")
+        self.assertNotIn("question", job)
+        self.assertFalse((self.root / "questions.log").exists())
+
+    def test_ask_accepts_resume_abort_with_other_option(self):
+        for third in ('File a follow-up=followup {id} "fix it"', "Ship=approve {id}", 'Redo=rework {id} "fix it"'):
+            with self.subTest(third=third):
+                job_id = board.cmd_new(self.root, "x")
+                board.main(self.resume_abort_args(job_id, "Q?", "--c", third.format(id=job_id)))
+                job = next(j for j in self.jobs() if j["id"] == job_id)
+                self.assertEqual((job["stage"], job["question"]), ("needs-human", "Q?"))
+
+    def test_ask_resume_abort_exempt_asks(self):
+        for stage, question in (("merging", "Unpushed commits in repo: x"),
+                                ("check", "waiting on the E2E queue"),
+                                ("merging", "GitHub refused to start the checks because of failed account payments.")):
+            with self.subTest(question=question):
+                job_id = board.cmd_new(self.root, "x")
+                board.cmd_set(self.root, job_id, [f"stage={stage}", "reason=working"])
+                board.main(self.resume_abort_args(job_id, question))
+                job = next(j for j in self.jobs() if j["id"] == job_id)
+                self.assertNotEqual(job.get("reason"), "working", "the ask was not refused")
+
     def test_ask_cli_three_options(self):
         job_id = board.cmd_new(self.root, "x")
         buf = io.StringIO()
@@ -491,6 +528,7 @@ class BoardTest(unittest.TestCase):
         job_id = board.cmd_new(self.root, "x")
         board.main(["--dir", str(self.root), "ask", job_id, "prod check: the deploy failed.",
                     "--a", f"Try again=resume {job_id}", "--b", f"Stop tracking this job=abort {job_id}",
+                    "--c", f'File a follow-up=followup {job_id} "fix the deploy"',
                     "--title", "PROD_CHECK_FAILED", "--recommend", "a", "the deploy may have been flaky"])
         job = self.jobs()[0]
         self.assertEqual((job["stage"], job["question"]), ("needs-human", "prod check: the deploy failed."))
