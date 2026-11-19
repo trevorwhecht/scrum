@@ -2078,7 +2078,7 @@ class ServeTest(unittest.TestCase):
 
     def test_api_machine(self):
         keys = ["cooldown", "cpu_busy_pct", "cpu_cores", "cpu_load_pct", "free_disk_gb", "free_ram_pct", "history",
-                "max_cpu_busy_pct", "max_cpu_load_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct",
+                "hogs", "max_cpu_busy_pct", "max_cpu_load_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct",
                 "restart_waiting", "sessions", "shop", "swap_pct", "usage", "verdict"]
         cores = mock.patch.object(self.serve.os, "cpu_count", return_value=8)
         cores.start()
@@ -2093,7 +2093,7 @@ class ServeTest(unittest.TestCase):
                                "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)",
                                "usage": "unknown", "cooldown": False, "sessions": 0,
                                "cpu_busy_pct": 1.0, "max_cpu_busy_pct": 90,
-                               "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 300})
+                               "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 300, "hogs": []})
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25",
                              SCRUM_CPU_BUSY_PCT="42.56"):
             self.assertEqual({k: v for k, v in self.req("GET", "/api/machine")[1].items() if k not in ("restart_waiting", "shop", "history")},
@@ -2101,7 +2101,7 @@ class ServeTest(unittest.TestCase):
                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)",
                               "usage": "unknown", "cooldown": False, "sessions": 0,
                               "cpu_busy_pct": 42.6, "max_cpu_busy_pct": 90,
-                              "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 300})
+                              "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 300, "hogs": []})
         with mock.patch.dict(os.environ, SCRUM_CPU_BUSY_PCT="95.04"):
             out = self.req("GET", "/api/machine")[1]
         self.assertEqual((out["cpu_busy_pct"], out["verdict"]), (95.0, "CPU busy 95% (> 90%)"))
@@ -2123,7 +2123,7 @@ class ServeTest(unittest.TestCase):
                                              "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
                                              "verdict": None, "usage": "unknown", "cooldown": False, "sessions": 0,
                                              "cpu_busy_pct": None, "max_cpu_busy_pct": 90,
-                                             "cpu_load_pct": None, "cpu_cores": 8, "max_cpu_load_pct": 300}))
+                                             "cpu_load_pct": None, "cpu_cores": 8, "max_cpu_load_pct": 300, "hogs": []}))
         self.assertEqual(set(disk), {ROOT / "skills" / "trevskills-scrum"}, "disk is read on serve.py's own volume")
         self.assertEqual(self.req("GET", "/api/machine", headers={"Host": "evil.example"})[0], 403)
 
