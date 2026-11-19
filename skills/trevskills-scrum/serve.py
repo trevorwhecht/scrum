@@ -1043,8 +1043,8 @@ def e2e_full_due(record, head, merges, now, settled=False) -> bool:
     """A full run is due with no record yet, else only when HEAD moved and 5+ commits or 24 h passed since the last,
     or the project is settled (cool down is on and no job blocks a restart there). An `error` or `running` record
     24 h+ old is due whatever the HEAD, so a failed or orphaned run is retried. A `loaded` record (a fail under load)
-    is due at once, whatever the HEAD, merges or age."""
-    if not record or record.get("result") == "loaded":
+    or a `busy` one (another dev server held the checkout) is due at once, whatever the HEAD, merges or age."""
+    if not record or record.get("result") in ("loaded", "busy"):
         return True
     if record.get("result") in ("error", "running") and now - (record.get("at") or 0) >= E2E_FULL_EVERY:
         return True
@@ -1121,16 +1121,23 @@ def e2e_full_tick(project, repo, root) -> None:
     board.machine_ok passes (without claim=True, so cool-down never stops it). During
     cool down, once no job on this project blocks a restart, any new HEAD is due: the merges bundled into one run.
     With no run in flight here, every project's `running` record is an orphan (a serve reload killed its thread; one
-    serve.py per Mac) and is rewritten as `error` first, keeping its head and lastGreen."""
+    serve.py per Mac) and is rewritten as `error` first, keeping its head and lastGreen; then every `error`/exit-null
+    record goes through e2e_full_from_log, so an orphan that finished later is filed. A `running` sweep older than
+    E2E_FULL_STALE still holds the run while a claude process names its dir. A `busy` record on this HEAD is retried
+    once (retried=True)."""
     cmd = e2e_command(root)
     if cmd.lower() in ("", "none") or E2E_FULL["running"]:
         return
     now = time.time()
     for other in board.projects().values():
         if (rec := e2e_full_record(other / "scrum")) and rec.get("result") == "running":
-            write_e2e_full(other / "scrum", {**rec, "result": "error"})
+            rec = {**rec, "result": "error"}
+            write_e2e_full(other / "scrum", rec)
+        if rec and rec.get("result") == "error" and rec.get("exit") is None:
+            e2e_full_from_log(other, other / "scrum", rec)
     sweep = ui_sweep_record(root)
-    if sweep and sweep.get("result") == "running" and now - (sweep.get("at") or 0) < E2E_FULL_STALE:
+    if sweep and sweep.get("result") == "running" and (now - (sweep.get("at") or 0) < E2E_FULL_STALE or (
+            sweep.get("dir") and board.session_alive_fn()({"id": sweep["dir"]}))):
         return
     if not e2e_queue_free() or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip():
         return
@@ -1144,17 +1151,46 @@ def e2e_full_tick(project, repo, root) -> None:
     write_e2e_full(root, {"at": now, "head": head, "result": "running", "exit": None, "failed": [],
                           "lastGreen": last_green})
     E2E_FULL["running"] = project
-    threading.Thread(target=e2e_full_run, args=(repo, root, cmd, head, now, last_green), daemon=True).start()
+    retried = (record or {}).get("result") == "busy" and (record or {}).get("head") == head
+    threading.Thread(target=e2e_full_run, args=(repo, root, cmd, head, now, last_green),
+                     kwargs={"retried": retried}, daemon=True).start()
 
 
-def e2e_full_run(repo, root, cmd, head, at, last_green) -> dict:
+def e2e_full_from_log(repo, root, rec) -> dict | None:
+    """An `error` record with exit None (an orphan, or e2e_full_run's except branch) whose root/e2e-full.log, written
+    since the record's `at`, holds Playwright's finished `N failed` summary becomes `fail` with those failures, filed
+    as e2e_full_run files them. Returns the new record, else None (a missing or unreadable log too)."""
+    if rec.get("result") != "error" or rec.get("exit") is not None:
+        return None
+    log = root / "e2e-full.log"
+    try:
+        if log.stat().st_mtime < (rec.get("at") or 0):
+            return None
+        output = log.read_text(errors="replace")
+    except OSError:
+        return None
+    test_dir = board._e2e_dir(Path(repo))
+    failed = e2e_full_failures(output, test_dir)
+    if not failed:
+        return None
+    new = {**rec, "result": "fail", "failed": failed}
+    write_e2e_full(root, new)
+    timed_out = e2e_full_timed_out(output, test_dir)
+    e2e_full_backlog(repo, root, failed, rec.get("lastGreen"), rec["head"],
+                     timeouts_only=all((f["spec"], f["line"]) in timed_out for f in failed))
+    return new
+
+
+def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
     """Run cmd in repo through buildlock.py on the E2E lock (output to root/e2e-full.log), record the result in
     root/e2e-full.json and add one backlog item per failing spec not already on an open line, or one combined item
     for them all when every failure is a test timeout (e2e_full_timed_out). Exit 0 is pass; a non-zero exit is loaded
     when board.cpu_load_pct, read after each E2E_FULL_LOAD_SECS of the wait and once at exit, went over
     board.MAX_CPU_LOAD_PCT (it keeps exit and failed, adds nothing, and e2e_full_due re-runs it); otherwise a
-    non-zero exit with parsed failures is fail; any other non-zero exit (lock timeout 124, a dev-server error) is
-    error and adds nothing. An exception before the result is recorded records error (exit None) and re-raises."""
+    non-zero exit with parsed failures is fail; a non-zero exit whose log says Playwright's `webServer exited early`
+    (another dev server held the checkout) is busy, due at once, unless retried (the record before was busy on this
+    head), when it is error; any other non-zero exit (lock timeout 124, a dev-server error) is error and adds nothing.
+    An exception before the result is recorded records error (exit None) and re-raises."""
     rec = None
     try:
         env = {**os.environ, "SCRUM_BUILD_LOCK": str(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock")}
@@ -1181,7 +1217,8 @@ def e2e_full_run(repo, root, cmd, head, at, last_green) -> dict:
         test_dir = board._e2e_dir(Path(repo))
         failed = e2e_full_failures(output, test_dir) if code else []
         loaded = code != 0 and any((load or 0) > board.MAX_CPU_LOAD_PCT for load in loads)
-        result = "pass" if code == 0 else "loaded" if loaded else "fail" if failed else "error"
+        early = not retried and "webServer exited early" in ANSI_RE.sub("", output)
+        result = "pass" if code == 0 else "loaded" if loaded else "fail" if failed else "busy" if early else "error"
         rec = {"at": at, "head": head, "result": result, "exit": code, "failed": failed,
                "lastGreen": head if code == 0 else last_green}
         write_e2e_full(root, rec)
@@ -1243,7 +1280,8 @@ def write_ui_sweep(root, rec):
 def ui_sweep_tick(project, repo, root) -> None:
     """Start one headless sweep session (spawn id ui-sweep) on repo's main checkout when project.md has UI globs and a
     Dev command, no sweep runs anywhere, no full E2E run is in flight (E2E_FULL; its next dev holds the dev lock), the
-    tracked tree is clean, board.machine_ok(claim=True) passes and e2e_full_due
+    E2E lock is free (an orphaned full run holds it), the tracked tree is clean, board.machine_ok(claim=True) passes
+    and e2e_full_due
     holds. It sweeps since the last record's head (its since after a running or error record, so a dead sweep's range is
     kept; HEAD~5 or the root commit with no record). No changed screen records a pass and starts nothing."""
     if E2E_FULL["running"] or not board.ui_globs(root) or e2e_command(root, "Dev command").lower() in ("", "none"):
@@ -1253,7 +1291,8 @@ def ui_sweep_tick(project, repo, root) -> None:
         rec = ui_sweep_record(other / "scrum")
         if rec and rec.get("result") == "running" and now - (rec.get("at") or 0) < E2E_FULL_STALE:
             return
-    if board._git(repo, "status", "--porcelain", "--untracked-files=no").strip() or board.machine_ok(root, claim=True):
+    if not e2e_queue_free() or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip() \
+            or board.machine_ok(root, claim=True):
         return
     record = ui_sweep_record(root)
     head = board._git(repo, "rev-parse", "HEAD").decode().strip()
@@ -1637,8 +1676,8 @@ def cloud_tick(project, root, jobs, now=None):
     Before the sync, each stage-cloud job with a `shop` pid asks shop.ended on its own worker (its `worker` alias, else
     shop.ALIAS: jobs dispatched before workers.txt ran on shopmac); after a sync with no error, one whose
     session ended (a str) and that is still in stage cloud after the sync is aborted with SHOP_ENDED
-    (requeued unless a child), after a usage-limit line in its log tail marks its account limited (note_limit); once
-    that abort took effect, shop_pr_close closes the job's open unlabelled PR, so the rerun opens no duplicate."""
+    (requeued unless a BigBoy child), after a usage-limit line in its log tail marks its account limited (note_limit);
+    once that abort took effect, shop_pr_close closes the job's open unlabelled PR, so the rerun opens no duplicate."""
     if board.cooling_down():
         return
     now = time.time() if now is None else now
