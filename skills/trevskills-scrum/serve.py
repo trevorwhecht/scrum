@@ -6141,7 +6141,7 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
         # every write is in wt, so removing it (finally) is the undo
         undo = lambda why: ([], sorted(queued + [entry(p, why) for p in {p["id"]: p for p, _ in done}.values()], key=lambda q: order[q["id"]]))
         try:
-            job_id = board.cmd_new(scrum, title)
+            job_id = board.cmd_new(scrum, title, started_by="digest")  # write_pulse skips it: not a hand start or a claim
             (scrum / "jobs" / job_id / "feature.md").write_text(feature)
             board.cmd_set(scrum, job_id, ["lane=lilguy"])
         except (OSError, SystemExit) as e:
