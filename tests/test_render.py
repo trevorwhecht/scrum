@@ -7,8 +7,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
-os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty: main()'s hold (job 1227) never reads this machine's swap
-os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly nil: main()'s hold never waits on this machine's load
+os.environ["SCRUM_SWAP_PCT"] = "0"  # no swap: main()'s hold (job 1227) never reads this machine's swap
+os.environ["SCRUM_CPU_LOAD_PCT"] = "0"  # no load: main()'s hold never waits on this machine's load
 import render  # noqa: E402
 
 PAGE = b"<!doctype html><title>t</title><h1>hi</h1><script>console.error('boom')</script>"
@@ -181,20 +181,60 @@ class RenderUnitTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertTrue((self.out / "notes.txt").exists())
 
-    def test_main_holds_before_render(self):
-        """Job 1227: main() waits out board.heavy_hold (buildlock.hold) before render() starts Chrome."""
-        calls, board = [], object()
-        hold = mock.patch.object(render.buildlock, "hold", side_effect=lambda *a: calls.append(("hold", *a)) or 0.0)
-        fake = mock.patch.object(render, "render", side_effect=lambda *a: calls.append(("render",)) or {"pages": []})
-        with hold, fake, mock.patch.object(render.buildlock, "board_module", return_value=board):
-            self.assertEqual(run_main(["http://127.0.0.1:1", str(self.out), "/"])[0], 0)
-            self.assertEqual(calls, [("hold", board, "render.py"), ("render",)])
-            calls.clear()
-            self.assertEqual(run_main(["http://127.0.0.1:1", str(self.out)])[0], 2, "usage error")
-            self.out.mkdir()
-            (self.out / "notes.txt").write_text("keep")
-            self.assertEqual(run_main(["http://127.0.0.1:1", str(self.out), "/"])[0], 2, "refused out_dir")
-            self.assertEqual(calls, [])
+
+class RenderHoldTest(unittest.TestCase):
+    """Job 1227: main() waits while buildlock.machine_hold gives a reason, HOLD_CAP s at most, before render() starts
+    Chrome. A fake clock: time.sleep advances what time.monotonic reads."""
+    LOAD = "CPU load 400% of 8 cores (> 300%)"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.out = Path(tmp.name) / "out"
+        self.calls, self.clock = [], [1000.0]
+
+    def main(self, *reasons, board=None):
+        """main() with machine_hold giving `reasons` in turn (the last for ever after); (exit code, stdout, stderr)."""
+        given = list(reasons)
+
+        def machine_hold(b):
+            self.calls.append(("hold", b))
+            return given.pop(0) if len(given) > 1 else given[0]
+
+        def sleep(s):
+            self.calls.append(("sleep", s))
+            self.clock[0] += s
+        board = object() if board is None else board
+        with mock.patch.object(render.buildlock, "machine_hold", side_effect=machine_hold), \
+                mock.patch.object(render.buildlock, "board_module", return_value=board), \
+                mock.patch.object(render.time, "sleep", side_effect=sleep), \
+                mock.patch.object(render.time, "monotonic", side_effect=lambda: self.clock[0]), \
+                mock.patch.object(render, "render", side_effect=lambda *a: self.calls.append(("render",)) or {
+                    "pages": [{"path": "/", "status": "ok"}]}):
+            return run_main(["http://127.0.0.1:1", str(self.out), "/"])
+
+    def test_hold_then_render(self):
+        self.assertEqual((render.HOLD_CAP, render.HOLD_POLL), (300, 5))
+        board = object()
+        got = self.main(self.LOAD, self.LOAD, None, board=board)
+        self.assertEqual(got, (0, '{"pages": [{"path": "/", "status": "ok"}], "error": null}\n',
+                               f"render.py: holding for the machine: {self.LOAD}\n"))
+        self.assertEqual(self.calls, [("hold", board), ("sleep", 5), ("hold", board), ("sleep", 5), ("hold", board),
+                                      ("render",)])
+
+    def test_hold_cap_renders_anyway(self):
+        code, out, err = self.main(self.LOAD)
+        self.assertEqual((code, err), (0, f"render.py: holding for the machine: {self.LOAD}\n"))
+        self.assertEqual(self.calls[-1], ("render",))
+        self.assertEqual(self.calls.count(("render",)), 1)
+        self.assertEqual([c for c in self.calls if c[0] == "sleep"], [("sleep", 5)] * 60, "300 s cap, 5 s polls")
+
+    def test_no_board_no_hold(self):
+        with mock.patch.object(render.buildlock, "board_module", return_value=None), \
+                mock.patch.object(render.time, "sleep", side_effect=AssertionError("held")), \
+                mock.patch.object(render, "render", side_effect=lambda *a: {"pages": []}):
+            self.assertEqual(run_main(["http://127.0.0.1:1", str(self.out), "/"]), (0, '{"pages": [], "error": null}\n',
+                                                                                      ""))
 
 
 @unittest.skipUnless(render.find_chrome(), "no Chrome found")
