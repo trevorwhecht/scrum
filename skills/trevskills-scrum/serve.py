@@ -3026,6 +3026,65 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
     return stopped
 
 
+HOG_PCT = 100  # report_hogs: % of one core every interval must be strictly above; fixed, not a setting
+HOG_SPAN_S = 600  # report_hogs: seconds a process must stay over HOG_PCT before it is reported; fixed, not a setting
+# ponytail: in-memory, like LEFTOVER_LOGGED; a serve.py restart starts every reading over and may log a hog once more
+HOG_READINGS: dict[tuple[int, str], dict] = {}  # (pid, command) -> {"readings": [(t, cpu min)], "run": t or None, "logged"}
+HOGS: list[dict] = []  # report_hogs' last list, replaced whole (never edited in place) so machine_status can read it
+
+
+def hog_name(cmd: str) -> str:
+    """The basename of the longest leading run of cmd's space-separated words that is a file (a Mac app binary's path
+    holds spaces, so Chrome's helper reads Google Chrome Helper, not Google), else of its first word ("" for "")."""
+    words = cmd.split(" ")
+    for n in range(len(words), 0, -1):
+        if os.path.isfile(" ".join(words[:n])):
+            return os.path.basename(" ".join(words[:n]))
+    return os.path.basename(words[0])
+
+
+def report_hogs(procs: list[tuple[int, int, float, str]] | None = None, now: float | None = None) -> list[dict]:
+    """Waste kind cpu-hog: report, never signal, each process that held more than one core for the whole last
+    HOG_SPAN_S. Per (pid, command) key (HOG_READINGS) each interval's rate, CPU minutes grown * 60 / wall seconds * 100,
+    above HOG_PCT starts or continues a run and any other rate ends it; a call whose now is not past a key's newest
+    reading adds nothing for it. A process qualifies once its run is HOG_SPAN_S old, and becomes {"name": hog_name,
+    "pid", "pct": its % of one core from the anchor (newest reading at or before now - HOG_SPAN_S) to now, "minutes":
+    whole minutes since its run started}, sorted by pct descending, then pid. A run's first report writes one
+    board.log_waste("cpu-hog") line. The list replaces HOGS and is returned. procs defaults to process_scan() and now
+    to time.monotonic()."""
+    global HOGS
+    procs = process_scan() if procs is None else procs
+    now = time.monotonic() if now is None else now
+    due = []
+    for pid, _, cpu, cmd in procs:
+        st = HOG_READINGS.setdefault((pid, cmd), {"readings": [], "run": None, "logged": False})
+        rs = st["readings"]
+        if not rs or now > rs[-1][0]:
+            if rs:
+                t0, c0 = rs[-1]
+                if (cpu - c0) * 60 / (now - t0) * 100 > HOG_PCT:
+                    st["run"] = t0 if st["run"] is None else st["run"]
+                else:
+                    st.update(run=None, logged=False)
+            rs = rs + [(now, cpu)] if st["run"] is not None else [(now, cpu)]  # a reading before the run is never an anchor
+            old = [r for r in rs if r[0] <= now - HOG_SPAN_S]
+            st["readings"] = old[-1:] + [r for r in rs if r[0] > now - HOG_SPAN_S]
+        if st["run"] is not None and now - st["run"] >= HOG_SPAN_S:
+            due.append((pid, cmd))
+    hogs = []
+    for pid, cmd in due:
+        st = HOG_READINGS[(pid, cmd)]
+        (t0, c0), (t1, c1) = st["readings"][0], st["readings"][-1]
+        pct = round((c1 - c0) * 60 / (t1 - t0) * 100)
+        hogs.append({"name": hog_name(cmd), "pid": pid, "pct": pct, "minutes": int((now - st["run"]) // 60)})
+        if not st["logged"]:
+            st["logged"] = True
+            board.log_waste("cpu-hog", project=None, jobs=[], pids=[], cpu_min=round(c1 - c0, 1), name=hogs[-1]["name"],
+                            pid=pid, pct=pct)
+    HOGS = sorted(hogs, key=lambda h: (-h["pct"], h["pid"]))
+    return HOGS
+
+
 OUTCOME_SKIP =("Permission allow rule",)  # CLI warnings written to the run log before real output
 
 
