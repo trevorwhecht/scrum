@@ -4590,7 +4590,7 @@ def limited_until(account, now):
 
 def primary_account(now):
     """Name of the account whose seven_day resets_at is the soonest one after `now` (ACCOUNTS order within ties and
-    when none has one): its unused quota is lost at reset, so it has no reserve."""
+    when none has one): its unused quota is lost at reset, so only its PRIMARY_RESERVE holds it (account_reserve)."""
     def at(acc):
         v = (seven_day_window(acc.name) or {}).get("resets_at")
         return v if is_num(v) and v > now else float("inf")
