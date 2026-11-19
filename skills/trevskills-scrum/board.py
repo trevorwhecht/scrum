@@ -5966,8 +5966,9 @@ def is_guard_ask(reason) -> bool:
     return reason.startswith(GUARD_ASK_PREFIXES) or GUARD_ASK_WRONG_BRANCH in reason[:80]
 
 
-def park(root, job, question, parsed, title, recommend=None):
-    """The needs-human field update and questions.log line of cmd_ask. Caller holds the board lock and plays the sound."""
+def park(root, job, question, parsed, title, recommend=None, auto=False):
+    """The needs-human field update and questions.log line of cmd_ask. Caller holds the board lock and plays the sound.
+    auto: the scrum answers it itself (claude_batch's Terminal batch), so the line carries "auto": true."""
     if job.get("reason") != question:
         job.pop("outcome", None)  # a new blocker: the last run's outcome no longer applies
     job.update(stage="needs-human", reason=question, question=question, options=parsed, stopTitle=title,
@@ -5977,8 +5978,8 @@ def park(root, job, question, parsed, title, recommend=None):
     entry = {"date": now(), "project": Path(root).resolve().parent.name, "job": job["id"],
              "question": question, "options": parsed, "reason": question, "stopTitle": title,
              "kind": "bigboy" if question.startswith(("bigboy review: main not updated", BLOCKED)) else "ask"}
-    if is_guard_ask(question):
-        entry["auto"] = True  # the scrum resumes it once the checkout is clear: no stop for process_health
+    if auto or is_guard_ask(question):
+        entry["auto"] = True  # the scrum resumes or answers it itself: no stop for process_health
     if recommend:
         job["recommend"] = entry["recommend"] = recommend
     else:
@@ -6202,9 +6203,9 @@ def cmd_unblock_log(root, job_id):
     return {"verdict": verdict, "blocker": blocker, "kind": kind, "n": n}
 
 
-def cmd_answer(root, job_id, key, note=None):
+def cmd_answer(root, job_id, key, note=None, auto=False):
     """Log Trevor's pick on the job's open question and return that option; the stage is left to the command it names.
-    A non-blank note he typed with the pick goes on the same line."""
+    A non-blank note he typed with the pick goes on the same line; auto (the scrum picked it) adds "auto": true."""
     with locked_board(root) as board:
         job = find(board, check_id(job_id))
         if job["stage"] != "needs-human" or not job.get("options"):
@@ -6215,6 +6216,8 @@ def cmd_answer(root, job_id, key, note=None):
         entry = {"date": now(), "job": job_id, "pick": option["label"]}
         if note := clean(note or "", ITEM_MAX):
             entry["note"] = note
+        if auto:
+            entry["auto"] = True
         questions_log(root, entry)
     return option
 
@@ -6644,7 +6647,8 @@ def claude_batch(root, board, job) -> tuple[dict, bool]:
         park(root, batch, TERMINAL_BATCH_QUESTION,
              [{"key": "a", "label": "Run it in a Terminal window", "command": f"lilguy {bid}"},
               {"key": "b", "label": "Remove this job", "command": f"abort {bid} --cascade"}],
-             "BUILDER_BLOCKED", {"key": "a", "why": "Only a Terminal window can approve project .claude edits."})
+             "BUILDER_BLOCKED", {"key": "a", "why": "Only a Terminal window can approve project .claude edits."},
+             auto=True)  # serve.py terminal_batch_tick opens it
         created = True
     bid = batch["id"]
     feature_path = Path(root) / "jobs" / bid / "feature.md"

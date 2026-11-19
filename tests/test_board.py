@@ -1049,6 +1049,15 @@ class BoardTest(unittest.TestCase):
         self.assertEqual([(l["pick"], l.get("note")) for l in picks], [("A", "keep the old name"), ("B", None), ("B", None)])
         self.assertEqual(set(picks[1]), {"date", "job", "pick"})
 
+    def test_answer_auto_flag(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
+        board.cmd_answer(self.root, job_id, "a", auto=True)
+        board.cmd_answer(self.root, job_id, "b")
+        picks = [l for l in self.log_lines() if "pick" in l]
+        self.assertEqual([(l["pick"], l.get("auto")) for l in picks], [("A", True), ("B", None)])
+        self.assertNotIn("auto", picks[1])
+
     def test_log_note_skips_blank(self):
         job_id = board.cmd_new(self.root, "x")
         before = (self.root / "board.json").read_text()
@@ -9755,6 +9764,18 @@ class ClaudeBatchTest(unittest.TestCase):
         self.assertEqual([(e["job"], e["stopTitle"]) for e in log], [(bid, "BUILDER_BLOCKED")])
         play.assert_called_once()
         self.assertEqual(self.job_of(self.job)["stage"], "spec")
+
+    def test_claude_batch_ask_is_auto(self):
+        # Job 1196: serve.py terminal_batch_tick answers the batch ask itself, so it is no Trevor stop.
+        bid = self.batch()["batch"]
+        [ask] = [json.loads(l) for l in (self.root / "questions.log").read_text().splitlines()]
+        self.assertEqual((ask["job"], ask["kind"], ask.get("auto")), (bid, "ask", True))
+        (self.root / "digests" / "001").mkdir(parents=True)
+        (self.root / "digests" / "001" / "jobs.txt").write_text(f"{bid}\n")
+        with mock.patch.dict(os.environ, SCRUM_PULSE=str(Path(self.tmp.name) / "pulse.log"),
+                             SCRUM_WINDOWS_FLAGGED=str(Path(self.tmp.name) / "flagged.json")):
+            m = board.cmd_process_health(self.root, "001")["metrics"]
+        self.assertEqual((m["stops_per_job"]["value"], m["stops_per_job"]["jobs"]), (0, []))
 
     def test_appends_to_open_batch(self):
         bid = self.batch()["batch"]
