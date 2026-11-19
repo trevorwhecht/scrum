@@ -5771,7 +5771,7 @@ class DigestTest(unittest.TestCase):
         proc = mock.Mock()
         proc.poll.return_value = 1
         s.RUNS[f"reg/{job_id}"] = {"action": "cloud-home", "started": time.time(), "proc": proc, "log": "runs/h.log",
-                                   "account": None}
+                                   "account": "owa"}
         self.addCleanup(s.RUNS.pop, f"reg/{job_id}", None)
         accounts = json.dumps([["main", str(main), None], ["owa", str(owa), [80, 90]]])
         with mock.patch.dict(os.environ, SCRUM_USAGE=str(main / "usage.json"), SCRUM_ACCOUNTS=accounts), \
@@ -5784,6 +5784,41 @@ class DigestTest(unittest.TestCase):
             self.assertEqual(self.board.limited_until("owa", now), reset)
             self.assertIsNone(self.board.limited_until("main", now))
         self.assertEqual(read.call_count, 1)
+
+    def test_spawn_records_the_account_board_spawn_ran_a_board_job_on(self):
+        """Job 1220: a board job's RUNS account is the one board.spawn used (proc.account), not None."""
+        s = self.serve
+        job_id = self.board.cmd_new(self.scrum, "acct work")
+        proc = mock.Mock(account="owa")
+        self.addCleanup(s.RUNS.pop, f"reg/{job_id}", None)
+        with mock.patch.object(self.board, "spawn", return_value=(proc, "runs/a.log")):
+            s.spawn("reg", self.scrum, job_id, "start", "go", manual=True)
+        self.assertEqual(s.RUNS[f"reg/{job_id}"]["account"], "owa")
+
+    def test_window_tick_ignores_the_board_account_when_the_run_kept_none(self):
+        """Job 1220: a run with no account marks the first account, never the board job's current one."""
+        s, base = self.serve, Path(self.tmp.name)
+        main, owa = base / "main", base / "owa"
+        main.mkdir()
+        owa.mkdir()
+        job_id = self.board.cmd_new(self.scrum, "moved work")
+        self.board.cmd_set(self.scrum, job_id, ["account=owa"])
+        reset = int(time.time()) + 7200
+        (self.scrum / "runs").mkdir(exist_ok=True)
+        (self.scrum / "runs" / "m.log").write_text(f"You've hit your weekly limit · resets_at={reset}\n")
+        proc = mock.Mock()
+        proc.poll.return_value = 1
+        s.RUNS[f"reg/{job_id}"] = {"action": "cloud-home", "started": time.time(), "proc": proc, "log": "runs/m.log",
+                                   "account": None}
+        self.addCleanup(s.RUNS.pop, f"reg/{job_id}", None)
+        accounts = json.dumps([["main", str(main), None], ["owa", str(owa), [80, 90]]])
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(main / "usage.json"), SCRUM_ACCOUNTS=accounts), \
+                mock.patch.object(self.board, "cmd_window_report", return_value=[]), \
+                mock.patch.object(self.board, "cmd_digest_due", return_value={"reason": "not due"}):
+            s.window_tick()
+            now = time.time()
+            self.assertEqual(self.board.limited_until("main", now), reset)
+            self.assertIsNone(self.board.limited_until("owa", now))
 
     def test_spawn_runs_an_off_board_id_on_the_given_account(self):
         """Job 1130: spawn(account=) runs an id not on the board on that account, not on pick_account's."""

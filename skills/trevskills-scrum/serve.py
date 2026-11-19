@@ -315,7 +315,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     board.cmd_cooldown_park reads) when `manual`, else pops it. A RAM hold older than RAM_HOLD_SECS (from
     play_queued) writes ram_hold, the reading, and logs it to stderr the first time. An id not on the board (run-all,
     digest, weekly) runs on `account` when given, else board.pick_account's account, kept as RUNS[key]["account"]
-    (None: the first account).
+    (a board job's: the account board.spawn ran it on, proc.account).
     While cooling down, a non-manual start of a serve, runall or shop job (started_by) is parked by board.cmd_cooldown_park
     for auto_resume and launches nothing (None); a park that fails launches as usual. `idle` (idle_claim) skips only
     the ram_room check. A RAM hold notes board.ram_room_reason (the readings), then ram_room:<id> per live run of the
@@ -393,7 +393,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 PULSE_STARTS.append({"project": project, "job": job_id, "cpu": board.cpu_load_pct()})
     with RUNS_LOCK:
         RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": log,
-                                       "account": account,
+                                       "account": account or (a if isinstance(a := getattr(proc, "account", None), str) else None),
                                        **({"reason": reason} if action in ("approve", "rework", "resume") else {})}
     board.log_process("Session starts", action, repo=str(Path(root).parent), job=job_id, manual=manual)
     return log
@@ -3511,8 +3511,7 @@ def window_tick():
 def note_run_limits(project, root):
     """Job 1216: read the log of every run of `project` that exited since the last tick, any action (start, resume,
     cloud-home, run-all, ui-sweep, digest), once. One that ended on a usage limit marks its account limited
-    (board.note_limit) until the reset it names, or AUTO_RESUME_EVERY from now: the run's account, else its board
-    job's, else the first. So pick_account fails the next spawn over on every Mac even while usage.json lags."""
+    (board.note_limit) until the reset it names, or AUTO_RESUME_EVERY from now: the run's account, else the first. So pick_account fails the next spawn over on every Mac even while usage.json lags."""
     with RUNS_LOCK:
         runs = [(k, r) for k, r in RUNS.items() if k.startswith(f"{project}/") and not r.get("limit_noted")
                 and r["proc"].poll() is not None]
@@ -3522,10 +3521,8 @@ def note_run_limits(project, root):
         hit, reset, _ = limit_reset(root, {"runlog": run["log"]})
         if not hit:
             continue
-        jobs = [] if run.get("account") else board.read_board(root).get("jobs", [])
-        account = run.get("account") or next((j.get("account") for j in jobs if j["id"] == key.split("/", 1)[1]), None)
         now = time.time()
-        board.note_limit(account or board.accounts()[0].name, reset if reset and reset > now else now + AUTO_RESUME_EVERY)
+        board.note_limit(run.get("account") or board.accounts()[0].name, reset if reset and reset > now else now + AUTO_RESUME_EVERY)
 
 
 def weekly_tick():

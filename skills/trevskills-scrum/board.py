@@ -8048,6 +8048,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         os.setpriority(os.PRIO_PROCESS, proc.pid, SESSION_NICE)
     except (OSError, TypeError):  # already exited, or a test's mock pid
         pass
+    proc.account = acc.name  # the account the session really runs on; serve.spawn records it in RUNS
     try:  # the run log link reads this; a job that isn't on the board (run-all, digest) has no row to set
         cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty=", "outcome=", f"account={acc.name}", f"reset={seven_day_reset(acc.name)}"], unpause=True)  # Play starts on a paused job; a stale interactive tty would still match the hook and liveness checks
     except SystemExit:
