@@ -48,7 +48,7 @@ class ShopTickTest(unittest.TestCase):
         self.week(self.owa, 3600)  # owa's week resets first: pick_account's order puts it first unless a test says otherwise
         serve.SHOP_RETRY_AT.clear()
         self.addCleanup(serve.SHOP_RETRY_AT.clear)
-        for s in (serve.CLOUD_LAST, serve.RUNS, serve.IDLE_SINCE):
+        for s in (serve.CLOUD_LAST, serve.SHOP_PROBE_LAST, serve.RUNS, serve.IDLE_SINCE):
             s.clear()
             self.addCleanup(s.clear)
         self.projects = {}
@@ -665,6 +665,17 @@ class ShopTickTest(unittest.TestCase):
         with mock.patch.object(self.board, "gh_api", side_effect=self.board.GhError("gh down")):
             self.assertEqual(self.cloud(), "cloud-sync: mm: gh down\n")
         self.assertEqual(self.job(root, "050-x")["stage"], "cloud", "a failed sync aborts nothing")
+
+    def test_ended_session_syncs_before_the_poll_is_due(self):
+        root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
+        self.sh.ended.return_value = None
+        with mock.patch.object(self.board, "gh_api", return_value=[]):
+            self.cloud(now=1000.0)  # first poll: due
+            self.sh.ended.return_value = "Session over\n"
+            self.cloud(now=1030.0)  # 30 s later: probe not yet due, nothing happens
+            self.assertEqual(self.job(root, "050-x")["stage"], "cloud")
+            self.cloud(now=1061.0)  # probe due, session ended: sync runs although CLOUD_EVERY has not passed
+        self.assertEqual(self.job(root, "050-x")["stage"], "aborted")
 
     def test_merged_shop_job_not_aborted(self):
         root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
