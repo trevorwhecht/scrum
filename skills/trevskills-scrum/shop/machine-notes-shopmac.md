@@ -5,7 +5,7 @@ This session runs on the shop MacBook Pro, a remote worker for the main Mac's sc
 - macOS 12. No Homebrew: never run `brew`.
 - Python 3.12 is `~/.local/bin/python3`, uv-managed, so it refuses `pip install` (externally-managed-environment); install a Python tool with `PYTHONUSERBASE="$HOME/.local" /usr/bin/python3 -m pip install --user <name>`. `/usr/bin/python3` is older, so keep `~/.local/bin` first on `PATH`.
 - Node 24 darwin-x64 lives in `~/.local` (`~/.local/bin/node`, `npm`, `npx`).
-- Playwright runs through Google Chrome, not Playwright's Chromium: `channel: "chrome"`, set from `SCRUM_PW_CHANNEL`.
+- There is no Playwright Chromium. Scripted Chrome (Playwright, render.py, headless screenshots) runs Chrome for Testing at `$SCRUM_CHROME`, never the Google Chrome app: Playwright gets it as `executablePath`, else `channel: "chrome"` from `SCRUM_PW_CHANNEL`.
 - VectorCraft 0.17.0 is `/Applications/VectorCraft.app`; its MCP server `vectorcraft` (`~/.local/bin/vectorcraft-cli`) is registered for both Claude accounts, and the main Mac's fonts are in `~/Library/Fonts`. Installed by hand on 2026-11-19, so `shop.py` has no step for it.
 - Full builds and full test suites are fine here.
 - Bash here runs zsh, which reads a colon right after a bare variable name as a modifier, so write a variable before a `:` in braces: `"${C}:refs/heads/..."`.

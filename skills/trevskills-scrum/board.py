@@ -5267,7 +5267,8 @@ def machine_ok(path, manual=False, claim=False, own_load=False):
     disk, then CPU busy, then CPU load (the 5-minute load average over the cores; both CPU checks also skipped for
     manual clicks; CPU load also skipped with own_load, a resume whose own idle session is already in it: resume_gate),
     then the session ceiling.
-    Gates new claims, resumes and auto-continue starts only; a running job is never touched. An unknown reading passes."""
+    Gates new claims, resumes and auto-continue starts only; a running job's heavy steps wait on heavy_hold instead.
+    An unknown reading passes."""
     if claim and not manual and cooling_down():
         return COOLING
     ram = free_ram_pct()
@@ -5291,6 +5292,19 @@ def machine_ok(path, manual=False, claim=False, own_load=False):
     live = live_sessions()
     if live >= MAX_SESSIONS:
         return f"{live} sessions running (ceiling {MAX_SESSIONS})"
+    return None
+
+
+def heavy_hold() -> str | None:
+    """machine_ok's CPU load reason, else its swap reason, else None: gates running jobs' Build, E2E and render.py
+    starts (buildlock.py on build.lock and e2e.lock, render.py; job 1227). No cool-down, RAM, disk, busy or session
+    check; free RAM is read only when swap is over MAX_SWAP_PCT. An unknown reading passes."""
+    load = cpu_load_pct()
+    if load is not None and load > MAX_CPU_LOAD_PCT:
+        return f"CPU load {load:.0f}% of {os.cpu_count()} cores (> {MAX_CPU_LOAD_PCT}%)"
+    swap = swap_used_pct()
+    if swap is not None and swap > MAX_SWAP_PCT and swap_pressing(free_ram_pct(), swap, MAX_SWAP_PCT):
+        return f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
     return None
 
 

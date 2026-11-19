@@ -9,12 +9,16 @@ SCRUM_BUILD_LOCK overrides the lock file; SCRUM_BUILD_LOCK_TIMEOUT the wait in s
 SCRUM_<STEM>_LOCK_SLOTS how many may hold it at once (see slots(); default 2 for check.lock, else 1).
 While board.py's cool-down flag is on, waiters go in board.lock_rank order (nearest the finish line first), then by
 arrival; the waiting marker holds `<cwd>\n<rank>`.
+On a HEAVY_LOCKS lock (build.lock, e2e.lock) it also waits, marker written and no slot taken, while board.heavy_hold()
+gives a reason (machine_hold, re-read every HOLD_POLL s), up to the same timeout.
 Exits with the command's exit code, 124 on a lock timeout, 127 when the command is not found.
 """
 import fcntl, math, os, re, subprocess, sys, time
 from pathlib import Path
 
 DEFAULT_TIMEOUT = 1800.0
+HEAVY_LOCKS = ("build", "e2e")  # lock stems held while board.heavy_hold gives a reason (job 1227); never check.lock
+HOLD_POLL = 5  # seconds at least between heavy_hold reads while waiting
 
 
 def lock_path() -> Path:
@@ -94,6 +98,14 @@ def board_module():
         return None
 
 
+def machine_hold(board) -> str | None:
+    """board.heavy_hold()'s reason; None when board is None or the call raises, so a step never fails over it."""
+    try:
+        return board.heavy_hold() if board else None
+    except (Exception, SystemExit):
+        return None
+
+
 def marker_rank(m: Path) -> int:
     """A waiting marker's second line as its rank; 0 when it has none or it is not a number."""
     try:
@@ -153,9 +165,13 @@ def main(argv: list[str]) -> int:
         argv = [value]
     path = lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    f = take(slot_paths(path))  # only a live flock holds a slot, so a leftover file never blocks
+    heavy = path.stem in HEAVY_LOCKS
+    why = machine_hold(board_module()) if heavy else None  # a hot machine holds Build and E2E even with a slot free
+    f = None if why else take(slot_paths(path))  # only a live flock holds a slot, so a leftover file never blocks
     if f is None:
-        print(f"buildlock: waiting for the build lock ({path})", file=sys.stderr, flush=True)
+        print(f"buildlock: holding for the machine: {why} ({path})" if why else
+              f"buildlock: waiting for the build lock ({path})", file=sys.stderr, flush=True)
+        told, read_at = bool(why), time.monotonic()
         limit = timeout_s()
         deadline = time.monotonic() + limit
         marker = waiting_dir(path) / str(os.getpid())  # the dashboard reads this to show the Check is queued
@@ -173,8 +189,13 @@ def main(argv: list[str]) -> int:
         try:
             while f is None:  # flock has no timeout, so poll LOCK_NB
                 time.sleep(0.5)
+                if heavy and time.monotonic() - read_at >= HOLD_POLL:
+                    why, read_at = machine_hold(board), time.monotonic()
+                    if why and not told:
+                        print(f"buildlock: holding for the machine: {why} ({path})", file=sys.stderr, flush=True)
+                        told = True
                 # cool down: a job nearer the finish line goes first
-                f = None if outranked(board, marker, rank) else take(slot_paths(path))
+                f = None if why or outranked(board, marker, rank) else take(slot_paths(path))
                 if f is None and time.monotonic() >= deadline:
                     print(f"buildlock: timed out after {limit:g} s waiting for the build lock ({path})",
                           file=sys.stderr)

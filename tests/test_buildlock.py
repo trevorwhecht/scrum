@@ -1,5 +1,6 @@
 import fcntl, importlib.util, io, os, re, select, signal, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +26,8 @@ class BuildLockTest(unittest.TestCase):
         self.lock = self.dir / "sub" / "build.lock"
         self.env = {**os.environ, "SCRUM_BUILD_LOCK": str(self.lock),
                     "SCRUM_REGISTRY": str(self.dir / "none.json"),  # never Trevor's real boards
-                    "SCRUM_COOLDOWN": str(self.dir / "no-cooldown")}  # never Trevor's real cool-down flag
+                    "SCRUM_COOLDOWN": str(self.dir / "no-cooldown"),  # never Trevor's real cool-down flag
+                    "SCRUM_CPU_LOAD_PCT": "0", "SCRUM_SWAP_PCT": "0"}  # calm: no test holds on this machine's readings
         self.env.pop("SCRUM_BUILD_LOCK_TIMEOUT", None)
         self.procs = []
 
@@ -451,6 +453,98 @@ class BuildLockTest(unittest.TestCase):
     def test_holder_write_failure_keeps_exit_code(self):
         (self.dir / "sub" / "build.lock.holder").mkdir(parents=True)  # a directory: write and unlink both fail
         self.assertEqual(self.run_wrap(sys.executable, "-c", "raise SystemExit(7)").returncode, 7)
+
+class HeavyHoldTest(unittest.TestCase):
+    """buildlock.py on build.lock and e2e.lock waits, marker written and no slot taken, while board.heavy_hold gives a
+    reason (job 1227)."""
+    setUp, tearDown, run_wrap, marker_dir = (BuildLockTest.setUp, BuildLockTest.tearDown, BuildLockTest.run_wrap,
+                                             BuildLockTest.marker_dir)
+    LOAD = "CPU load 400% of 8 cores (> 300%)"
+
+    def board(self, *reasons, seen=None):
+        """A fake board whose heavy_hold gives `reasons` in turn (the last for ever after), raising an exception reason;
+        each call first appends seen_now() to `seen`. calls counts them."""
+        def heavy_hold():
+            fake.calls += 1
+            if seen is not None:
+                seen.append(self.seen_now())
+            r = reasons[min(fake.calls, len(reasons)) - 1]
+            if isinstance(r, BaseException):
+                raise r
+            return r
+        fake = SimpleNamespace(calls=0, heavy_hold=heavy_hold, lock_rank=lambda cwd: 0, cooling_down=lambda: False)
+        return fake
+
+    def seen_now(self):
+        """(the lock is flocked, this process's waiting marker exists, the command has run)."""
+        lock = Path(os.environ["SCRUM_BUILD_LOCK"])
+        with open(lock, "a") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = False
+            except BlockingIOError:
+                locked = True
+        marker = lock.with_name(lock.name + ".waiting") / str(os.getpid())
+        return locked, marker.exists(), (self.dir / "ran").exists()
+
+    def main_inproc(self, board, lock="build.lock", code=0, poll=0, **env):
+        """main() in-process on `lock` with board_module() giving `board` and HOLD_POLL `poll`; (exit code, stderr,
+        whether the command ran)."""
+        bl = load()
+        self.assertEqual(bl.HOLD_POLL, 5)
+        bl.HOLD_POLL = poll
+        ran = self.dir / "ran"
+        with mock.patch.dict(os.environ, {**self.env, "SCRUM_BUILD_LOCK": str(self.dir / "sub" / lock), **env}), \
+                mock.patch.object(bl, "board_module", return_value=board), \
+                mock.patch("sys.stderr", new=io.StringIO()) as err:
+            got = bl.main([sys.executable, "-c", f"open({str(ran)!r}, 'w').close(); raise SystemExit({code})"])
+        return got, err.getvalue(), ran.exists()
+
+    def test_held_over_load_times_out_124(self):
+        ran = self.dir / "ran"
+        r = self.run_wrap(sys.executable, "-c", f"open({str(ran)!r}, 'w')", SCRUM_CPU_LOAD_PCT="400",
+                          SCRUM_BUILD_LOCK_TIMEOUT="1")
+        load = f"CPU load 400% of {os.cpu_count()} cores (> 300%)"
+        self.assertEqual((r.returncode, r.stderr), (124, f"buildlock: holding for the machine: {load} ({self.lock})\n"
+                         f"buildlock: timed out after 1 s waiting for the build lock ({self.lock})\n"))
+        self.assertFalse(ran.exists())
+        self.assertEqual(list(self.marker_dir().glob("*")), [])
+
+    def test_hold_lifts_then_runs(self):
+        seen = []
+        got = self.main_inproc(self.board(self.LOAD, None, seen=seen), code=5)
+        self.assertEqual(got, (5, f"buildlock: holding for the machine: {self.LOAD} ({self.lock})\n", True))
+        self.assertEqual(seen, [(False, False, False), (False, True, False)], "slot free yet untaken, marker written")
+        self.assertEqual(list(self.marker_dir().glob("*")), [])
+
+    def test_e2e_stem_held(self):
+        board, e2e = self.board(self.LOAD), self.dir / "sub" / "e2e.lock"
+        got = self.main_inproc(board, "e2e.lock", poll=30, SCRUM_BUILD_LOCK_TIMEOUT="1")
+        self.assertEqual(got, (124, f"buildlock: holding for the machine: {self.LOAD} ({e2e})\n"
+                                    f"buildlock: timed out after 1 s waiting for the build lock ({e2e})\n", False))
+        self.assertEqual(board.calls, 1, "re-read at most every HOLD_POLL s")
+        self.assertEqual(list((self.dir / "sub" / "e2e.lock.waiting").glob("*")), [])
+
+    def test_check_lock_never_held(self):
+        for name in ("check.lock", "x.lock"):
+            with self.subTest(lock=name):
+                r = self.run_wrap(sys.executable, "-c", "raise SystemExit(4)", SCRUM_CPU_LOAD_PCT="400",
+                                  SCRUM_BUILD_LOCK=str(self.dir / "sub" / name), SCRUM_BUILD_LOCK_TIMEOUT="1")
+                self.assertEqual((r.returncode, r.stderr), (4, ""))
+        board = self.board(self.LOAD)
+        self.assertEqual(self.main_inproc(board, "check.lock", code=4), (4, "", True))
+        self.assertEqual(board.calls, 0)
+
+    def test_board_import_failure_never_holds(self):
+        self.assertEqual(self.main_inproc(None, code=6, SCRUM_CPU_LOAD_PCT="400"), (6, "", True))
+
+    def test_hold_error_never_holds(self):
+        self.assertIsNone(load().machine_hold(None))
+        for boom in (RuntimeError("boom"), SystemExit("board says no")):
+            with self.subTest(boom=boom):
+                board = self.board(boom)
+                self.assertIsNone(load().machine_hold(board))
+                self.assertEqual(self.main_inproc(board, code=6), (6, "", True))
 
 
 if __name__ == "__main__":

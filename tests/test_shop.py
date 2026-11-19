@@ -356,7 +356,7 @@ DONE = (("sysctl", 0, HAVE_ALL), ("gh auth status", 0, ""),
         ("credential.https://github.com.helper", 0, "\n!/u/.local/bin/gh auth git-credential\n"),
         ('mkdir -p "$HOME/.claude-owa"', 0, ""), ("python3 -", 0, "same\n"), ("claude -p", 0, "ok\n"))
 ALL_OK = ["node: ok", "gh: ok", "gh login: ok", "gh git: ok", "permissions: ok", "owa links: ok", "account main: ok",
-          "account owa: ok", "ruff: ok", "jev key: ok"]
+          "account owa: ok", "ruff: ok", "chrome: ok", "jev key: ok"]
 GH_LOGIN = ("gh auth login --hostname github.com --git-protocol https --with-token --insecure-storage"
             " && chmod 600 ~/.config/gh/hosts.yml")
 CHECK = "claude -p 'Reply with the single word ok' --model haiku --max-turns 1"
@@ -445,22 +445,23 @@ class SetupTest(SetupCase):
         got, lines = self.setup_out()
         self.assertEqual(lines, ["node: ok (changed)", "gh: ok", "gh login: ok", "gh git: failed (exit 1)",
                                  "permissions: ok (changed)", "owa links: ok (changed)", "account main: ok",
-                                 "account owa: not ready (run claude setup-token in the shop GUI)", "ruff: ok", "jev key: ok"])
+                                 "account owa: not ready (run claude setup-token in the shop GUI)", "ruff: ok",
+                                 "chrome: ok", "jev key: ok"])
         self.assertEqual(got, {"node": "changed", "gh": "ok", "gh login": "ok", "gh git": "failed",
                                "permissions": "changed", "owa links": "changed", "account main": "ok",
-                               "account owa": "not ready", "ruff": "ok", "jev key": "ok"})
+                               "account owa": "not ready", "ruff": "ok", "chrome": "ok", "jev key": "ok"})
         self.assertEqual(list(got), ["node", "gh", "gh login", "gh git", "permissions", "owa links", "account main",
-                                     "account owa", "ruff", "jev key"])
+                                     "account owa", "ruff", "chrome", "jev key"])
         self.assertEqual([(c[0].split()[0], c[1]) for c in self.calls[1:]],
                          [("d=$(mktemp", 600), ("gh", 60), ("git", 60), ("gh", 60), ("python3", 60), ("mkdir", 60),
-                          ("ln", 60), ("[", 120), ("[", 120), ("command", 60), ("[", 60)])
+                          ("ln", 60), ("[", 120), ("[", 120), ("command", 60), ("[", 60), ("[", 60)])
         self.assertEqual(self.calls[-1], (JEV_CHECK, 60, None))
         self.assertEqual(self.setup_out(cli=True)[0], 1)
         self.shop(("setup-git", 0, ""), *answers)
         self.assertEqual(self.setup_out(cli=True), (0, [
             "node: ok (changed)", "gh: ok", "gh login: ok", "gh git: ok (changed)", "permissions: ok (changed)",
             "owa links: ok (changed)", "account main: ok",
-            "account owa: not ready (run claude setup-token in the shop GUI)", "ruff: ok", "jev key: ok"]))
+            "account owa: not ready (run claude setup-token in the shop GUI)", "ruff: ok", "chrome: ok", "jev key: ok"]))
 
     def test_worker_accounts_only(self):
         self.worker_file("shopmac 2 owa,main\nnewmac 1 owa\n")
@@ -472,7 +473,7 @@ class SetupTest(SetupCase):
                 with contextlib.redirect_stdout(io.StringIO()) as out:
                     got = shop.setup(alias=alias)
                 self.assertEqual(out.getvalue().splitlines(),
-                                 base + [f"account {n}: ok" for n in accounts] + ["ruff: ok", "jev key: ok"])
+                                 base + [f"account {n}: ok" for n in accounts] + ["ruff: ok", "chrome: ok", "jev key: ok"])
                 self.assertEqual([k for k in got if k.startswith("account ")], [f"account {n}" for n in accounts])
                 self.assertEqual(len(self.cmds("claude -p")), len(accounts))
                 self.assertEqual({a[1] for a in self.argv if a[0] == "ssh"}, {alias})
@@ -519,9 +520,32 @@ class SetupTest(SetupCase):
                          ' -c - && unzip -q gh.zip && mkdir -p "$HOME/.local/bin" && cp gh_2.103.3_macOS_amd64/bin/gh '
                          '"$HOME/.local/bin/gh"); rc=$?; rm -rf "$d"; exit $rc')
 
+    def test_chrome_install_pinned(self):
+        self.assertEqual((shop.CFT_VERSION, shop.CFT_SHA256),
+                         ("150.0.7871.125", "b580eef196e0607f5942cfa621c6976b8fd0de96ba30fa1a57341c9b9cc9a9eb"))
+        self.assertNotIn("chrome", shop.OPTIONAL_STEPS)  # a failed chrome step holds the dispatch
+        self.shop(("[ -x", 1, ""), *DONE)
+        got, lines = self.setup_out()
+        self.assertEqual((lines[-2], got["chrome"]), ("chrome: ok (changed)", "changed"))
+        self.assertEqual(self.cmds("[ -x"), [('[ -x "$HOME/.local/share/chrome-for-testing-150.0.7871.125/chrome-mac-x64/'
+                                              'Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" ]',
+                                              60, None)])
+        [(cmd, timeout, given)] = self.cmds("storage.googleapis.com")
+        self.assertEqual((timeout, given), (600, None))
+        self.assertEqual(cmd, 'd=$(mktemp -d) || exit 1; (cd "$d" && curl -fsSL -o chrome.zip '
+                         'https://storage.googleapis.com/chrome-for-testing-public/150.0.7871.125/mac-x64/'
+                         "chrome-mac-x64.zip && echo 'b580eef196e0607f5942cfa621c6976b8fd0de96ba30fa1a57341c9b9cc9a9eb"
+                         "  chrome.zip' | shasum -a 256 -c - && unzip -q chrome.zip && rm -rf "
+                         '"$HOME/.local/share/chrome-for-testing-150.0.7871.125" && mkdir -p '
+                         '"$HOME/.local/share/chrome-for-testing-150.0.7871.125" && mv chrome-mac-x64 '
+                         '"$HOME/.local/share/chrome-for-testing-150.0.7871.125/"); rc=$?; rm -rf "$d"; exit $rc')
+        self.shop(("[ -x", 1, ""), ("storage.googleapis.com", 7, ""), *DONE)
+        rc, lines = self.setup_out(cli=True)
+        self.assertEqual((rc, lines[-2]), (1, "chrome: failed (exit 7)"))
+
     @unittest.skipUnless(shutil.which("shasum") and shutil.which("unzip"), "needs shasum and unzip")
     def test_checksum_checked_before_install(self):
-        """Run both install commands in a local sh with a fake curl: a wrong checksum installs nothing, the right one
+        """Run each install command in a local sh with a fake curl: a wrong checksum installs nothing, the right one
         installs, and the temp dir is gone either way."""
         work = Path(self.home)
         (work / "bin").mkdir()
@@ -530,7 +554,8 @@ class SetupTest(SetupCase):
                         'cp "$FAKE_DOWNLOAD" "$out"\n')
         curl.chmod(0o755)
         script = b"#!/bin/sh\necho fake-962\n"
-        tgz, gz = work / "node.tgz", work / "gh.zip"
+        tgz, gz, cz = work / "node.tgz", work / "gh.zip", work / "chrome.zip"
+        app = "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
         with tarfile.open(tgz, "w:gz") as tar:
             for b in ("node", "npm", "npx"):
                 info = tarfile.TarInfo(f"node-v24.22.3-darwin-x64/bin/{b}")
@@ -540,8 +565,13 @@ class SetupTest(SetupCase):
             info = zipfile.ZipInfo("gh_2.103.3_macOS_amd64/bin/gh")
             info.external_attr = 0o100755 << 16
             z.writestr(info, script)
+        with zipfile.ZipFile(cz, "w") as z:
+            info = zipfile.ZipInfo(app)
+            info.external_attr = 0o100755 << 16
+            z.writestr(info, script)
         for name, cmd, fixture, sha in (("node", shop.NODE_INSTALL, tgz, shop.NODE_SHA256),
-                                        ("gh", shop.GH_INSTALL, gz, shop.GH_SHA256)):
+                                        ("gh", shop.GH_INSTALL, gz, shop.GH_SHA256),
+                                        ("chrome", shop.CFT_INSTALL, cz, shop.CFT_SHA256)):
             with self.subTest(name=name):
                 home, tmp = work / f"home-{name}", work / f"tmp-{name}"
                 home.mkdir()
@@ -555,6 +585,13 @@ class SetupTest(SetupCase):
                 ok = REAL_RUN(["/bin/sh", "-c", shop.PATH_PREFIX + good], env=env, capture_output=True)
                 self.assertEqual(ok.returncode, 0, ok.stderr)
                 self.assertEqual(os.listdir(tmp), [])
+                if name == "chrome":
+                    share = home / ".local" / "share" / "chrome-for-testing-150.0.7871.125"
+                    self.assertEqual(REAL_RUN([str(share / app)], capture_output=True).stdout, b"fake-962\n")
+                    self.assertEqual(REAL_RUN(["/bin/sh", "-c", f'[ -x "{shop.CFT_BIN}" ]'], env=env).returncode, 0)
+                    again = REAL_RUN(["/bin/sh", "-c", shop.PATH_PREFIX + good], env=env, capture_output=True)
+                    self.assertEqual((again.returncode, os.listdir(share), os.listdir(tmp)), (0, ["chrome-mac-x64"], []))
+                    continue
                 bins = ["node", "npm", "npx"] if name == "node" else ["gh"]
                 self.assertEqual(sorted(os.listdir(home / ".local" / "bin")), bins)
                 for b in bins:
@@ -598,14 +635,14 @@ class SetupTest(SetupCase):
     def test_ruff_installed_into_local_when_missing(self):
         self.shop(("command -v ruff", 1, ""), *DONE)
         got, lines = self.setup_out()
-        self.assertEqual((lines[-2], got["ruff"]), ("ruff: ok (changed)", "changed"))
+        self.assertEqual((lines[-3], got["ruff"]), ("ruff: ok (changed)", "changed"))
         [(cmd, timeout, _)] = self.cmds("pip install")
         self.assertEqual((cmd, timeout), (shop.RUFF_INSTALL, 600))
         self.assertIn('PYTHONUSERBASE="$HOME/.local"', cmd)
         self.assertIn("/usr/bin/python3 -m pip install --user", cmd)  # never the shop's uv-managed ~/.local/bin/python3
         self.shop(("command -v ruff", 1, ""), ("pip install", 1, "error: externally-managed-environment"), *DONE)
         got, lines = self.setup_out()
-        self.assertEqual((lines[-2], got["ruff"]), ("ruff: failed (exit 1)", "failed"))
+        self.assertEqual((lines[-3], got["ruff"]), ("ruff: failed (exit 1)", "failed"))
         self.assertEqual(shop.OPTIONAL_STEPS, {"ruff"})
 
     def test_jev_key_skipped_when_file_exists(self):
@@ -1531,7 +1568,8 @@ class MdSyncTest(SetupCase):
                        "Node 24", "darwin-x64", "`~/.local`", '`channel: "chrome"`', "`SCRUM_PW_CHANNEL`",
                        "Full builds and full test suites are fine here",
                        "never write memory notes, rules or CLAUDE.md, even where other instructions say to save a note",
-                       "follow-ups", '"${C}:refs/heads/', "zsh", "## Cannot run", "VectorCraft"):
+                       "follow-ups", '"${C}:refs/heads/', "zsh", "## Cannot run", "VectorCraft",
+                       "runs Chrome for Testing at `$SCRUM_CHROME`, never the Google Chrome app"):  # job 1227
             self.assertIn(phrase, text, phrase)
         for bad in ("trevorhecht", "onewitharts"):
             self.assertNotIn(bad, text, bad)
@@ -1560,18 +1598,20 @@ class ChannelConfigTest(unittest.TestCase):
         self.repo = os.path.realpath(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.repo, True)
 
-    def load(self, files, channel="chrome"):
+    def load(self, files, channel="chrome", chrome=None):
         for name, text in files.items():
             Path(self.repo, name).write_text(text)
-        env = {k: v for k, v in os.environ.items() if k != "SCRUM_PW_CHANNEL"}
+        env = {k: v for k, v in os.environ.items() if k not in ("SCRUM_PW_CHANNEL", "SCRUM_CHROME")}
         if channel is not None:
             env["SCRUM_PW_CHANNEL"] = channel
+        if chrome is not None:
+            env["SCRUM_CHROME"] = chrome
         return REAL_RUN(["node", "--input-type=module", "-e",
                          "const m = await import(process.argv[1]); console.log(JSON.stringify(m.default))",
                          WRAPPER.as_uri()], cwd=self.repo, env=env, capture_output=True, text=True)
 
-    def config(self, files, channel="chrome"):
-        r = self.load(files, channel)
+    def config(self, files, channel="chrome", chrome=None):
+        r = self.load(files, channel, chrome)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
 
@@ -1602,6 +1642,32 @@ class ChannelConfigTest(unittest.TestCase):
         os.remove(Path(self.repo, "playwright.config.mjs"))
         got = self.config({"playwright.config.cjs": 'exports.__esModule = true;\nexports.default = { testDir: "c" };\n'})
         self.assertEqual(got["testDir"], f"{self.repo}/c")
+
+    def test_chrome_path_overrides_channel(self):
+        """Job 1227: a non-blank SCRUM_CHROME (a worker's Chrome for Testing) launches that binary on chromium
+        projects, keeping their launchOptions, with no channel; blank or unset leaves today's channel output."""
+        bin_ = "/h/.local/share/cft/Google Chrome for Testing"
+        files = {"playwright.config.mjs": self.PROJECTS.replace(
+            'use: { baseURL: "http://localhost:1" }', 'use: { baseURL: "http://localhost:1", launchOptions: { args: ["--a"] } }'
+        ).replace('{ name: "setup" }', '{ name: "setup", use: { launchOptions: { slowMo: 5 } } }')}
+        got = self.config(files, chrome=f"  {bin_} ")
+        self.assertEqual(got["use"], {"baseURL": "http://localhost:1", "launchOptions": {"args": ["--a"]}})
+        self.assertEqual([p.get("use") for p in got["projects"]], [
+            {"launchOptions": {"slowMo": 5, "executablePath": bin_}},
+            {"browserName": "chromium", "launchOptions": {"args": ["--a"], "executablePath": bin_}},
+            {"defaultBrowserType": "chromium", "viewport": {"width": 1},
+             "launchOptions": {"args": ["--a"], "executablePath": bin_}},
+            {"browserName": "firefox"}, {"defaultBrowserType": "webkit"}])
+        bare = "export default { use: { headless: true, launchOptions: { args: ['--b'] } } };\n"
+        self.assertEqual(self.config({"playwright.config.mjs": bare}, None, bin_)["use"],
+                         {"headless": True, "launchOptions": {"args": ["--b"], "executablePath": bin_}})
+        self.assertEqual(self.config({"playwright.config.mjs": "export default {};\n"}, chrome=bin_)["use"],
+                         {"launchOptions": {"executablePath": bin_}})
+        for chrome in ("", "  "):
+            with self.subTest(chrome=chrome):
+                self.assertEqual(self.config(files, chrome=chrome), self.config(files))
+        self.assertEqual([p.get("use") for p in self.config(files)["projects"]][:2], [
+            {"launchOptions": {"slowMo": 5}, "channel": "chrome"}, {"browserName": "chromium", "channel": "chrome"}])
 
     def test_custom_reporter_resolved_from_repo(self):
         r = self.repo
@@ -1663,7 +1729,9 @@ PROMPT = f"/trevskills-scrum cloud-job 964-shop-x Build it.\n$(touch pwned) `tou
 START = ('cd ~/scrum-work/onewitharts && (umask 077 && mkdir -p .git/scrum-shop && cat > .git/scrum-shop/964-shop-x.prompt)'
          ' || exit 1; export CLAUDE_CONFIG_DIR="$HOME/.claude-owa"; [ -r "$HOME/.claude-owa/oauth-token" ] && export '
          'CLAUDE_CODE_OAUTH_TOKEN="$(cat "$HOME/.claude-owa/oauth-token")"; [ -r "$HOME/.config/typesafe/key" ] && export '
-         'TYPESAFE_API_KEY="$(cat "$HOME/.config/typesafe/key")"; export SCRUM_PW_CHANNEL=chrome SCRUM_SHOP=1 '
+         'TYPESAFE_API_KEY="$(cat "$HOME/.config/typesafe/key")"; export SCRUM_PW_CHANNEL=chrome SCRUM_CHROME='
+         '"$HOME/.local/share/chrome-for-testing-150.0.7871.125/chrome-mac-x64/Google Chrome for Testing.app/Contents/'
+         'MacOS/Google Chrome for Testing" SCRUM_SHOP=1 '
          'CLAUDE_NOTIFIER_DISABLE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0; nohup claude -p "$(cat '
          '.git/scrum-shop/964-shop-x.prompt)" --permission-mode acceptEdits --model \'claude-opus-4-5[1m]\' < /dev/null > '
          '.git/scrum-shop/964-shop-x.log 2>&1 & echo $!')
@@ -1710,8 +1778,8 @@ class DispatchTest(SetupCase):
         (clone / ".git").mkdir(parents=True)
         (h / ".local" / "bin").mkdir(parents=True)
         claude = h / ".local" / "bin" / "claude"
-        claude.write_text('#!/bin/sh\necho $$ > "$HOME/pid"\nprintf "%s|%s|%s|%s|%s|%s|%s|%s\\n" "$CLAUDE_CONFIG_DIR" '
-                          '"$CLAUDE_CODE_OAUTH_TOKEN" "${TYPESAFE_API_KEY-unset}" "$SCRUM_PW_CHANNEL" "$SCRUM_SHOP" '
+        claude.write_text('#!/bin/sh\necho $$ > "$HOME/pid"\nprintf "%s|%s|%s|%s|%s|%s|%s|%s|%s\\n" "$CLAUDE_CONFIG_DIR" '
+                          '"$CLAUDE_CODE_OAUTH_TOKEN" "${TYPESAFE_API_KEY-unset}" "$SCRUM_PW_CHANNEL" "$SCRUM_CHROME" "$SCRUM_SHOP" '
                           '"$CLAUDE_NOTIFIER_DISABLE" "$CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" "$PWD" > "$HOME/env"\n'
                           'for a in "$@"; do printf "%s\\n--\\n" "$a"; done > "$HOME/args"\necho session-out\n'
                           'touch "$HOME/done"\n')
@@ -1733,6 +1801,7 @@ class DispatchTest(SetupCase):
                 time.sleep(0.05)
             self.assertEqual(out.getvalue(), "")
             return pid
+        cft = f"{h}/.local/share/chrome-for-testing-150.0.7871.125/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
         pid = start()
         self.assertEqual(self.calls, [(START, 60, PROMPT.encode())])
         self.assertFalse([a for a in self.argv if TOKEN in " ".join(a) or "touch" in " ".join(a)])
@@ -1741,11 +1810,11 @@ class DispatchTest(SetupCase):
         self.assertEqual((h / "args").read_text(),
                          "-p\n--\n/trevskills-scrum cloud-job 964-shop-x Build it.\n$(touch pwned) `touch pwned2` "
                          f"{TOKEN}\n--\n--permission-mode\n--\nacceptEdits\n--\n--model\n--\nclaude-opus-4-5[1m]\n--\n")
-        self.assertEqual((h / "env").read_text(), f"{h}/.claude-owa|tok-owa-964|tsk-1075|chrome|1|1|0|{clone}\n")
+        self.assertEqual((h / "env").read_text(), f"{h}/.claude-owa|tok-owa-964|tsk-1075|chrome|{cft}|1|1|0|{clone}\n")
         jev_key.unlink()  # no key file: nothing exported, and the session still starts
         pid = start()
         self.assertEqual((h / "pid").read_text(), f"{pid}\n")
-        self.assertEqual((h / "env").read_text(), f"{h}/.claude-owa|tok-owa-964|unset|chrome|1|1|0|{clone}\n")
+        self.assertEqual((h / "env").read_text(), f"{h}/.claude-owa|tok-owa-964|unset|chrome|{cft}|1|1|0|{clone}\n")
         self.assertEqual(sorted(p.name for p in h.rglob("pwned*")), [])
         logs = clone / ".git" / "scrum-shop"
         self.assertEqual(((logs / "964-shop-x.prompt").read_text(), (logs / "964-shop-x.log").read_text()),
@@ -1902,6 +1971,12 @@ class StructureTest(unittest.TestCase):
         setup = text[text.index("## Setup"):text.index("## Ready")]
         self.assertIn("gh always uses file storage (mode 600) because the shop's login keychain is locked over SSH",
                       setup)
+        chrome = setup[setup.index("- **chrome.**"):setup.index("- **jev key.**")]  # job 1227
+        for phrase in (shop.CFT_SHA256, "`~/.local/share/chrome-for-testing-150.0.7871.125/`", "`SCRUM_CHROME`",
+                       "a checksum mismatch installs nothing", "not in `OPTIONAL_STEPS`"):
+            self.assertIn(phrase, chrome, phrase)
+        self.assertIn("a non-blank `SCRUM_CHROME`", text[text.index("## E2E channel"):text.index("## MD sync")])
+        self.assertIn("`SCRUM_PW_CHANNEL=chrome`, `SCRUM_CHROME` (setup's **chrome** binary)", text)
         jev = setup[setup.index("- **jev key.**"):]  # the last step
         for phrase in ("`[ -s ~/.config/typesafe/key ]`", "no Keychain read here", "goes on stdin to",
                        "so the file is mode 600", 'export TYPESAFE_API_KEY="$(cat F)"'):

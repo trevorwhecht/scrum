@@ -1036,7 +1036,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26740, "newjob.md")  # +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26800, "newjob.md")  # +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -2432,7 +2432,7 @@ class ContractTest(unittest.TestCase):
         steps = self.section(text, "2. **Which reviewers run.**", "4. **WAIT FOR ALL.**")
         render = next(l for l in steps.splitlines() if l.lstrip().startswith("- **Shared render"))
         for phrase in ("Only when `round-$N/dev-url.txt` holds a URL, run `B render-paths $ID`",
-                       "render.py <url> \"$F/jobs/$ID/round-$N/render\" <paths>", "Bash timeout 300000",
+                       "render.py <url> \"$F/jobs/$ID/round-$N/render\" <paths>", "Bash timeout 600000",
                        "`- Render auth: <repo-relative path>`", "--cookies \"$WT/<path>\"",
                        "any other exit, or an empty `paths`, passes none"):
             self.assertIn(phrase, render, phrase)
@@ -2461,7 +2461,7 @@ class ContractTest(unittest.TestCase):
         base = next(l for l in lines if l.startswith("- **Shared base render"))
         self.assertLess(lines.index(next(l for l in lines if l.startswith("- **Shared render"))), lines.index(base))
         for phrase in ("Only when **Shared render** exited 0", "round-$N/render-base", "render.py <base-url>",
-                       "/tmp/scrum-base-$ID", "cat-file -e $BASE:<path>",
+                       "/tmp/scrum-base-$ID", "<the same paths>` with Bash timeout 600000", "cat-file -e $BASE:<path>",
                        "stop that server and run `git -C \"$WT\" worktree remove --force /tmp/scrum-base-$ID` "
                        "on every outcome"):
             self.assertIn(phrase, base, phrase)
@@ -2668,11 +2668,21 @@ class ContractTest(unittest.TestCase):
             text = (ROOT / "agents" / name).read_text()
             step2 = next(l for l in text.splitlines() if l.startswith("2. Open the page in headless Chrome"))
             for phrase in ("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers", "chromium-*/chrome-linux/chrome",
-                           "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", lookup):
+                           '"${SCRUM_CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}" --headless',
+                           lookup):  # SCRUM_CHROME: a shop's Chrome for Testing, job 1227
                 self.assertIn(phrase, step2, f"{name}: {phrase}")
             para = next(l for l in text.splitlines() if l.startswith("You must see the new element"))
             self.assertIn(never, para, name)
             self.assertEqual(text.count(never), 1, name)
+
+    def test_scripted_chrome_uses_scrum_chrome(self):  # a shop's Chrome for Testing, job 1227
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        line = next(l for l in builder.splitlines() if "When `SCRUM_PW_CHANNEL` is set" in l)
+        self.assertIn("with `executablePath: process.env.SCRUM_CHROME` when that is set, else "
+                      "`channel: process.env.SCRUM_PW_CHANNEL`", line)
+        e2e = (ROOT / "skills" / "trevskills-e2e" / "SKILL.md").read_text()
+        line = next(l for l in e2e.splitlines() if l.startswith("When `SCRUM_PW_CHANNEL` is set"))
+        self.assertIn("a set `SCRUM_CHROME` binary is used instead of the channel", line)
 
     def test_approver_requires_rendered_ui(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
@@ -2718,7 +2728,8 @@ class ContractTest(unittest.TestCase):
                        "- Unrendered: <path> — needs customer session", "- Customer render auth:",
                        "- Employee render auth: <repo-relative path>", "`/employee/*`",
                        "- Unrendered: <path> — needs employee session", "strip every leading `../`",
-                       "`$REPO/<rest>`", "`../../../playwright/.auth/admin.json` becomes `$REPO/playwright/.auth/admin.json`"):
+                       "`$REPO/<rest>`", "`../../../playwright/.auth/admin.json` becomes `$REPO/playwright/.auth/admin.json`",
+                       "<paths>` with Bash timeout 600000"):
             self.assertIn(phrase, lane, phrase)
         self.assertNotIn('"$REPO/<path>"', lane)
         review = (SKILL_DIR / "lanes" / "review.md").read_text()
@@ -3825,6 +3836,11 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         check = self.section(skill, "## Check gate", "## Review (WAIT FOR ALL)")
         self.assertIn('Build runs as `python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" --project "$F/project.md"`', check)
         self.assertNotIn("'<Build>'", check)
+        # job 1227: a held Build can outlast the 600 s Bash timeout, and its 124 parks on the Check queue
+        for phrase in ('--project "$F/project.md"` with the Bash tool\'s `run_in_background` (wait for it to exit)',
+                       "A Test, Typecheck, Lint, Build or E2E run that exits 124 timed out on the lock: re-run it once",
+                       "(for `check.lock` or Build, `'waiting on the Check queue'`"):
+            self.assertIn(phrase, check, phrase)
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
         step4 = self.section(builder, "4. Run the focused tests", "5. Commit on your branch")
         self.assertNotIn("--project", step4)

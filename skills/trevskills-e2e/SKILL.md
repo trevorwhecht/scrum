@@ -9,7 +9,7 @@ One E2E pass over a repo: replay what is saved, cover only what is new, and expl
 
 Inputs: the repo root (the current directory, or `WORKTREE` when an agent runs it), an optional `BASE` (e.g. `origin/main`) and an optional `PROJECT` (the project profile path an agent was given). Run every command from the repo root.
 
-When `SCRUM_PW_CHANNEL` is set (a machine with no Playwright Chromium), every `playwright test` run adds `--config "$HOME/.claude/skills/trevskills-e2e/channel.config.mjs"`, which loads the repo's own `playwright.config.*` and sets that browser channel; `e2e-specs`' `command` already carries it.
+When `SCRUM_PW_CHANNEL` is set (a machine with no Playwright Chromium), every `playwright test` run adds `--config "$HOME/.claude/skills/trevskills-e2e/channel.config.mjs"`, which loads the repo's own `playwright.config.*` and sets that browser channel (a set `SCRUM_CHROME` binary is used instead of the channel); `e2e-specs`' `command` already carries it.
 
 **The E2E/test directory** is `testDir` from `playwright.config.*` when there is one; otherwise `e2e/` when it exists, else `tests/`. New specs go there and nowhere else.
 

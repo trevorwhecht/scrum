@@ -49,6 +49,16 @@ GH_INSTALL = IN_TMP.format(
     f"curl -fsSL -o gh.zip https://github.com/cli/cli/releases/download/v{GH_VERSION}/{GH_DIR}.zip"  # -L: it redirects
     f" && echo '{GH_SHA256}  gh.zip' | shasum -a 256 -c -"
     f' && unzip -q gh.zip && mkdir -p "$HOME/.local/bin" && cp {GH_DIR}/bin/gh "$HOME/.local/bin/gh"')
+# Chrome for Testing: scripted Chrome on a worker (SCRUM_CHROME) never launches its Google Chrome app (job 1227).
+# 150 is the shop's own Chrome version, so it runs on macOS 12; later milestones do not.
+CFT_VERSION = "150.0.7871.125"
+CFT_SHA256 = "b580eef196e0607f5942cfa621c6976b8fd0de96ba30fa1a57341c9b9cc9a9eb"
+CFT_DIR = f"$HOME/.local/share/chrome-for-testing-{CFT_VERSION}"
+CFT_BIN = f"{CFT_DIR}/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+CFT_INSTALL = IN_TMP.format(  # rm -rf first: mv into a leftover chrome-mac-x64 would nest it
+    f"curl -fsSL -o chrome.zip https://storage.googleapis.com/chrome-for-testing-public/{CFT_VERSION}/mac-x64/"
+    f"chrome-mac-x64.zip && echo '{CFT_SHA256}  chrome.zip' | shasum -a 256 -c -"
+    f' && unzip -q chrome.zip && rm -rf "{CFT_DIR}" && mkdir -p "{CFT_DIR}" && mv chrome-mac-x64 "{CFT_DIR}/"')
 # File storage, never the keychain: the shop's login keychain is locked in SSH sessions (security exits 36).
 GH_LOGIN = ("gh auth login --hostname github.com --git-protocol https --with-token --insecure-storage"
             " && chmod 600 ~/.config/gh/hosts.yml")
@@ -178,7 +188,8 @@ CLONE = ('d="$HOME/scrum-work/{p}"; if [ -d "$d/.git" ]; then [ "$(git -C "$d" c
          ' | sed "s,^origin/,,")" && git -C "$d" merge --ff-only refs/remotes/origin/HEAD;'
          ' else mkdir -p "$HOME/scrum-work" && git clone -- {u} "$d"; fi && ' + TRUST)
 SHOP_LOGS = ".git/scrum-shop"  # a session's prompt and log, inside the clone's .git so its worktree stays clean
-SHOP_ENV = "export SCRUM_PW_CHANNEL=chrome SCRUM_SHOP=1 CLAUDE_NOTIFIER_DISABLE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0; "
+SHOP_ENV = (f'export SCRUM_PW_CHANNEL=chrome SCRUM_CHROME="{CFT_BIN}" SCRUM_SHOP=1 CLAUDE_NOTIFIER_DISABLE=1'
+            " CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0; ")  # no braces: START is a str.format template
 JEV_KEY_ENV = f'[ -r "{JEV_KEY_FILE}" ] && export TYPESAFE_API_KEY="$(cat "{JEV_KEY_FILE}")"; '  # read on the shop only
 START = ("cd ~/scrum-work/{p} && (umask 077 && mkdir -p {d} && cat > {d}/{j}.prompt) || exit 1; {env}" + JEV_KEY_ENV
          + SHOP_ENV + 'nohup claude -p "$(cat {d}/{j}.prompt)" --permission-mode acceptEdits{model}'
@@ -369,6 +380,12 @@ def _ruff(alias: str) -> tuple[str, str]:
     return _done(run(RUFF_INSTALL, INSTALL_TIMEOUT, alias=alias))
 
 
+def _chrome(alias: str) -> tuple[str, str]:
+    if run(f'[ -x "{CFT_BIN}" ]', STEP_TIMEOUT, alias=alias).returncode == 0:
+        return "ok", ""
+    return _done(run(CFT_INSTALL, INSTALL_TIMEOUT, alias=alias))
+
+
 def _jev_key(alias: str) -> tuple[str, str]:
     """Pipe this Mac's Keychain TypeSafe key into the shop's JEV_KEY_FILE on stdin, unless that file is non-empty."""
     if run(f'[ -s "{JEV_KEY_FILE}" ]', STEP_TIMEOUT, alias=alias).returncode == 0:
@@ -400,7 +417,7 @@ def setup(alias: str = ALIAS) -> dict[str, str]:
              "gh login": lambda: _gh_login(alias), "gh git": lambda: _gh_git(alias),
              "permissions": lambda: _permissions(alias), "owa links": lambda: _owa_links(alias),
              **{f"account {n}": (lambda n=n: _account_step(n, alias)) for n in _accounts(alias)},
-             "ruff": lambda: _ruff(alias), "jev key": lambda: _jev_key(alias)}
+             "ruff": lambda: _ruff(alias), "chrome": lambda: _chrome(alias), "jev key": lambda: _jev_key(alias)}
     out = {}
     for name, step in steps.items():
         out[name], note = step()

@@ -12712,7 +12712,8 @@ class E2eFullTest(unittest.TestCase):
         """Job 966: every debug job filed from a full run under load found load, not code."""
         self.assertEqual(self.serve.E2E_FULL_LOAD_SECS, 60)
         self.merge("Fix the cart")
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="350"):
+        # serve's own samples read 350; the buildlock.py child keeps the calm env pin, so heavy_hold never holds it
+        with mock.patch.object(self.serve.board, "cpu_load_pct", return_value=350.0):
             rec = self.run_suite(E2E_LIST_OUTPUT, 1, last_green=self.base)
         self.assertEqual((rec["result"], rec["exit"], rec["lastGreen"]), ("loaded", 1, self.base))
         self.assertEqual([f["spec"] for f in rec["failed"]], ["e2e/pricing.spec.ts", "e2e/admin/orders.spec.ts"])
@@ -12721,7 +12722,7 @@ class E2eFullTest(unittest.TestCase):
         self.assertTrue(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + 1))
 
     def test_loaded_pass_stays_pass(self):
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="350"):
+        with mock.patch.object(self.serve.board, "cpu_load_pct", return_value=350.0):
             rec = self.run_suite("5 passed (9s)\n", 0, last_green="old")
         self.assertEqual((rec["result"], rec["lastGreen"]), ("pass", self.git("rev-parse", "HEAD")))
 

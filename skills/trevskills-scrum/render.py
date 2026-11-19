@@ -16,12 +16,17 @@ from collections import deque
 from pathlib import Path
 from urllib.parse import urlparse
 
+import buildlock  # a sibling: machine_hold and board_module for main()'s hold before Chrome starts (job 1227)
+
 USAGE = "usage: render.py <url> <out_dir> [--cookies <file>] <path>..."
 MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 WIDTHS = ((390, True), (1440, False))
 HEIGHT = 900
 LOAD_CAP = 60  # seconds per page load
-BUDGET = 240  # seconds for the whole run, under lanes/review.md's 300 s Bash timeout
+BUDGET = 240  # seconds for the whole run, counted after main()'s hold (HOLD_CAP): both fit the 600 s Bash timeout
+#              of lanes/review.md's and lanes/uisweep.md's render steps
+HOLD_CAP = 300  # seconds main() waits at most while buildlock.machine_hold gives a reason, then renders anyway
+HOLD_POLL = 5  # seconds between machine_hold reads while holding
 QUIET = 0.5  # seconds with no request in flight, started or finished, before a loaded page is shot
 SETTLE_CAP = 10  # seconds after the load event at most, so a request that never ends cannot stall the run
 OUR_FILES = ("manifest.json", "console.log")
@@ -397,6 +402,13 @@ def main(argv: list[str]) -> int:
             not p.is_file() or not (p.name in OUR_FILES or p.suffix == ".png") for p in out_dir.iterdir())):
         print(f"render.py: {out_dir} holds files render.py did not write; refusing to delete it", file=sys.stderr)
         return 2
+    board = buildlock.board_module()  # a hot machine holds Chrome's start (job 1227); BUDGET counts after it
+    why, cap = buildlock.machine_hold(board), time.monotonic() + HOLD_CAP
+    if why:
+        print(f"render.py: holding for the machine: {why}", file=sys.stderr, flush=True)
+    while why and time.monotonic() < cap:
+        time.sleep(HOLD_POLL)
+        why = buildlock.machine_hold(board)
     old = signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))  # run the finally that kills Chrome
     try:
         manifest = render(url, out_dir, paths, cookies)
