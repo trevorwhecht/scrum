@@ -2013,7 +2013,9 @@ class ServeTest(unittest.TestCase):
         root.mkdir()
         (root / "backlog.md").write_text("- [ ] one\n- [ ] two\n")
         parent = self.serve.board.cmd_runall_start(root)["id"]
-        with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)), mock.patch.object(self.serve, "spawn") as spawn:
+        # finish_first reads every registered project's board: another test's leftover queue-wait job would hold the claim
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)), mock.patch.object(self.serve, "spawn") as spawn, \
+                mock.patch.object(self.serve.board, "finish_first", return_value=None):
             self.assertEqual(self.serve.start_ready("repo", root, parent)["ready"], [])
         spawn.assert_not_called()
         job = self.serve.board.find(self.serve.board.read_board(root), parent)
