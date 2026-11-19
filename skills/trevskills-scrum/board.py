@@ -5281,9 +5281,21 @@ def job_lane(root, job: dict):
     return lane
 
 
+def _project_light(root) -> bool:
+    """True when root/project.md has a `- Build:` line of `none` and a `- Has UI:` line whose first word is `no`;
+    a missing file or line is False."""
+    try:
+        text = (Path(root) / "project.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    build, ui = _project_list(text, "Build"), _project_list(text, "Has UI")
+    return build == [] and bool(ui) and ui[0].lower().rstrip(".,;:") == "no"
+
+
 def light_job(root, job: dict) -> bool:
-    """True when the job's lane (job_lane) is in LIGHT_LANES. A job with no id or no folder is not light."""
-    return job_lane(root, job) in LIGHT_LANES
+    """True when the job's lane (job_lane) is in LIGHT_LANES, or project.md says no Build and no UI (_project_light).
+    A job with no id or no folder is not light by lane."""
+    return job_lane(root, job) in LIGHT_LANES or _project_light(root)
 
 
 def ram_share(light=False):
@@ -5336,7 +5348,8 @@ def ram_room(floor=1, light=False):
         fit = int((ram - MIN_FREE_RAM_PCT - young * share) // ram_share(True))
     else:
         fit = int((ram - MIN_FREE_RAM_PCT) // share) - young
-    room = min(fit, MAX_SESSIONS - len(ages), MAX_YOUNG_SESSIONS - young)
+    young_room = MAX_YOUNG_SESSIONS - young if light else (MAX_YOUNG_SESSIONS - young) // 2  # a heavy start counts as 2 young
+    room = min(fit, MAX_SESSIONS - len(ages), young_room)
     return max(floor, room) if floor else room
 
 

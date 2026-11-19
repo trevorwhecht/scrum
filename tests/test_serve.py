@@ -920,6 +920,7 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(s.spawn("other", other, start, "start", f"/trevskills-scrum start {start}"),
                              f"runs/{start}-start.log")
 
+    @mock.patch("board.MAX_YOUNG_SESSIONS", 4)  # heavy starts count 2 young: keep 2 per batch
     def test_launch_gate_holds_under_concurrent_requests(self):
         s, b = self.serve, self.serve.board
         ids = [self.gate_job(f"Race {i}") for i in range(4)]
@@ -943,6 +944,7 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(spawn.call_count, 2, "2 shares of free RAM: 2 sessions")
         self.assertEqual(sum(bool(self.stage_of(i).get("queued_launch")) for i in ids), 2)
 
+    @mock.patch("board.MAX_YOUNG_SESSIONS", 4)  # heavy starts count 2 young: keep 2 per batch
     def test_queued_launch_drains_through_gate(self):
         s, b = self.serve, self.serve.board
         moved, busy, first, second, third = (self.gate_job(f"Drain {n}") for n in
@@ -1049,6 +1051,22 @@ class ServeTest(unittest.TestCase):
             est = "3%" if light else "5%"
             self.assertEqual(self.gates_file(job_id).read_text(),
                              f"ram_room(free=100%,est={est},min=20%,young=0/2,sessions=0/14)\n")
+
+    def test_spawn_light_job_project_profile(self):
+        """A standard job in a Build: none, Has UI: no project asks for a light share; one with a build does not."""
+        b = self.serve.board
+        pj = self.root / "project.md"
+        for text, light in (("- Build: none\n- Has UI: no\n", True), ("- Build: npm run build\n- Has UI: no\n", False)):
+            pj.write_text(text)
+            job_id = self.gate_job("Profile")
+            with b.locked_board(self.root) as data:
+                b.find(data, job_id)["lane"] = "standard"
+            with mock.patch.dict(self.serve.RUNS, {}, clear=True), \
+                    mock.patch.object(b, "ram_room", return_value=0) as room, \
+                    mock.patch.object(b, "spawn", side_effect=AssertionError("launched past the gate")):
+                self.assertIsNone(self.serve.spawn("repo", self.root, job_id, "approve", f"/trevskills-scrum approve {job_id}"))
+            room.assert_called_once_with(floor=0, light=light)
+        pj.unlink()
 
     def test_spawn_idle_skips_ram_gate_only(self):
         # job 825: idle=True launches past a full ram_room; the CPU gate still queues it and keeps the queue fields
@@ -8518,6 +8536,7 @@ class ResumeFirstTest(unittest.TestCase):
         self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["004-w"], "a stalled sibling holds its files")
         self.assertNotIn("Play or Abort first", (root / "board.json").read_text())
 
+    @mock.patch("board.MAX_YOUNG_SESSIONS", 4)  # heavy starts count 2 young: keep 2 per batch
     def test_outside_overlap_holds_only_overlapping_child(self):
         bigboy = [("008-big", "running", None, {"lane": "bigboy", "children": ["009-bk", "010-st"]}),
                   ("009-bk", "build", ["src/x.py"], {"parent": "008-big"}),
@@ -9551,6 +9570,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual([self.job(k).get("play_queued") for k in ("030-a", "031-b", "032-c")],
                          [None, "2026-10-25T10:01:00+00:00", "2026-10-25T10:02:00+00:00"])
 
+    @mock.patch("board.MAX_YOUNG_SESSIONS", 4)  # heavy starts count 2 young: keep 2 per batch
     def test_cooldown_holds_only_new_work(self):
         """Jobs 421, 466: with the cool-down flag on, the watchdog finishes work in flight (the 189 BigBoy parent's final
         review, queued Plays, auto-resumes, orphan respawns) and holds every automatic start of new work (Run-all and
