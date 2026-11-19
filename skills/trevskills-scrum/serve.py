@@ -2882,6 +2882,150 @@ def stop_two_sessions(procs: list[tuple[int, int, float, str]] | None = None) ->
     return stopped
 
 
+# ponytail: in-memory, like TWO_SESSIONS_LOGGED; a serve.py restart may log a run that is still alive once more
+SAME_TESTS_LOGGED: set[int] = set()  # run pids stop_same_tests already wrote a waste line for (a stop or a rerun)
+SUITE_END_OPS = ("&&", "||", "|", ";", "&")  # suite_run: a shell operator that may follow a full-suite command
+SUITE_END_STARTS = (">", "<", "2>", "1>", "&>", ")")  # suite_run: a redirect or closing paren that may follow it
+
+
+def suite_run(line: str, cmd: str) -> bool:
+    """True when process line runs cmd as a full suite: cmd's tokens, after its leading NAME=value words
+    (board.ENV_PREFIX_RE), appear in line's as one contiguous run that ends the line or is followed by a shell operator
+    (SUITE_END_OPS, SUITE_END_STARTS), so an added spec, `-k` or `--` makes it a focused run. Every token has ' " and
+    \\ stripped from both ends first; a line token also matches when it ends with / plus the cmd token (npx matches
+    /opt/homebrew/bin/npx)."""
+    want = [t.strip("'\"\\") for t in cmd[board.ENV_PREFIX_RE.match(cmd).end():].split()]
+    toks = [t.strip("'\"\\") for t in line.split()]
+    n = len(want)
+    for i in range(len(toks) - n + 1 if n else 0):
+        if all(t == w or t.endswith("/" + w) for t, w in zip(toks[i:i + n], want)):
+            nxt = toks[i + n] if i + n < len(toks) else None
+            if nxt is None or nxt in SUITE_END_OPS or nxt.startswith(SUITE_END_STARTS):
+                return True
+    return False
+
+
+def proc_ages(pids: list[int]) -> dict[int, float]:
+    """{pid: minutes since it started} from one `ps -o pid=,etime= -p <pids>` call (timeout 5 s), each etime read with
+    cpu_minutes. ps missing, failing or timing out gives {}; a pid ps does not print (it ended) is left out."""
+    try:
+        out = subprocess.run(["ps", "-o", "pid=,etime=", "-p", ",".join(map(str, pids))], capture_output=True,
+                             text=True, timeout=5).stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return {int(p[0]): cpu_minutes(p[1]) for p in map(str.split, out.splitlines()) if len(p) == 2 and p[0].isdigit()}
+
+
+def clean_head(cwd: str) -> str | None:
+    """`git rev-parse HEAD` of the checkout holding cwd when its tracked tree is clean (`git status --porcelain
+    --untracked-files=no` prints nothing, as e2e_full_tick checks); None when a tracked file changed or git fails."""
+    try:
+        if board._git(cwd, "status", "--porcelain", "--untracked-files=no").strip():
+            return None
+        return board._git(cwd, "rev-parse", "HEAD").decode().strip() or None
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return None
+
+
+def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> list[int]:
+    """Waste kind same-tests. A run is the topmost process line, never a claude line (board._is_claude), that suite_run
+    matches against a registered project's `- Test:` or `- E2E:` command (e2e_command; "" or none skipped); a matching
+    line below it is part of that run. Its cwd (one proc_cwds call) must be in a project's repo that owns the command,
+    and its head is clean_head(cwd); a run failing either is skipped.
+    Twins: 2+ runs with one project, command and head. One proc_ages call ages them all (a group with a pid it lacks is
+    skipped); the oldest, or on a tie the lower pid, is kept, and each other run gets stop_tree and one
+    board.log_waste("same-tests", ..., kept=, head=, command=) line.
+    Rerun: a run of its project's E2E command that this call did not stop, on the head of a finished (pass or fail)
+    e2e-full.json record, gets one log_waste line with pids [] and rerun=True, and no signal.
+    A line is written once per run pid (SAME_TESTS_LOGGED); a survivor gets stop_tree again. procs defaults to
+    process_scan(). Returns every pid signalled. SCRUM_IDLE_CLEANUP=0, or no project with a command, returns [] with
+    no scan."""
+    if os.environ.get("SCRUM_IDLE_CLEANUP") == "0":
+        return []
+    repos, cmds = {}, {}
+    for name, repo in board.projects().items():
+        try:
+            own = {label: e2e_command(repo / "scrum", label) for label in ("Test", "E2E")}
+        except OSError:  # an unreadable project.md stops nothing there
+            continue
+        own = {label: c for label, c in own.items() if c.lower() not in ("", "none")}
+        if own:
+            repos[name], cmds[name] = (repo, os.path.realpath(repo)), own
+    if not cmds:
+        return []
+    procs = process_scan() if procs is None else procs
+    every = {c for own in cmds.values() for c in own.values()}
+    matched = {}
+    for pid, _, _, line in procs:
+        hits = set() if board._is_claude(line) else {c for c in every if suite_run(line, c)}
+        if hits:
+            matched[pid] = hits
+    parent = {p: pp for p, pp, _, _ in procs}
+
+    def above(pid):
+        out, up = [], pid
+        while up in parent and parent[up] not in out and parent[up] != pid:  # a ppid cycle ends the walk
+            up = parent[up]
+            out.append(up)
+        return out
+
+    tops = [(pid, c) for pid, hits in sorted(matched.items()) for c in sorted(hits)
+            if not any(c in matched.get(a, ()) for a in above(pid))]
+    cwds = proc_cwds(sorted({pid for pid, _ in tops}))
+    heads, groups = {}, {}
+    for pid, c in tops:
+        cwd = cwds.get(pid)
+        name = next((n for n, (_, real) in repos.items() if cwd and (cwd == real or cwd.startswith(real + os.sep))),
+                    None)
+        if not name or c not in cmds[name].values():
+            continue
+        if cwd not in heads:
+            heads[cwd] = clean_head(cwd)
+        if heads[cwd]:
+            groups.setdefault((name, c, heads[cwd]), []).append((pid, cwd))
+    twins = {key: runs for key, runs in groups.items() if len(runs) > 1}
+    ages = proc_ages(sorted(pid for runs in twins.values() for pid, _ in runs)) if twins else {}
+    job_ids = lambda *dirs: list(dict.fromkeys(j["id"] for j in map(job_for_cwd, dirs) if j and j.get("id")))
+    stopped, hit = [], set()
+    for (name, c, head), runs in sorted(twins.items()):
+        if any(pid not in ages for pid, _ in runs):
+            continue
+        (kept, kept_cwd), *rest = sorted(runs, key=lambda r: (-ages[r[0]], r[0]))
+        for pid, cwd in rest:
+            hit.add(pid)
+            pids, cpu = stop_tree(pid, procs)
+            stopped += [p for p in pids if p not in stopped]
+            if pids and pid not in SAME_TESTS_LOGGED:
+                SAME_TESTS_LOGGED.add(pid)
+                board.log_waste("same-tests", name, job_ids(cwd, kept_cwd), pids, cpu, kept=kept, head=head,
+                                command=c)
+    kids: dict[int, list[int]] = {}
+    for p, pp, _, _ in procs:
+        kids.setdefault(pp, []).append(p)
+    cpu_of, records = {p: c for p, _, c, _ in procs}, {}
+    for (name, c, head), runs in sorted(groups.items()):
+        if c != cmds[name].get("E2E"):
+            continue
+        if name not in records:
+            records[name] = e2e_full_record(repos[name][0] / "scrum") or {}
+        rec = records[name]
+        if rec.get("head") != head or rec.get("result") not in ("pass", "fail"):
+            continue
+        for pid, cwd in runs:
+            if pid in hit or pid in SAME_TESTS_LOGGED:
+                continue
+            SAME_TESTS_LOGGED.add(pid)
+            tree, todo = [], [pid]
+            while todo:
+                p = todo.pop()
+                if p not in tree:
+                    tree.append(p)
+                    todo += kids.get(p, [])
+            board.log_waste("same-tests", name, job_ids(cwd), [], round(sum(cpu_of.get(p, 0.0) for p in tree), 1),
+                            rerun=True, head=head, command=c)
+    return stopped
+
+
 OUTCOME_SKIP =("Permission allow rule",)  # CLI warnings written to the run log before real output
 
 
@@ -3058,6 +3202,7 @@ def watchdog_tick():
     Then idle_cleanup stops leaked dev servers of idle projects and quits Docker Desktop once its projects idle 10 min.
     Then stop_leftovers stops claude sessions still running a test, server or build after their job family finished.
     Then stop_two_sessions keeps one owner when two claude sessions work one job and stops the rest (asks when unclear).
+    Then stop_same_tests stops the newer of two identical full Test or E2E runs on one clean commit and logs a full E2E rerun of a head e2e-full.json already holds.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard.
@@ -3193,6 +3338,10 @@ def watchdog_tick():
         stop_two_sessions()
     except (Exception, SystemExit) as e:
         print(f"watchdog: two sessions: {e}", file=sys.stderr, flush=True)
+    try:
+        stop_same_tests()
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: same tests: {e}", file=sys.stderr, flush=True)
     if claim:
         try:
             auto_continue_tick(busy)
