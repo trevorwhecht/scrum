@@ -12745,6 +12745,37 @@ class PulseTest(unittest.TestCase):
             s.pulse_tick({}, now=self.NOW + 2)
         self.assertIsNone(self.lines()[-1]["guard"])
 
+    def test_pulse_gates_name_noted_hold(self):
+        """Job 1215: a hold note_held or note_hold recorded for a project is its `held:<token>` gate for
+        PULSE_HOLD_TTL_S seconds, then gone."""
+        s = self.serve
+        root = (self.base / "app" / "scrum").resolve()
+        self.addCleanup(s.PULSE_HOLDS.clear)
+        with mock.patch.object(s.time, "time", return_value=self.NOW):
+            s.note_held(root, "finish_first", ["007-wait"])
+            s.note_held(root, "ignored", [])  # no ready job passed over: no hold
+        s.pulse_tick({}, now=self.NOW + 10)
+        self.assertEqual(self.lines()[-1]["projects"]["app"]["gates"], ["held:finish_first"])
+        self.assertEqual(self.lines()[-1]["projects"]["lib"]["gates"], [])
+        s.pulse_tick({}, now=self.NOW + s.PULSE_HOLD_TTL_S + 1)
+        self.assertEqual(self.lines()[-1]["projects"]["app"]["gates"], [])
+
+    def test_start_ready_notes_shop_left_and_run_all_hold(self):
+        """Job 1215: start_ready notes runs_on_shop when cmd_ready left children for the shop and claimed none; a running
+        run-all with claimable work is noted by auto_continue_tick."""
+        s = self.serve
+        root = (self.base / "app" / "scrum").resolve()
+        self.addCleanup(s.PULSE_HOLDS.clear)
+        with mock.patch.object(s.board, "cmd_ready", return_value={"ready": [], "left": ["007-wait"], "held": None}), \
+                mock.patch.object(s, "cpu_hot", return_value=False), mock.patch.object(s, "ready_waiting", return_value=[]):
+            s.start_ready("app", root, "p")
+        self.assertIn("runs_on_shop", s.PULSE_HOLDS[root])
+        s.PULSE_HOLDS.clear()
+        with mock.patch.object(s, "running", return_value=True), mock.patch.object(s, "claimable", return_value=True), \
+                mock.patch.object(s, "auto_continue", return_value=1):
+            s.auto_continue_tick({"app": True})
+        self.assertIn("run_all_running", s.PULSE_HOLDS[root])
+
     def test_pulse_records_serve_starts(self):
         """Job 906: a launched non-manual start of a board job is logged with its gate's CPU reading as the next tick's
         `started`; manual, non-start and queued launches are not."""

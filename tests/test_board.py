@@ -5281,6 +5281,18 @@ class BoardTest(unittest.TestCase):
                       "Held by machine guard: 0 min\n"
                       "Idle held by cool down: 2 min\nIdle paused: Auto continue off: 3 min\n", text)
 
+    def test_pulse_held_gate_counts_beside_claimable_work(self):
+        """Job 1215: a `held:<token>` project gate gates a minute even with claimable work, and is named; a plain
+        project gate (overlap, runs_alone) does not."""
+        proj = lambda g: {"app": {"claimable": 2, "waiting": 1, "auto": True, "gates": g}}
+        text = self.pulse_ticks(
+            (0, 0, {"projects": proj(["held:finish_first"])}),  # gated
+            (60, 0, {"projects": proj(["runs_alone"])}),  # claimable work still starts: idle
+            (120, 0, {"projects": proj(["held:finish_first", "held:runs_on_shop"])}),  # gated, both named
+            (180, 1, {}))
+        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\n"
+                      "Gated with claimable work: 2 min (held:finish_first 2, held:runs_on_shop 1)\n", text)
+
     def test_pulse_paused_waits_not_gating(self):
         """Job 906: an auto-off project's ungated waiting work never makes an otherwise all-gated line idle."""
         text = self.pulse_ticks((0, 0, {"projects": {

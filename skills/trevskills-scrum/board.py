@@ -1651,9 +1651,11 @@ def write_pulse(root, digest_id):
             on = [p for p in ps.values() if p.get("auto") is True]  # Auto continue off never counts as idle
             work = lambda p: pos(p.get("claimable")) or pos(p.get("waiting"))
             if l.get("sessions") == 0 and not l.get("cooldown") and any(work(p) for p in on):
-                waits = [gates(p.get("gates")) for p in on if pos(p.get("waiting"))]
-                why = gates(l.get("gates")) or (
-                    sum(waits, []) if not any(pos(p.get("claimable")) for p in on) and all(waits) else [])
+                # a project's gates gate it when it has no claimable work, or when they hold a `held:<why>` token
+                # (serve.py pulse_tick: the hold that skipped its ready job or run-all start)
+                waits = [[g for g in gates(p.get("gates")) if not pos(p.get("claimable")) or g.startswith("held:")]
+                         for p in on if work(p)]
+                why = gates(l.get("gates")) or (sum(waits, []) if all(waits) else [])
                 if over(l, "cpu_load", MAX_CPU_LOAD_PCT) or over(l, "swap", MAX_SWAP_PCT):
                     guard, streak = guard + dt, 0
                 elif why:
@@ -5795,7 +5797,8 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
             if new[0] == "needs-human":
                 parent["stopTitle"] = "BIGBOY_BLOCKED"
         out = {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
-               "all_merged": finished == len(kids), "held": machine or ("ram_room" if ram_full else None)}
+               "all_merged": finished == len(kids), "held": machine or ("ram_room" if ram_full else None),
+               **({"left": left} if left else {})}  # `left`: waiting children kept for the shop (serve.py start_ready notes it)
     if was != "needs-human" and parent["stage"] == "needs-human":
         play(sound("needs-human"))
     return out
