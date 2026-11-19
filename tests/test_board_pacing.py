@@ -425,6 +425,18 @@ class PickAccountTest(AccountEnv):
             self.write(self.owa, seven=(90, 600000))  # the backup still stops at its 90 % reserve
             self.assertIsNone(board.pick_account(NOW)[0])
 
+    def test_backup_skips_7d_pace_when_primary_resets_first(self):
+        """Job 1242: the primary's fresh week arrives before the backup's reset, so the backup's 7d pace never holds it."""
+        with mock.patch.object(board, "PACE_LEAD_PCT", 15):
+            self.write(self.main, seven=(100, 172800))  # used up, resets first: primary
+            self.write(self.owa, seven=(35, 500000))  # 35 % used at 17 % elapsed: 18 points ahead of pace
+            self.assertEqual(board.pick_account(NOW)[0], "owa")
+            self.write(self.owa, five=(60, 4 * 3600), seven=(35, 500000))  # its 5h pace still holds it
+            self.assertIn("owa pace 5h", board.pick_account(NOW)[1].reason)
+            os.environ["SCRUM_ACCOUNTS"] = json.dumps([["owa", str(self.owa), [80, 90]]])
+            self.write(self.owa, seven=(35, 500000))  # a lone account keeps its 7d pace
+            self.assertIn("owa pace 7d", board.pick_account(NOW)[1].reason)
+
     def test_full_primary_fails_over_without_a_marker(self):
         """Job 1216: a primary at 100 % of a window that has not reset has no room, limit marker or not."""
         self.write(self.main, seven=(100, 50000))  # resets first: primary
