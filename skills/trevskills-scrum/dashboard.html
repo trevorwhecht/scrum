@@ -680,9 +680,10 @@ function render() {
     return `<section class="col${stage === "needs-human" ? " human" : ""}${stage === pick ? " pick" : ""}" data-col="${esc(stage)}"><h2><span>${esc(stage)}</span> <span>· ${count(stage)}</span></h2>
       ${rIn(stage).join("") + inCol.map(j => card(j) + kidsMore(j)).join("") + more || '<p class="empty">—</p>'}</section>`;
   }).join("");
-  if (moreFocused) $("board").querySelector("[data-more]")?.focus();
-  if (kidsFocused) [...$("board").querySelectorAll("[data-kids-more]")].find(b => b.dataset.kidsMore === kidsFocused)?.focus();
-  if (rmFocused) [...$("board").querySelectorAll("[data-roadmap]")].find(c => c.dataset.roadmap === rmFocused)?.focus();
+  // preventScroll: the 2 s poll would otherwise scroll a scrolled page back to the focused control
+  if (moreFocused) $("board").querySelector("[data-more]")?.focus({preventScroll: true});
+  if (kidsFocused) [...$("board").querySelectorAll("[data-kids-more]")].find(b => b.dataset.kidsMore === kidsFocused)?.focus({preventScroll: true});
+  if (rmFocused) [...$("board").querySelectorAll("[data-roadmap]")].find(c => c.dataset.roadmap === rmFocused)?.focus({preventScroll: true});
   // A project whose backlog read failed with no last good body (null) has no count to show.
   const counted = projects.filter(p => !filter || p === filter);
   const open = counted.some(p => backlogs[p] === null) ? "—" : counted.reduce((n, p) => n + (backlogs[p] || []).filter(i => !i.done).length, 0);
