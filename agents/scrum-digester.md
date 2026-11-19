@@ -79,7 +79,7 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 - Otherwise it is the **Backlog fallback**, naming the code to change (a serve.py tick, an E2E spec or seed data).
 - A `None` section gets no proposal. It counts toward the at-most-8 cap.
 
-**Waste.** From `notes.md`'s `## Waste` section:
+**Waste.** From `notes.md`'s `## Waste` section (the reader's per-kind summary of `DIGEST_DIR/waste.md`, the machine-wide waste.log catches):
 - Every line becomes exactly one proposal whose `why` starts `Waste:` and names the kind and its catch count.
 - It is a text edit to the lane or agent whose step let the waste happen (for example a second session started on one job, or the same tests run twice) when one would stop it.
 - Otherwise it is the **Backlog fallback**.
