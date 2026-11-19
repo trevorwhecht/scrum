@@ -3152,7 +3152,7 @@ def report_hogs(procs: list[tuple[int, int, float, str]] | None = None, now: flo
     return HOGS
 
 
-OUTCOME_SKIP =("Permission allow rule",)  # CLI warnings written to the run log before real output
+OUTCOME_SKIP = ("Permission allow rule",)  # CLI warnings written to the run log before real output
 
 
 def outcome_line(root, run, code):
@@ -5182,6 +5182,8 @@ def drain_all_spools() -> None:
         try:
             if spool_path(root).stat().st_size:
                 drain_backlog_spool(root)
+        except FileNotFoundError:
+            pass  # no spool file is the normal case
         except OSError as e:
             print(f"backlog spool: {root}: {e}", file=sys.stderr, flush=True)
 
