@@ -1477,6 +1477,7 @@ PROCESSES = (
     ("Actions alerts", ("actions_alert",), ()),
     ("Disk reclaim", ("reclaim_disk",), ()),
     ("Idle cleanup", ("idle_cleanup", "stop_dev_servers", "stop_orphans", "docker_tick", "prune_worktrees"), ()),
+    ("Leftover sessions", ("stop_leftovers", "stop_tree", "process_scan"), ()),
     ("E2E lock reaps", ("e2e_lock_reap",), ()),
     ("Digest retry", ("digest_retry_tick",), ()),
     ("Weekly digest", ("weekly_tick",), ()),

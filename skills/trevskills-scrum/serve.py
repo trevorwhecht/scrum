@@ -136,17 +136,7 @@ def kill_claude(project, root, job_id):
              if len(f) == 3 and f[0].isdigit() and f[1].isdigit() and "claude" in f[2] and match.search(f[2])]
     if not lines:
         return
-    try:
-        out = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(str(pid) for pid, _ in lines)],
-                             capture_output=True, text=True, timeout=5).stdout or ""
-    except (OSError, subprocess.SubprocessError):
-        return
-    cwds, pid = {}, None
-    for l in out.splitlines():
-        if l[:1] == "p" and l[1:].isdigit():
-            pid = int(l[1:])
-        elif l[:1] == "n" and pid is not None:
-            cwds[pid] = os.path.realpath(l[1:])
+    cwds = proc_cwds([pid for pid, _ in lines])
     repo = os.path.realpath(root.parent)
     groups = {pgid for pid, pgid in lines if pid in cwds and (cwds[pid] == repo or cwds[pid].startswith(repo + os.sep))}
     for pgid in sorted(groups - {os.getpgrp()}):
@@ -154,6 +144,25 @@ def kill_claude(project, root, job_id):
             os.killpg(pgid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
+
+
+def proc_cwds(pids: list[int]) -> dict[int, str]:
+    """{pid: realpath of its cwd} from one `lsof -a -d cwd -Fpn -p <pids>` call (timeout 5 s). lsof missing, failing
+    or timing out gives {}; a pid lsof does not report is left out."""
+    if not pids:
+        return {}
+    try:
+        out = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(str(pid) for pid in pids)],
+                             capture_output=True, text=True, timeout=5).stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    cwds, pid = {}, None
+    for l in out.splitlines():
+        if l[:1] == "p" and l[1:].isdigit():
+            pid = int(l[1:])
+        elif l[:1] == "n" and pid is not None:
+            cwds[pid] = os.path.realpath(l[1:])
+    return cwds
 
 
 LAUNCH_LOCK = threading.Lock()  # spawn's room check and its Popen run as one step, so a burst of requests can't race the gate
@@ -2494,6 +2503,75 @@ def processes() -> list[tuple[int, int, str]]:
     return procs
 
 
+def cpu_minutes(text: str) -> float:
+    """CPU minutes from ps's `time` column: `M:SS.ss` (macOS; minutes may pass 59), `H:MM:SS` or `D-HH:MM:SS`, rounded
+    to 2 decimals. Anything else gives 0.0."""
+    days, _, rest = text.rpartition("-")
+    parts = rest.split(":")
+    try:
+        if len(parts) == 2:
+            hours, mins, secs = 0, int(parts[0]), float(parts[1])
+        elif len(parts) == 3:
+            hours, mins, secs = int(parts[0]), int(parts[1]), float(parts[2])
+        else:
+            return 0.0
+        return round((int(days) if days else 0) * 1440 + hours * 60 + mins + secs / 60, 2)
+    except ValueError:
+        return 0.0
+
+
+def process_scan() -> list[tuple[int, int, float, str]]:
+    """(pid, ppid, CPU minutes (cpu_minutes), command line) of every process, from one
+    `ps -axo pid=,ppid=,time=,command=`, processes()'s sibling for the waste detectors. ps missing, failing, exiting
+    non-zero or timing out (5 s) gives [], so nothing is stopped."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,time=,command="], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    procs = []
+    for line in out.stdout.splitlines() if out.returncode == 0 else []:
+        parts = line.split(None, 3)
+        if len(parts) >= 3 and parts[0].isdigit() and parts[1].isdigit():
+            procs.append((int(parts[0]), int(parts[1]), cpu_minutes(parts[2]), parts[3] if len(parts) > 3 else ""))
+    return procs
+
+
+def stop_tree(pid: int, procs: list[tuple[int, int, float, str]]) -> tuple[list[int], float]:
+    """SIGTERM pid and every descendant of it (walking pid/ppid over process_scan's procs), never this process, its
+    parent or any ancestor of it in procs, and never anything below this process. Returns (the pids actually signalled,
+    a vanished or forbidden pid left out; the sum of their CPU minutes, 1 decimal). A pid missing from procs signals
+    only that pid."""
+    me = os.getpid()
+    parent = {p: pp for p, pp, _, _ in procs}
+    cpu = {p: c for p, _, c, _ in procs}
+    kids: dict[int, list[int]] = {}
+    for p, pp, _, _ in procs:
+        kids.setdefault(pp, []).append(p)
+    ancestors, up = {me}, me
+    while up in parent and parent[up] not in ancestors:  # a ppid cycle in a bad scan ends the walk
+        up = parent[up]
+        ancestors.add(up)
+    keep = ancestors | {os.getppid()}
+    tree, todo = [], [pid]
+    while todo:
+        p = todo.pop(0)
+        if p in tree:
+            continue
+        tree.append(p)
+        if p != me:  # serve.py's own children are other sessions, never this tree's
+            todo += kids.get(p, [])
+    signalled = []
+    for p in tree:
+        if p in keep or p <= 1:
+            continue
+        try:
+            os.kill(p, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            continue
+        signalled.append(p)
+    return signalled, round(sum(cpu.get(p, 0.0) for p in signalled), 1)
+
+
 def stop_orphans(idle: dict[str, Path], jobs_by_project: dict[str, list[dict]],
                  procs: list[tuple[int, int, str]]) -> list[int]:
     """SIGTERM each orphan (ppid 1, launchd adopted it) whose command line names <repo>/.claude/worktrees/scrum-<id>
@@ -2600,6 +2678,88 @@ def idle_cleanup(busy: dict[str, bool]) -> None:
     docker = docker_tick(idle, [entry for entry in listening if entry[0] not in killed])
     if killed or orphans or docker:
         board.log_process("Idle cleanup", "cleaned", dev_servers=len(killed), orphans=len(orphans), docker=bool(docker))
+
+
+LEFTOVER_GRACE_MIN = 10  # minutes a finished job's session may keep running before stop_leftovers stops it
+LEFTOVER_SESSION_RE = re.compile(r"/trevskills-scrum \S+ ([\w.-]+)(\s|$)")  # a scrum session's command: group 1 = job id
+# a test run, dev server or build in a session's tree: only a session still running one is a leftover
+LEFTOVER_WORK_RE = re.compile(r"\b(unittest|pytest|run_parallel\.py|vitest|jest|playwright test|next (dev|build|start)"
+                              r"|vite|tsc|(npm|pnpm|yarn|bun) (run )?(test|dev|build|e2e|start))\b")
+# ponytail: in-memory, like ORPHAN_RESPAWN; a serve.py restart may log a surviving session once more
+LEFTOVER_LOGGED: set[int] = set()  # session pids stop_leftovers already wrote a waste line for
+
+
+def leftover_job(root, by_id, job_id, cutoff) -> dict | None:
+    """The job when it and its whole hand-off family are finished: the job is done or aborted, unchanged since cutoff
+    (board.stalled_since), holds no live chain lock and lists only done/aborted children; with a parent, the parent is on
+    the board, done or aborted, holds no live chain lock, and every sibling on the board is done or aborted. Else None."""
+    fin = lambda j: isinstance(j, dict) and j.get("stage") in ("done", "aborted")
+    job = by_id.get(job_id)
+    if not fin(job) or not board.stalled_since(job, cutoff) or board.chain_lock_live(root, job_id) \
+            or not all(fin(by_id.get(k)) for k in job.get("children") or []):
+        return None
+    pid = job.get("parent")
+    if pid:
+        par = by_id.get(pid)
+        if not fin(par) or board.chain_lock_live(root, pid) \
+                or not all(fin(by_id[k]) for k in (par.get("children") or []) if k in by_id):
+            return None
+    return job
+
+
+def stop_leftovers(procs=None) -> list[int]:
+    """Stop leftover sessions: a claude line (board._is_claude) running /trevskills-scrum <cmd> <id> whose cwd
+    (proc_cwds, one lsof call) is a registered project's repo or inside it, whose job and hand-off family are finished
+    (leftover_job, LEFTOVER_GRACE_MIN), and with a descendant still running a test, server or build (LEFTOVER_WORK_RE).
+    Each one gets stop_tree, then board.stop_worktree_servers on its job's worktree, and one board.log_waste("leftover")
+    line (once per session pid: LEFTOVER_LOGGED). procs defaults to process_scan(). Returns every pid signalled.
+    SCRUM_IDLE_CLEANUP=0 turns it off, as idle_cleanup."""
+    if os.environ.get("SCRUM_IDLE_CLEANUP") == "0":
+        return []
+    procs = process_scan() if procs is None else procs
+    sessions = {}
+    for pid, _, _, cmd in procs:
+        m = LEFTOVER_SESSION_RE.search(cmd) if board._is_claude(cmd) else None
+        if m:
+            sessions[pid] = m[1]
+    if not sessions:
+        return []
+    cwds = proc_cwds(sorted(sessions))
+    repos = [(name, repo, os.path.realpath(repo)) for name, repo in board.projects().items()]
+    kids: dict[int, list[int]] = {}
+    for p, pp, _, _ in procs:
+        kids.setdefault(pp, []).append(p)
+    cmds, cpu = {p: c for p, _, _, c in procs}, {p: c for p, _, c, _ in procs}
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=LEFTOVER_GRACE_MIN)
+    boards, stopped = {}, []
+    for spid, job_id in sorted(sessions.items()):
+        cwd = cwds.get(spid)
+        hit = next(((n, r) for n, r, real in repos if cwd and (cwd == real or cwd.startswith(real + os.sep))), None)
+        if not hit:
+            continue
+        name, repo = hit
+        if name not in boards:
+            try:
+                boards[name] = {j["id"]: j for j in board.read_board(repo / "scrum").get("jobs") or []
+                                if isinstance(j, dict) and "id" in j}
+            except (OSError, SystemExit, AttributeError):  # an unreadable board stops nothing
+                boards[name] = {}
+        job = leftover_job(repo / "scrum", boards[name], job_id, cutoff)
+        below, todo = [], list(kids.get(spid, []))
+        while todo:
+            p = todo.pop()
+            if p not in below and p != spid:
+                below.append(p)
+                todo += kids.get(p, [])
+        if not job or not any(LEFTOVER_WORK_RE.search(cmds.get(p, "")) for p in below):
+            continue
+        pids, _ = stop_tree(spid, procs)
+        pids += [p for p in board.stop_worktree_servers(repo, job.get("worktree")) if p not in pids]
+        stopped += [p for p in pids if p not in stopped]
+        if pids and spid not in LEFTOVER_LOGGED:
+            LEFTOVER_LOGGED.add(spid)
+            board.log_waste("leftover", name, [job_id], pids, round(sum(cpu.get(p, 0.0) for p in pids), 1))
+    return stopped
 
 
 OUTCOME_SKIP = ("Permission allow rule",)  # CLI warnings written to the run log before real output
@@ -2776,6 +2936,7 @@ def watchdog_tick():
        refreshes the ACTIONS_ALERT cache once every ACTIONS_ALERT_EVERY seconds per project.
        Before it, prod_errors_tick sweeps an opted-in project's Vercel production errors into its backlog once a day.
     Then idle_cleanup stops leaked dev servers of idle projects and quits Docker Desktop once its projects idle 10 min.
+    Then stop_leftovers stops claude sessions still running a test, server or build after their job family finished.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard.
@@ -2903,6 +3064,10 @@ def watchdog_tick():
         idle_cleanup(busy)
     except (Exception, SystemExit) as e:
         print(f"watchdog: idle cleanup: {e}", file=sys.stderr, flush=True)
+    try:
+        stop_leftovers()
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: leftover sessions: {e}", file=sys.stderr, flush=True)
     if claim:
         try:
             auto_continue_tick(busy)
