@@ -437,15 +437,19 @@ class PickAccountTest(AccountEnv):
         self.assertEqual(board.pick_account(NOW), ("main", None))
 
     def test_owa_as_primary_hands_work_to_main_at_97(self):
-        """Job 1208: OWA as primary is held at 97 % 7d (PRIMARY_RESERVE); main as primary has no cap."""
+        """Job 1208: OWA as primary is held at 97 % 7d (PRIMARY_RESERVE); main as primary is held at 99 (job 1228)."""
         self.write(self.main, seven=(10, 600000))
         self.write(self.owa, seven=(96, 300000))  # owa resets first: primary
         self.assertEqual(board.pick_account(NOW)[0], "owa")
         self.write(self.owa, seven=(97, 300000))
         self.assertEqual(board.pick_account(NOW)[0], "main")
         self.assertEqual(board.reserve_hit(board.accounts()[1], board.read_usage("owa"), NOW), "reserve 7d 97% used (keeps 97%)")
-        self.write(self.main, seven=(97, 200000))  # main resets first now: primary, never held
+        self.write(self.main, seven=(98, 200000))  # main resets first now: primary, held only at 99
         self.assertEqual(board.pick_account(NOW)[0], "main")
+        self.write(self.main, seven=(99, 200000))
+        self.write(self.owa, seven=(50, 300000))
+        self.assertEqual(board.pick_account(NOW)[0], "owa")
+        self.assertEqual(board.reserve_hit(board.accounts()[0], board.read_usage("main"), NOW), "reserve 7d 99% used (keeps 99%)")
 
     def test_non_dict_rate_limits_never_crash_primary_or_reset(self):
         """Job 1146: a usage.json whose rate_limits is a list or string must not crash primary_account or seven_day_reset."""

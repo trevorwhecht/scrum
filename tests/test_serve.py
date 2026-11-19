@@ -2184,8 +2184,7 @@ class ServeTest(unittest.TestCase):
 
     def test_machine_usage_one_weekly_reading_per_account(self):
         """main 49% from a day-old file, owa 90% with its 80/90 reserve: each account's weekly %, its reset and the
-        used % its red starts at (owa: its 7d reserve, or PRIMARY_RESERVE's 97 while primary; main, no reserve:
-        board.USAGE_HOLD_PCT)."""
+        used % its red starts at (owa: its 7d reserve, or PRIMARY_RESERVE's 97 while primary; main primary: 99, job 1228)."""
         base = Path(tempfile.mkdtemp(dir=self.tmp.name))
         (base / "main").mkdir()
         (base / "owa").mkdir()
@@ -2197,7 +2196,7 @@ class ServeTest(unittest.TestCase):
         accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [80, 90]]])
         with mock.patch.dict(os.environ, SCRUM_ACCOUNTS=accounts, SCRUM_USAGE=str(base / "main" / "usage.json")):
             self.assertEqual(self.serve.machine_usage(now), {
-                "accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": now + 86400, "max_pct": 90},
+                "accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": now + 86400, "max_pct": 99},
                              {"name": "owa", "seven_day_pct": 90, "resets_at": now + 2 * 86400, "max_pct": 90}],
                 "allowance": None, "fable": "unknown", "hold_until": None})
             accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [70, 85]]])
