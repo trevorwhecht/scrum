@@ -169,6 +169,13 @@ class ShopCooldownButtons(unittest.TestCase):
             "console.log(JSON.stringify(calls));")
         self.assertEqual(out, [["a", {"preventScroll": True}]])
 
+    def test_board_refocus_never_scrolls(self):
+        """renderBoard's focus restores ([data-more], [data-kids-more], [data-roadmap]) pass preventScroll."""
+        body = fn_body(DASHBOARD.read_text(), "render")
+        calls = re.findall(r"\.focus\(([^)]*)\)", body)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(set(calls), {"{preventScroll: true}"})
+
 
 if __name__ == "__main__":
     unittest.main()

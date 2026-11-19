@@ -157,9 +157,9 @@ class RoadmapCard(unittest.TestCase):
 
     def test_render_keeps_focus_on_roadmap_card(self):
         got, = run('let focused = null; document.activeElement = {matches: s => s.includes("data-roadmap"), dataset: {roadmap: "q"}}; '
-                   '$("board").querySelectorAll = () => ["p", "q"].map(r => ({dataset: {roadmap: r}, focus() { focused = r; }})); '
+                   '$("board").querySelectorAll = () => ["p", "q"].map(r => ({dataset: {roadmap: r}, focus(o) { focused = [r, o]; }})); '
                    'render(); console.log(JSON.stringify(focused));', {"p": ACTIVE, "q": DONE})
-        self.assertEqual(got, "q")
+        self.assertEqual(got, ["q", {"preventScroll": True}], "the 2 s poll never scrolls the page back")
 
     def test_banner_removed(self):
         text = DASHBOARD.read_text()
