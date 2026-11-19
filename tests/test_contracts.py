@@ -1796,6 +1796,9 @@ class ContractTest(unittest.TestCase):
         line = line[:line.index("\n")]
         for phrase in ("`## Counts`", "`## Catches`", "`No catches"):
             self.assertIn(phrase, line, phrase)
+        digester = (ROOT / "agents" / "scrum-digester.md").read_text()
+        waste = digester[digester.index("**Waste.**"):digester.index("**Backlog fallback.**")]
+        self.assertIn("DIGEST_DIR/waste.md", waste)
         self.assertIn("    ## Waste\n    - <kind> — catches: <n> — projects: <names> — jobs: <ids, or none> — CPU: "
                       "<total cpu_min> min\n", reader)
         self.assertLess(reader.index("    ## Processes\n"), reader.index("    ## Waste\n"))
