@@ -2884,7 +2884,7 @@ def stop_two_sessions(procs: list[tuple[int, int, float, str]] | None = None) ->
 
 # ponytail: in-memory, like TWO_SESSIONS_LOGGED; a serve.py restart may log a run that is still alive once more
 SAME_TESTS_LOGGED: set[int] = set()  # run pids stop_same_tests already wrote a waste line for (a stop or a rerun)
-SUITE_END_OPS =("&&", "||", "|", ";", "&")  # suite_run: a shell operator that may follow a full-suite command
+SUITE_END_OPS = ("&&", "||", "|", ";", "&")  # suite_run: a shell operator that may follow a full-suite command
 SUITE_END_STARTS = (">", "<", "2>", "1>", "&>", ")")  # suite_run: a redirect or closing paren that may follow it
 
 
