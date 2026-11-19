@@ -424,6 +424,17 @@ class PickAccountTest(AccountEnv):
             self.write(self.owa, seven=(90, 600000))  # the backup still stops at its 90 % reserve
             self.assertIsNone(board.pick_account(NOW)[0])
 
+    def test_owa_as_primary_hands_work_to_main_at_97(self):
+        """Job 1208: OWA as primary is held at 97 % 7d (PRIMARY_RESERVE); main as primary has no cap."""
+        self.write(self.main, seven=(10, 600000))
+        self.write(self.owa, seven=(96, 300000))  # owa resets first: primary
+        self.assertEqual(board.pick_account(NOW)[0], "owa")
+        self.write(self.owa, seven=(97, 300000))
+        self.assertEqual(board.pick_account(NOW)[0], "main")
+        self.assertEqual(board.reserve_hit(board.accounts()[1], board.read_usage("owa"), NOW), "reserve 7d 97% used (keeps 97%)")
+        self.write(self.main, seven=(97, 200000))  # main resets first now: primary, never held
+        self.assertEqual(board.pick_account(NOW)[0], "main")
+
     def test_non_dict_rate_limits_never_crash_primary_or_reset(self):
         """Job 1146: a usage.json whose rate_limits is a list or string must not crash primary_account or seven_day_reset."""
         self.write(self.main, seven=(95, 90000))
