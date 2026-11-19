@@ -2762,7 +2762,127 @@ def stop_leftovers(procs=None) -> list[int]:
     return stopped
 
 
-OUTCOME_SKIP = ("Permission allow rule",)  # CLI warnings written to the run log before real output
+# ponytail: in-memory, like LEFTOVER_LOGGED; a serve.py restart may log or ask once more
+TWO_SESSIONS_LOGGED: set[int] = set()  # session pids stop_two_sessions already wrote a waste line for
+TWO_SESSIONS_ASKED: set[str] = set()  # "project/job id" keys stop_two_sessions already parked with an ask
+
+
+def stop_two_sessions(procs: list[tuple[int, int, float, str]] | None = None) -> list[int]:
+    """Waste kind two-sessions: two live claude sessions (board._is_claude, LEFTOVER_SESSION_RE) working one job in
+    one project (cwd from one proc_cwds call, inside a registered repo). A wrapper line around a session for the same
+    job is that session; only the topmost line counts. Per (project, job id):
+    (b) a parent on the board, not done or aborted, whose live chain lock's holder is one of its children with exactly
+        one live session: every session named for the parent gets stop_tree and the holder's session is the owner;
+    (a) else, with 2+ sessions for a job on the board, not done or aborted: the owner is the session the job's recorded
+        pid is, is above or below, or the session the RUNS entry's proc (running) is or is above. Exactly one owner: the
+        others get stop_tree. Each stop writes one board.log_waste("two-sessions", ..., owner=<pid>) line (once per
+        session pid: TWO_SESSIONS_LOGGED). No owner or 2+: nothing is stopped and a job not at needs-human is parked
+        once (TWO_SESSIONS_ASKED) with board.cmd_ask title TWO_SESSIONS.
+    procs defaults to process_scan(). Returns every pid signalled. SCRUM_IDLE_CLEANUP=0 turns it off, as
+    idle_cleanup."""
+    if os.environ.get("SCRUM_IDLE_CLEANUP") == "0":
+        return []
+    procs = process_scan() if procs is None else procs
+    found = {}
+    for pid, _, _, cmd in procs:
+        m = LEFTOVER_SESSION_RE.search(cmd) if board._is_claude(cmd) else None
+        if m:
+            found[pid] = m[1]
+    if not found:
+        return []
+    parent = {p: pp for p, pp, _, _ in procs}
+    kids: dict[int, list[int]] = {}
+    for p, pp, _, _ in procs:
+        kids.setdefault(pp, []).append(p)
+
+    def above(pid):
+        out, up = [], pid
+        while up in parent and parent[up] not in out and parent[up] != pid:  # a ppid cycle ends the walk
+            up = parent[up]
+            out.append(up)
+        return out
+
+    def below(pid):
+        out, todo = [], list(kids.get(pid, []))
+        while todo:
+            p = todo.pop()
+            if p not in out and p != pid:
+                out.append(p)
+                todo += kids.get(p, [])
+        return out
+
+    tops = {pid: job_id for pid, job_id in found.items() if not any(found.get(a) == job_id for a in above(pid))}
+    cwds = proc_cwds(sorted(tops))
+    repos = {name: (repo, os.path.realpath(repo)) for name, repo in board.projects().items()}
+    groups: dict[tuple[str, str], list[int]] = {}
+    for spid, job_id in sorted(tops.items()):
+        cwd = cwds.get(spid)
+        name = next((n for n, (_, real) in repos.items()
+                     if cwd and (cwd == real or cwd.startswith(real + os.sep))), None)
+        if name:
+            groups.setdefault((name, job_id), []).append(spid)
+    cpu, stopped = {p: c for p, _, c, _ in procs}, []
+
+    def stop_dupes(name, jobs, dupes, owner):
+        pids = []
+        for spid in dupes:
+            pids += [p for p in stop_tree(spid, procs)[0] if p not in pids]
+        stopped.extend(p for p in pids if p not in stopped)
+        if pids and any(spid not in TWO_SESSIONS_LOGGED for spid in dupes):
+            TWO_SESSIONS_LOGGED.update(dupes)
+            board.log_waste("two-sessions", name, jobs, pids, round(sum(cpu.get(p, 0.0) for p in pids), 1),
+                            owner=owner)
+
+    for name in sorted({n for n, _ in groups}):
+        root = repos[name][0] / "scrum"
+        try:
+            by_id = {j["id"]: j for j in board.read_board(root).get("jobs") or [] if isinstance(j, dict) and "id" in j}
+        except (OSError, SystemExit, AttributeError):  # an unreadable board stops nothing
+            continue
+        live = lambda j: isinstance(j, dict) and j.get("stage") not in ("done", "aborted")
+        done = set()
+        for (n, job_id), sessions in sorted(groups.items()):  # (b): a child's session holds the parent's review
+            job = by_id.get(job_id)
+            if n != name or not live(job) or not board.chain_lock_live(root, job_id):
+                continue
+            holder = board.lock_holder(root / "jobs" / job_id / ".chain.lock")
+            held = groups.get((name, holder), []) if holder and holder in (job.get("children") or []) else []
+            if len(held) == 1:
+                done.add(job_id)
+                dupes = [s for s in sessions if s not in above(held[0])]  # never a tree holding the owner
+                stop_dupes(name, [job_id, holder], dupes, held[0])
+        for (n, job_id), sessions in sorted(groups.items()):  # (a): one job, 2+ sessions
+            job = by_id.get(job_id)
+            if n != name or job_id in done or len(sessions) < 2 or not live(job):
+                continue
+            rec = str(job.get("pid") or "")
+            with RUNS_LOCK:
+                run = RUNS.get(f"{name}/{job_id}")
+            run_pid = run["proc"].pid if run and running(name, job_id) else None
+            picked = [s for s in sessions
+                      if (rec.isdigit() and int(rec) in [s, *above(s), *below(s)]) or run_pid in (s, *above(s))]
+            if len(picked) == 1:
+                stop_dupes(name, [job_id], [s for s in sessions if s != picked[0]], picked[0])
+                continue
+            key = f"{name}/{job_id}"
+            if job.get("stage") == "needs-human" or key in TWO_SESSIONS_ASKED:
+                continue
+            TWO_SESSIONS_ASKED.add(key)
+            shown = " and ".join(f"process {s}" for s in sessions)
+            try:
+                board.cmd_ask(root, job_id, f"Two sessions are working this job at once ({shown}), and the board "
+                              "cannot tell which one owns it. Stop both and start one fresh, or put it back on the "
+                              "backlog?",
+                              [f"Stop both and carry on=shell: kill {' '.join(map(str, sessions))}",
+                               f"Put back on the backlog=abort {job_id} --requeue"],
+                              recommend=("a", "one fresh session does the work once, instead of twice"),
+                              title="TWO_SESSIONS")
+            except (Exception, SystemExit) as e:  # one job's failed ask never skips the next
+                print(f"watchdog: two sessions: {key}: {e}", file=sys.stderr, flush=True)
+    return stopped
+
+
+OUTCOME_SKIP =("Permission allow rule",)  # CLI warnings written to the run log before real output
 
 
 def outcome_line(root, run, code):
@@ -2937,6 +3057,7 @@ def watchdog_tick():
        Before it, prod_errors_tick sweeps an opted-in project's Vercel production errors into its backlog once a day.
     Then idle_cleanup stops leaked dev servers of idle projects and quits Docker Desktop once its projects idle 10 min.
     Then stop_leftovers stops claude sessions still running a test, server or build after their job family finished.
+    Then stop_two_sessions keeps one owner when two claude sessions work one job and stops the rest (asks when unclear).
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard.
@@ -3068,6 +3189,10 @@ def watchdog_tick():
         stop_leftovers()
     except (Exception, SystemExit) as e:
         print(f"watchdog: leftover sessions: {e}", file=sys.stderr, flush=True)
+    try:
+        stop_two_sessions()
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: two sessions: {e}", file=sys.stderr, flush=True)
     if claim:
         try:
             auto_continue_tick(busy)

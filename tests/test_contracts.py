@@ -2894,7 +2894,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(key, board.STOP_TITLES, span)
             self.assertEqual(words[words.index("--title") + 2], "--recommend", span)
             self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot'|a 'it is not a code failure; the board resumes it when CI runs again')$")
-        self.assertEqual(len(board.STOP_TITLES), 16)
+        self.assertEqual(len(board.STOP_TITLES), 17)
         stops = self.lane("stops")
         for key, meaning in board.STOP_TITLES.items():
             self.assertRegex(key, r"^[A-Z]+(_[A-Z]+)*$")
