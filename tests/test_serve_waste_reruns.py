@@ -104,7 +104,7 @@ class SameTestsTest(unittest.TestCase):
         self.addCleanup(env.stop)
         serve.SAME_TESTS_LOGGED.clear()
         self.addCleanup(serve.SAME_TESTS_LOGGED.clear)
-        self.cwds, self.ages, self.heads = {}, {}, {}
+        self.cwds, self.ages, self.heads, self.rels = {}, {}, {}, {}
 
     def run_pass(self, procs):
         with mock.patch.object(serve, "proc_cwds", side_effect=lambda pids: {p: str(c) for p, c in self.cwds.items()
@@ -112,6 +112,7 @@ class SameTestsTest(unittest.TestCase):
                 mock.patch.object(serve, "proc_ages", side_effect=lambda pids: {p: a for p, a in self.ages.items()
                                                                                 if p in pids}) as ages, \
                 mock.patch.object(serve, "clean_head", side_effect=lambda cwd: self.heads.get(cwd, HEAD)), \
+                mock.patch.object(serve, "checkout_rel", side_effect=lambda cwd: self.rels.get(cwd, "")), \
                 mock.patch.object(serve.os, "kill") as kill:
             got = serve.stop_same_tests(procs)
         self.assertLessEqual(cwds.call_count, 1)
@@ -200,6 +201,24 @@ class SameTestsTest(unittest.TestCase):
             with self.subTest(dirty=dirty):
                 self.heads = {str(self.wt[k]): None for k in dirty}
                 self.assert_left_alone(procs)
+
+    def test_different_subdirectories_not_twins(self):
+        procs = self.twin_pair()
+        self.rels = {str(self.wt["2002-b"]): "web"}
+        self.assert_left_alone(procs)
+        self.rels = {str(self.wt["2002-b"]): "web", str(self.wt["2001-a"]): "web"}
+        got, killed = self.run_pass(procs)
+        self.assertIn(201, killed)
+        self.assertNotIn(101, killed)
+
+    def test_checkout_rel_reads_git(self):
+        with tempfile.TemporaryDirectory() as t:
+            sub = Path(os.path.realpath(t)) / "web" / "x"
+            sub.mkdir(parents=True)
+            self.assertEqual(serve.checkout_rel(str(sub)), "")  # not a git checkout
+            subprocess.run(["git", "init", "-q", t], check=True)
+            self.assertEqual(serve.checkout_rel(str(sub)), "web/x")
+            self.assertEqual(serve.checkout_rel(t), "")
 
     def test_two_commits_left_alone(self):
         procs = self.twin_pair()

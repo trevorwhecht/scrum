@@ -2936,12 +2936,22 @@ def clean_head(cwd: str) -> str | None:
         return None
 
 
+def checkout_rel(cwd: str) -> str:
+    """cwd's path inside its checkout (`git rev-parse --show-prefix`, no trailing slash); "" at the checkout root or
+    when git fails."""
+    try:
+        return board._git(cwd, "rev-parse", "--show-prefix").decode().strip().rstrip("/")
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return ""
+
+
 def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> list[int]:
     """Waste kind same-tests. A run is the topmost process line, never a claude line (board._is_claude), that suite_run
     matches against a registered project's `- Test:` or `- E2E:` command (e2e_command; "" or none skipped); a matching
     line below it is part of that run. Its cwd (one proc_cwds call) must be in a project's repo that owns the command,
     and its head is clean_head(cwd); a run failing either is skipped.
-    Twins: 2+ runs with one project, command and head. One proc_ages call ages them all (a group with a pid it lacks is
+    Twins: 2+ runs with one project, command, head and checkout_rel(cwd) (the same relative command in two
+    subdirectories is not a twin). One proc_ages call ages them all (a group with a pid it lacks is
     skipped); the oldest, or on a tie the lower pid, is kept, and each other run gets stop_tree and one
     board.log_waste("same-tests", ..., kept=, head=, command=) line.
     Rerun: a run of its project's E2E command that this call did not stop, on the head of a finished (pass or fail)
@@ -2991,12 +3001,12 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
         if cwd not in heads:
             heads[cwd] = clean_head(cwd)
         if heads[cwd]:
-            groups.setdefault((name, c, heads[cwd]), []).append((pid, cwd))
+            groups.setdefault((name, c, heads[cwd], checkout_rel(cwd)), []).append((pid, cwd))
     twins = {key: runs for key, runs in groups.items() if len(runs) > 1}
     ages = proc_ages(sorted(pid for runs in twins.values() for pid, _ in runs)) if twins else {}
     job_ids = lambda *dirs: list(dict.fromkeys(j["id"] for j in map(job_for_cwd, dirs) if j and j.get("id")))
     stopped, hit = [], set()
-    for (name, c, head), runs in sorted(twins.items()):
+    for (name, c, head, _), runs in sorted(twins.items()):
         if any(pid not in ages for pid, _ in runs):
             continue
         (kept, kept_cwd), *rest = sorted(runs, key=lambda r: (-ages[r[0]], r[0]))
@@ -3012,7 +3022,7 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
     for p, pp, _, _ in procs:
         kids.setdefault(pp, []).append(p)
     cpu_of, records = {p: c for p, _, c, _ in procs}, {}
-    for (name, c, head), runs in sorted(groups.items()):
+    for (name, c, head, _), runs in sorted(groups.items()):
         if c != cmds[name].get("E2E"):
             continue
         if name not in records:
