@@ -655,5 +655,49 @@ class SpawnAccountTest(AccountEnv):
             board.cmd_set(self.root, self.job, ["account=OWA main"])
 
 
+class HeavyHoldTest(unittest.TestCase):
+    """board.heavy_hold (job 1227): machine_ok's CPU-load and swap reasons only, for running jobs' heavy steps."""
+    LOAD = "CPU load 400% of 8 cores (> 300%)"
+    SWAP = "swap used 40.0% of RAM (> 25%)"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        for p in (mock.patch.dict(os.environ, SCRUM_SWAP_LOG=os.path.join(tmp.name, "swap.json"),
+                                  SCRUM_FREE_RAM="100", SCRUM_SWAP_PCT="0", SCRUM_CPU_LOAD_PCT="0"),
+                  mock.patch.object(board.os, "cpu_count", return_value=8)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_load_and_swap_reasons_match_machine_ok(self):
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400"):
+            self.assertEqual((board.heavy_hold(), board.machine_ok(self.tmp)), (self.LOAD, self.LOAD))
+        with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="40", SCRUM_FREE_RAM="30"):
+            self.assertEqual((board.heavy_hold(), board.machine_ok(self.tmp)), (self.SWAP, self.SWAP))
+            with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400"):
+                self.assertEqual(board.heavy_hold(), self.LOAD, "load is read before swap")
+
+    def test_unknown_and_edge_readings_pass(self):
+        no_ram = mock.patch.object(board, "free_ram_pct", side_effect=AssertionError("free RAM read at swap 25"))
+        with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="25", SCRUM_FREE_RAM="10"), no_ram:
+            self.assertIsNone(board.heavy_hold(), "free RAM is read only when swap is over 25%")
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="300"):
+            self.assertIsNone(board.heavy_hold(), "load exactly 300 is not over")
+        with mock.patch.object(board, "cpu_load_pct", return_value=None), \
+                mock.patch.object(board, "swap_used_pct", return_value=None), no_ram:
+            self.assertIsNone(board.heavy_hold(), "unknown readings pass")
+        with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="30", SCRUM_FREE_RAM="50"):
+            self.assertEqual([board.heavy_hold(), board.heavy_hold()], [None, None], "stale swap with RAM free")
+        flag = Path(self.tmp) / "cooldown"
+        flag.write_text("")
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
+            self.assertEqual(board.machine_ok(self.tmp, claim=True), "cooling down")
+            self.assertIsNone(board.heavy_hold(), "cool-down never holds")
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="10"):
+            self.assertEqual(board.machine_ok(self.tmp), "free RAM 10% (< 20%)")
+            self.assertIsNone(board.heavy_hold(), "low free RAM with swap 0 never holds")
+
+
 if __name__ == "__main__":
     unittest.main()

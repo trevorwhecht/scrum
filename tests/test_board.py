@@ -7036,52 +7036,6 @@ class BoardTest(unittest.TestCase):
         self.assertNotIn("wake", job)
 
 
-class HeavyHoldTest(unittest.TestCase):
-    """board.heavy_hold (job 1227): the machine guard's swap and CPU-load checks only, for buildlock.py and render.py."""
-
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.tmp = tmp.name
-        env = mock.patch.dict(os.environ, SCRUM_SWAP_LOG=os.path.join(tmp.name, "swap.json"), SCRUM_FREE_RAM="100",
-                              SCRUM_SWAP_PCT="1", SCRUM_CPU_LOAD_PCT="1")
-        env.start()
-        self.addCleanup(env.stop)
-        cores = mock.patch.object(board.os, "cpu_count", return_value=8)
-        cores.start()
-        self.addCleanup(cores.stop)
-
-    def test_heavy_hold_load(self):
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400"):
-            self.assertEqual(board.heavy_hold(), "CPU load 400% of 8 cores (> 300%)")
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="300"):
-            self.assertIsNone(board.heavy_hold(), "exactly 300% is not over")
-
-    def test_heavy_hold_swap(self):
-        with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="40", SCRUM_FREE_RAM="10"):
-            self.assertEqual(board.heavy_hold(), "swap used 40.0% of RAM (> 25%)")
-            with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400"):
-                self.assertEqual(board.heavy_hold(), "swap used 40.0% of RAM (> 25%)", "swap before load")
-        with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="40", SCRUM_FREE_RAM="71"):
-            self.assertIsNone(board.heavy_hold(), "stale swap with free RAM and no growth passes, as in machine_ok")
-
-    def test_heavy_hold_calm_or_unknown(self):
-        self.assertIsNone(board.heavy_hold())
-        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="10"), \
-                mock.patch.object(board, "cpu_load_pct", return_value=None), \
-                mock.patch.object(board, "swap_used_pct", return_value=None):
-            self.assertIsNone(board.heavy_hold())
-
-    def test_heavy_hold_ignores_ram_disk_sessions(self):
-        flag = Path(self.tmp) / "cooldown"
-        flag.write_text("")
-        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="5", SCRUM_FREE_DISK_GB="1", SCRUM_CPU_BUSY_PCT="99",
-                             SCRUM_VM_PRESSURE="4", SCRUM_COOLDOWN=str(flag)), \
-                mock.patch.object(board, "live_sessions", return_value=99):
-            self.assertIsNotNone(board.machine_ok(self.tmp, claim=True), "the machine guard itself would refuse")
-            self.assertIsNone(board.heavy_hold())
-
-
 class SpawnTest(unittest.TestCase):
     """B spawn: the one headless `claude -p` launcher. SCRUM_CLAUDE / board.CLAUDE point at a stub that records how it ran."""
     STUB = """import json, os, sys
