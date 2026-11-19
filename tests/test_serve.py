@@ -2165,14 +2165,14 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("GET", "/api/machine")
             self.assertEqual(code, 200)
             self.assertEqual(out["usage"], {"accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400,
-                                                          "max_pct": 90}],
+                                                          "max_pct": 99}],
                                             "allowance": 0, "fable": "paused", "hold_until": now + 3600})  # 93 % 5h: held
             self.assertNotIn("five_hour_pct", json.dumps(out["usage"]), "the header has no 5h reading")
             self.assertEqual(out["verdict"], None, "the existing keys are unchanged")
             fresh["written_at"] = time.time() - 301  # stale: the weekly reading stays, the allowance and holds go
             usage.write_text(json.dumps(fresh))
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], {
-                "accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400, "max_pct": 90}],
+                "accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400, "max_pct": 99}],
                 "allowance": None, "fable": "unknown", "hold_until": None})
             fresh["rate_limits"]["seven_day"]["resets_at"] = now - 60  # a past reset reads null, as claude_usage
             usage.write_text(json.dumps(fresh))
@@ -2184,8 +2184,7 @@ class ServeTest(unittest.TestCase):
 
     def test_machine_usage_one_weekly_reading_per_account(self):
         """main 49% from a day-old file, owa 90% with its 80/90 reserve: each account's weekly %, its reset and the
-        used % its red starts at (owa: its 7d reserve, or PRIMARY_RESERVE's 97 while primary; main, no reserve:
-        board.USAGE_HOLD_PCT)."""
+        used % its red starts at (owa: its 7d reserve, or PRIMARY_RESERVE's 97 while primary; main primary: 99, job 1228)."""
         base = Path(tempfile.mkdtemp(dir=self.tmp.name))
         (base / "main").mkdir()
         (base / "owa").mkdir()
@@ -2197,7 +2196,7 @@ class ServeTest(unittest.TestCase):
         accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [80, 90]]])
         with mock.patch.dict(os.environ, SCRUM_ACCOUNTS=accounts, SCRUM_USAGE=str(base / "main" / "usage.json")):
             self.assertEqual(self.serve.machine_usage(now), {
-                "accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": now + 86400, "max_pct": 90},
+                "accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": now + 86400, "max_pct": 99},
                              {"name": "owa", "seven_day_pct": 90, "resets_at": now + 2 * 86400, "max_pct": 90}],
                 "allowance": None, "fable": "unknown", "hold_until": None})
             accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [70, 85]]])
@@ -12476,6 +12475,164 @@ class E2eFullTest(unittest.TestCase):
             self.serve.E2E_FULL["running"] = None
             self.assertEqual(self.tick(), 1, sweep)
 
+    def other_project(self):
+        """A second registered project with its own scrum/ (no project.md, so its tick never runs)."""
+        other = Path(self.tmp.name) / "other"
+        (other / "scrum").mkdir(parents=True)
+        (Path(self.tmp.name) / "projects.json").write_text(json.dumps([str(self.repo), str(other)]))
+        return other
+
+    def items(self, root):
+        return [i["text"] for i in self.serve.board.read_backlog(root)[1] if not i["done"]]
+
+    def test_tick_orphan_with_finished_log_files_failures(self):
+        """Job 1226: an orphaned run kept going after a serve reload and wrote `1 failed` to e2e-full.log, unread."""
+        at = time.time() - 600
+        other = self.other_project()
+        for root, head in ((self.root, self.base), (other / "scrum", "abc")):
+            (root / "e2e-full.json").write_text(json.dumps(
+                {"at": at, "head": head, "result": "running", "exit": None, "failed": [], "lastGreen": None}))
+            (root / "e2e-full.log").write_text(E2E_LIST_OUTPUT)
+        self.assertEqual(self.tick(), 0, "a fail record on an unchanged HEAD is not due")
+        failed = [{"spec": "e2e/pricing.spec.ts", "line": 12, "title": "Pricing › shows price"},
+                  {"spec": "e2e/admin/orders.spec.ts", "line": 8, "title": "orders list"}]
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()),
+                         {"at": at, "head": self.base, "result": "fail", "exit": None, "failed": failed,
+                          "lastGreen": None})
+        want = ["E2E full suite on main fails: e2e/pricing.spec.ts — pricing.spec.ts:12 Pricing › shows price; "
+                "no green run recorded",
+                "E2E full suite on main fails: e2e/admin/orders.spec.ts — orders.spec.ts:8 orders list; "
+                "no green run recorded"]
+        self.assertEqual(self.items(self.root), want)
+        other_rec = json.loads((other / "scrum" / "e2e-full.json").read_text())
+        self.assertEqual((other_rec["result"], other_rec["head"], other_rec["exit"]), ("fail", "abc", None))
+        self.assertEqual([f["line"] for f in other_rec["failed"]], [12, 8], "other has no e2e/ dir: tests/ prefix")
+        self.assertEqual(len(self.items(other / "scrum")), 2)
+        before = (json.loads((self.root / "e2e-full.json").read_text()), self.items(self.root))
+        self.assertEqual(self.tick(), 0)
+        self.assertEqual((json.loads((self.root / "e2e-full.json").read_text()), self.items(self.root)), before)
+        self.assertEqual(len(self.items(other / "scrum")), 2, "a second tick files nothing")
+        # every failure a test timeout: one `times out` item
+        (self.root / "backlog.md").unlink()
+        (self.root / "e2e-full.json").write_text(json.dumps(
+            {"at": at, "head": self.base, "result": "error", "exit": None, "failed": [], "lastGreen": None}))
+        (self.root / "e2e-full.log").write_text(e2e_timeout_output("Test timeout of 45000ms exceeded."))
+        self.tick()
+        self.assertEqual(self.items(self.root), [
+            "E2E full suite on main times out: e2e/pricing.spec.ts — pricing.spec.ts:12 Pricing › shows price; "
+            "e2e/admin/orders.spec.ts — orders.spec.ts:8 orders list; no green run recorded"])
+
+    def test_tick_orphan_log_finishes_later(self):
+        at = time.time() - 600
+        (self.root / "e2e-full.json").write_text(json.dumps(
+            {"at": at, "head": self.base, "result": "running", "exit": None, "failed": [], "lastGreen": None}))
+        (self.root / "e2e-full.log").write_text("Running 231 tests using 4 workers\n")
+        self.assertEqual(self.tick(), 0)
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()),
+                         {"at": at, "head": self.base, "result": "error", "exit": None, "failed": [], "lastGreen": None})
+        self.assertEqual(self.items(self.root), [])
+        (self.root / "e2e-full.log").write_text(E2E_LIST_OUTPUT)
+        self.tick()
+        rec = json.loads((self.root / "e2e-full.json").read_text())
+        self.assertEqual((rec["result"], rec["exit"], len(rec["failed"])), ("fail", None, 2))
+        self.assertEqual(len(self.items(self.root)), 2)
+        # e2e_full_run's except branch writes the same error/exit-null record
+        (self.root / "backlog.md").unlink()
+        (self.root / "e2e-full.log").write_text("Running 231 tests using 4 workers\n")
+        (self.root / "e2e-full.json").write_text(json.dumps(
+            {"at": 123.0, "head": self.base, "result": "running", "exit": None, "failed": [], "lastGreen": None}))
+        self.serve.E2E_FULL["running"] = "p"
+        with mock.patch.object(self.serve.board, "cpu_load_pct", side_effect=RuntimeError("boom")), \
+                self.assertRaises(RuntimeError):
+            self.run_suite("Running 231 tests using 4 workers\n", 1)
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text())["result"], "error")
+        (self.root / "e2e-full.log").write_text(E2E_LIST_OUTPUT)
+        with mock.patch.object(self.serve, "e2e_full_due", return_value=False):
+            self.tick()
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text())["result"], "fail")
+        self.assertEqual(len(self.items(self.root)), 2)
+
+    def test_tick_orphan_ignores_older_or_unrelated_log(self):
+        at = time.time() - 600
+        log = self.root / "e2e-full.log"
+        cases = (({"result": "error", "exit": None}, at - 60), ({"result": "error", "exit": None}, None),
+                 ({"result": "error", "exit": 124}, at + 60))
+        for fields, mtime in cases:
+            rec = {"at": at, "head": self.base, "failed": [], "lastGreen": None, **fields}
+            (self.root / "e2e-full.json").write_text(json.dumps(rec))
+            log.unlink(missing_ok=True)
+            if mtime is not None:
+                log.write_text(E2E_LIST_OUTPUT)
+                os.utime(log, (mtime, mtime))
+            with mock.patch.object(self.serve, "e2e_full_due", return_value=False):
+                self.tick()
+            self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec, (fields, mtime))
+            self.assertEqual(self.items(self.root), [], (fields, mtime))
+
+    def test_tick_waits_for_live_ui_sweep_session(self):
+        """Job 1226: a sweep past E2E_FULL_STALE whose claude session still runs holds the run (its dev server)."""
+        now = time.time()
+        d = str(self.root / "ui-sweep" / "20261119T175000Z")
+        seen = []
+
+        def alive_fn(answer):
+            def check(job):
+                seen.append(job)
+                return answer
+            return mock.Mock(return_value=check)
+
+        def run(sweep, answer):
+            (self.root / "ui-sweep.json").write_text(json.dumps(sweep))
+            (self.root / "e2e-full.json").unlink(missing_ok=True)
+            self.serve.E2E_FULL["running"] = None
+            seen.clear()
+            with mock.patch.object(self.serve.board, "session_alive_fn", alive_fn(answer)):
+                return self.tick()
+
+        self.assertEqual(run({"result": "running", "at": now - 7260, "dir": d}, True), 0)
+        self.assertEqual(seen, [{"id": d}])
+        self.assertFalse((self.root / "e2e-full.json").exists())
+        self.assertEqual(run({"result": "running", "at": now - 7260, "dir": d}, False), 1)
+        self.assertEqual(seen, [{"id": d}])
+        for sweep in ({"result": "running", "at": now - 7260}, {"result": "running", "at": now - 7260, "dir": ""}):
+            self.assertEqual(run(sweep, True), 1, sweep)
+            self.assertEqual(seen, [], sweep)
+        self.assertEqual(run({"result": "running", "at": now - 600, "dir": d}, False), 0)
+        self.assertEqual(seen, [])
+
+    def test_webserver_early_exit_is_busy_and_due(self):
+        """Job 1226: another dev server held the checkout, so `npx next dev | tee` exited 0 and Playwright quit."""
+        out = "\x1b[31mError: Process from config.webServer exited early.\x1b[39m\n"
+        rec = self.run_suite(out, 1, last_green="lg")
+        self.assertEqual({k: rec[k] for k in ("result", "exit", "failed", "lastGreen")},
+                         {"result": "busy", "exit": 1, "failed": [], "lastGreen": "lg"})
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
+        self.assertEqual(self.open_items(), [])
+        self.assertTrue(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + 1))
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="350"):
+            self.assertEqual(self.run_suite(out, 1)["result"], "loaded")
+
+    def test_second_early_exit_on_same_head_is_error(self):
+        head = self.base
+        busy = {"at": time.time() - 60, "head": head, "result": "busy", "exit": 1, "failed": [], "lastGreen": None}
+        (self.root / "e2e-full.json").write_text(json.dumps(busy))
+        with mock.patch.object(self.serve, "e2e_queue_free", return_value=True), \
+                mock.patch.object(self.serve.threading, "Thread") as thread:
+            self.serve.e2e_full_tick("p", self.repo, self.root)
+        self.assertEqual(thread.call_args.kwargs["kwargs"], {"retried": True})
+        out = "Error: Process from config.webServer exited early.\n"
+        (self.repo / "out.txt").write_text(out)
+        (self.repo / "run-e2e.sh").write_text("cat out.txt; exit 1\n")
+        rec = self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", head, 123.0, None, retried=True)
+        self.assertEqual((rec["result"], rec["exit"]), ("error", 1))
+        self.assertFalse(self.serve.e2e_full_due(rec, head, 0, rec["at"] + 60))
+        self.serve.E2E_FULL["running"] = None
+        (self.root / "e2e-full.json").write_text(json.dumps({**busy, "head": "0" * 40}))
+        with mock.patch.object(self.serve, "e2e_queue_free", return_value=True), \
+                mock.patch.object(self.serve.threading, "Thread") as thread:
+            self.serve.e2e_full_tick("p", self.repo, self.root)
+        self.assertEqual(thread.call_args.kwargs["kwargs"], {"retried": False})
+
     def test_failures_parse_failed_block_only(self):
         self.assertEqual(self.serve.e2e_full_failures(E2E_LIST_OUTPUT, "e2e"), [
             {"spec": "e2e/pricing.spec.ts", "line": 12, "title": "Pricing › shows price"},
@@ -12657,9 +12814,10 @@ class UiSweepTickTest(unittest.TestCase):
         f = self.root / "ui-sweep.json"
         return json.loads(f.read_text()) if f.exists() else None
 
-    def tick(self, machine=None):
+    def tick(self, machine=None, e2e_free=True):
         """(spawn mock, ui_sweep_targets mock) after one tick."""
         with mock.patch.object(self.serve.board, "_git", side_effect=self.git), \
+                mock.patch.object(self.serve, "e2e_queue_free", return_value=e2e_free), \
                 mock.patch.object(self.serve.board, "machine_ok", return_value=machine), \
                 mock.patch.object(self.serve.board, "ui_sweep_targets", return_value=self.targets) as targets, \
                 mock.patch.object(self.serve, "spawn") as spawn:
@@ -12690,6 +12848,17 @@ class UiSweepTickTest(unittest.TestCase):
 
     def test_skip_machine(self):
         self.assert_skipped(machine="free RAM 5% (< 20%)")
+
+    def test_skip_while_e2e_lock_held(self):
+        """Job 1226: an orphaned full run held the E2E lock while the watchdog started a sweep beside it."""
+        self.targets = {"since": "back5", "head": self.HEAD,
+                        "targets": [{"path": "/leads", "jobs": ["013-grid"], "marked": True, "why": "tall"}]}
+        rec = {"at": time.time() - 86400, "head": "older", "result": "pass"}
+        self.record(**rec)
+        spawn, targets = self.tick(e2e_free=False)
+        self.assertEqual((spawn.call_count, targets.call_count), (0, 0))
+        self.assertEqual(self.read(), rec)
+        self.assertEqual(self.tick()[0].call_count, 1)
 
     def test_skip_while_full_e2e_runs(self):
         """Job 1109: a sweep's dev server beside a full run took the checkout's next dev lock first."""

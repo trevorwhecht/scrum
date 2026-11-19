@@ -50,7 +50,7 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
         options: [...document.getElementById("filter").options].map(o => o.textContent),
         // The header's items: its own children, with the meters' box counted as its two rows and the buttons' #controls
         // box counted as the buttons inside it.
-        children: [...document.querySelectorAll("header > :not(#controls, #meters), #meters > *, #controls > *")].filter(el => el.getClientRects().length).map(box),
+        children: [...document.querySelectorAll("header > :not(#controls, #meters), #meters > *, #controls > *, #menu > *")].filter(el => el.getClientRects().length).map(box),
         meters: box(document.getElementById("meters")),
         // Each meter group's row (1: #machine, 2: #aiUsage) and box.
         groups: [...document.querySelectorAll("#meters .grp")].map(g => ({row: g.closest("#machine") ? 1 : 2, ...box(g)})),
@@ -228,7 +228,7 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         self.assertLessEqual(got["scrollWidth"], 390, got)
         ids = [c["id"] for c in got["children"]]
         self.assertNotIn("routing", [c["id"] for c in got["children"]], got)
-        for want in ("H1", "status", "machine", "aiUsage", "filter", "laneFilter", "rankBtn", "SPAN", "backlogBtn", "digestBtn", "agentsBtn", "aiBtn"):
+        for want in ("H1", "status", "machine", "aiUsage", "menuBtn", "filter", "laneFilter"):  # job 1225: the buttons sit behind #menuBtn
             self.assertIn(want, ids, got)
         for c in got["children"]:
             self.assertGreaterEqual(c["left"], 0, c)
@@ -241,14 +241,12 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         # 4 lines at 390 px: each account's or window's reading with its reset is about 200 px, so one fits per line);
         # 322 (+12, measured 305 -> 317) with job 1185's 44 px Cool down button closing the Shop group, whose own line
         # was the rings' 32 px
-        self.assertLessEqual(got["height"], 322, got)
+        # 297 (measured 297.2) with job 1225: the buttons sit behind the hamburger (one 44 px row with both selects), while each
+        # meter group is titled on its own line with one account or window per line
+        self.assertLessEqual(got["height"], 300, got)
         by = {c["id"]: c for c in got["children"]}
-        # Job 1171: with the Codex button gone from the controls, Backlog and Digest close the second row and Pipelines and
-        # AI-Settings share the third; the 10 controls still take 3 rows.
-        self.assertEqual(len({by[i]["top"] for i in self.CONTROLS}), 3, got)
-        self.assertEqual(len({by[i]["top"] for i in ("agentsBtn", "aiBtn")}), 1, got)
-        for i in ("rankBtn", "cooldown"):
-            self.assertGreaterEqual(by[i]["height"], 44, got)
+        self.assertEqual(len({by[i]["top"] for i in ("menuBtn", "filter", "laneFilter")}), 1, got)
+        self.assertGreaterEqual(by["menuBtn"]["height"], 44, got)
 
     def test_header_held_and_fable_390px(self):
         """Job 1136: with the Claude group at its longest (allowance 0, held until, Fable near limit) the header stays
@@ -266,7 +264,8 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         for i in ("filter", "laneFilter"):
             self.assertGreaterEqual(got["selects"][i]["clientWidth"], got["selects"][i]["labelWidth"], got)
 
-    CONTROLS = ("cooldown", "checksBtn", "filter", "rankBtn", "laneFilter", "SPAN", "backlogBtn", "digestBtn", "agentsBtn", "aiBtn")
+    CONTROLS = ("cooldown", "checksBtn", "filter", "rankBtn", "laneFilter", "SPAN", "backlogBtn", "digestBtn", "agentsBtn", "aiBtn")  # at 1440 px and up
+    PHONE = ("menuBtn", "filter", "laneFilter")  # at 390 px (job 1225)
 
     def buttons_row(self, got, width):
         """The header's buttons: in DOM order left to right on one row, each 44 px tall, 8 px apart, flush right."""
@@ -338,16 +337,16 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         self.assertEqual((len(one), len(two)), (2, 2), got)
         self.assertLessEqual(max(g["bottom"] for g in one), min(g["top"] for g in two) + 0.5, got)
         by = {c["id"]: c for c in got["children"]}
-        controls = [by[i] for i in self.CONTROLS]
+        controls = [by[i] for i in self.PHONE]
         self.assertGreaterEqual(by["aiUsage"]["height"], 44, got)
         self.assertLessEqual(by["aiUsage"]["bottom"], min(c["top"] for c in controls), got)
         self.assertLessEqual(by["aiUsage"]["right"], 390 - 12 + 0.5, got)
-        self.assertEqual({c["top"] for c in controls[:2]}, {by["cooldown"]["top"]}, got)
         for c in controls:
             self.assertGreaterEqual(c["height"], 44, c)
             self.assertLessEqual(c["right"], 390 - 12 + 0.5, c)
-        self.shop_button_fits(got, controls)
         self.assertLessEqual(got["shopBtns"][0]["right"], 390 - 12 + 0.5, got)
+        self.assertEqual(len(got["shopBtns"]), 1, got)
+        self.assertGreaterEqual(min(got["shopBtns"][0]["width"], got["shopBtns"][0]["height"]), 44, got)  # job 1185
 
     def test_viewer_tabs_close_44_flush_right(self):
         got = self.browse("tabs")

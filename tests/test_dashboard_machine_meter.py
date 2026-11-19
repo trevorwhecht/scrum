@@ -29,9 +29,10 @@ def L(label="", line=""):
 
 
 def acct(lvl, pct, text, cap=90, title=""):
-    """One account's usage: its bar (fill pct, tick at cap) and its label."""
+    """One account's usage: its bar (fill pct, tick at cap), its reading, then its reset text (job 1225: three grid cells)."""
+    read, _, reset = text.partition(" resets ")
     return (f'<span class="acct {lvl}"{f' title="{title}"' if title else ""}><span class="bar" style="--pct:{pct};--cap:{cap}"></span>'
-            f' {text}</span>')
+            f' <span class="rd">{read}</span>' + (f' <span class="rs">resets {reset}</span>' if reset else "") + '</span>')
 
 
 def spark(points):

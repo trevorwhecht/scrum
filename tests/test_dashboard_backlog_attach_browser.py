@@ -27,7 +27,7 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
     const page = await browser.newPage({viewport: {width, height: 844}});
     await page.goto(process.env.DASH_URL);
     await page.waitForSelector(".card[data-key]");
-    await page.click("#backlogBtn");
+    await page.$eval("#backlogBtn", b => b.click());
     await page.waitForSelector("#blList li[data-i]");
     const got = {};
     got.layout = await page.evaluate(() => {

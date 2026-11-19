@@ -826,16 +826,21 @@ def cmd_abort(root, job_id, requeue, reason=None, cascade=False):
         abort_job(root, job, requeue, reason or f"Aborted by Trevor {now()}")
         aborted = [job_id]
         if cascade:
-            jobs = {j["id"]: j for j in board["jobs"]}
             for gone in aborted:  # grows while it runs: each aborted dependent is followed in turn
                 for kid in board["jobs"]:
                     if gone in (kid.get("depends_on") or []) and kid["stage"] not in ("done", "aborted") \
                             and (kid["stage"] in ("waiting", "needs-human") or kid.get("paused") or kid.get("play_queued")
                                  or stalled(kid)):
-                        parent = jobs.get(kid.get("parent")) or {}
-                        abort_job(root, kid, parent.get("lane") == "runall", f"Removed with {job_id}")
+                        abort_job(root, kid, runall_child(board, kid), f"Removed with {job_id}")
                         aborted.append(kid["id"])
     return aborted
+
+
+def runall_child(board, job) -> bool:
+    """True when job's parent on board is a Run-all job (lane runall); no parent, or one missing from the board, is
+    False. Caller holds the board lock."""
+    parent = job.get("parent")
+    return bool(parent) and any(j["id"] == parent and j.get("lane") == "runall" for j in board["jobs"])
 
 
 def abort_job(root, job, requeue, reason):
@@ -4317,7 +4322,8 @@ def resume_first(jobs: list[dict]) -> int:
 ACCOUNTS = (("main", "~/.claude", (None, 90)), ("owa", "~/.claude-owa", (None, 90)))
 # (5h, 7d) used % at which an account is held while it is primary_account; an unlisted account has no primary cap.
 # Trevor 2026-11-18 (job 1208): OWA as primary hands new work to main at 97% 7d, keeping room for messageManager and his chats.
-PRIMARY_RESERVE = {"owa": (None, 97)}
+# Trevor 2026-11-19 (job 1228): main as primary keeps 1% so a Trevor-run job (grocery run) can still start.
+PRIMARY_RESERVE = {"owa": (None, 97), "main": (None, 99)}
 Account = namedtuple("Account", "name dir reserve")
 ACCOUNT_RE = re.compile(r"[a-z0-9-]{1,20}")
 
@@ -4464,12 +4470,17 @@ def transcript_tokens(start, end, projects_dir=None):
         return where[cwd]
 
     files = sorted(root.glob("*/*.jsonl")) + sorted(root.glob("*/*/subagents/agent-*.jsonl"))
+    seen = set()
     for path in files:  # main sessions first, so a subagent finds its parent's tags
         try:
             if path.stat().st_mtime < start:
                 continue
+            real = path.resolve()
         except OSError:
             continue
+        if real in seen:  # a symlinked project dir lists the same transcript again
+            continue
+        seen.add(real)
         rows, first = read_transcript(path)
         job, skill = first_prompt_tags(first)
         if path.parent.name == "subagents":
@@ -5058,8 +5069,12 @@ MAX_CPU_BUSY_PCT = 90  # ... or with the CPU busier than this (cpu_busy_pct, 0-1
 MAX_CPU_LOAD_PCT = 300  # ... or with the 1-minute load average above this share of the cores (cpu_load_pct): load 13.4 on 8
 #                        cores (168%) timed out next dev, jest and Playwright while busy read 51% (2026-10-26, job 459);
 #                        150 -> 300 by job 958: load counts disk/swap waits; 150 held claims ~16 h in 3 days at 30% idle
-# Jobs 1373, 1403, 1420, 1386: cache-tax drops a cold session's wake prompt, so the -p session exits mid-job
-NO_CACHE_TAX = '{"enabledPlugins": {"cache-tax@claude-code-mods": false}}'
+# Jobs 1373, 1403, 1420, 1386: cache-tax drops a cold session's wake prompt, so the -p session exits mid-job.
+# Job 1240: agent-model-clamp.py keeps a sonnet/haiku-pinned scrum agent off an Opus `model` override; --settings
+# hooks merge with settings.json's (code.claude.com/docs/en/hooks: "Hook entries merge across settings levels")
+NO_CACHE_TAX = json.dumps({"enabledPlugins": {"cache-tax@claude-code-mods": False}, "hooks": {"PreToolUse": [
+    {"matcher": "Agent|Task", "hooks": [{"type": "command", "command": "python3 " + shlex.quote(
+        str(Path(__file__).resolve().parent / "agent-model-clamp.py"))}]}]}})
 SESSION_NICE = 10  # spawn: every headless claude -p session runs at this nice level, below Trevor's own apps
 MAX_LAUNCH_CPU_LOAD_PCT = 500  # serve.spawn queues every non-manual job launch (resume, approve, rework, start) above this load
 CPU_SAMPLES = 3  # cpu_busy_pct: the mean of at most this many watchdog samples (record_cpu_sample) ...
@@ -6483,8 +6498,8 @@ def _cloud_plan(repo, job_id, prs):
 
 
 def _cloud_abort(root, job_id, url, requeue, reason, lane=None):
-    """Record pr= (and lane= when given) and abort a job still in stage cloud, atomically; requeue skips a BigBoy
-    child (Auto-abort rule)."""
+    """Record pr= (and lane= when given) and abort a job still in stage cloud, atomically. With requeue, a BigBoy child
+    is aborted without a requeue (Auto-abort rule); a Run-all child is requeued, as cmd_abort's cascade does."""
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         if job["stage"] != "cloud":
@@ -6492,7 +6507,7 @@ def _cloud_abort(root, job_id, url, requeue, reason, lane=None):
         job["pr"] = url
         if lane:
             job["lane"] = lane
-        abort_job(root, job, requeue and not job.get("parent"), reason)
+        abort_job(root, job, requeue and (not job.get("parent") or runall_child(board, job)), reason)
 
 
 def cmd_cloud_sync(root: Path) -> dict:
