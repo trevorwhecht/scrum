@@ -829,7 +829,7 @@ class BoardTest(unittest.TestCase):
         want = "stalled: debug blocked by machine load; retrying on a quiet machine"
         before = len(self.log_lines())
         with mock.patch.object(board, "play") as play:
-            out = board.cmd_ask(self.root, job_id, self.LOAD_Q, [f"R=resume {job_id}"], title="BUILDER_BLOCKED")
+            out = board.cmd_ask(self.root, job_id, self.LOAD_Q, [f"R=resume {job_id}", f"A=abort {job_id}"], title="BUILDER_BLOCKED")
         self.assertEqual(out, {"stalled": True})
         play.assert_not_called()
         job = next(j for j in self.jobs() if j["id"] == job_id)
@@ -841,9 +841,9 @@ class BoardTest(unittest.TestCase):
     def test_ask_debug_blocked_machine_load_second_time_parks(self):
         job_id = self.staged("build")
         with mock.patch.object(board, "play") as play:
-            board.cmd_ask(self.root, job_id, self.LOAD_Q, [f"R=resume {job_id}"], title="BUILDER_BLOCKED")
+            board.cmd_ask(self.root, job_id, self.LOAD_Q, [f"R=resume {job_id}", f"A=abort {job_id}"], title="BUILDER_BLOCKED")
             self.assertEqual(play.call_count, 0)
-            board.cmd_ask(self.root, job_id, self.LOAD_Q, [f"R=resume {job_id}"], title="BUILDER_BLOCKED")
+            board.cmd_ask(self.root, job_id, self.LOAD_Q, [f"R=resume {job_id}", f"A=abort {job_id}"], title="BUILDER_BLOCKED")
             self.assertEqual(play.call_count, 1)
         job = next(j for j in self.jobs() if j["id"] == job_id)
         self.assertEqual((job["stage"], job["question"]), ("needs-human", self.LOAD_Q))
@@ -853,7 +853,7 @@ class BoardTest(unittest.TestCase):
         job_id = self.staged("build")
         q = "debug: blocked \u2014 needs prod credentials"
         with mock.patch.object(board, "play") as play:
-            board.cmd_ask(self.root, job_id, q, [f"R=resume {job_id}"], title="BUILDER_BLOCKED")
+            board.cmd_ask(self.root, job_id, q, [f"R=resume {job_id}", f"A=abort {job_id}"], title="BUILDER_BLOCKED")
         play.assert_called_once()
         job = next(j for j in self.jobs() if j["id"] == job_id)
         self.assertEqual((job["stage"], job["question"]), ("needs-human", q))
