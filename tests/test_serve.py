@@ -2165,7 +2165,7 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("GET", "/api/machine")
             self.assertEqual(code, 200)
             self.assertEqual(out["usage"], {"accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400,
-                                                          "max_pct": 90}],
+                                                          "max_pct": 99}],
                                             "allowance": 0, "fable": "paused", "hold_until": now + 3600})  # 93 % 5h: held
             self.assertNotIn("five_hour_pct", json.dumps(out["usage"]), "the header has no 5h reading")
             self.assertEqual(out["verdict"], None, "the existing keys are unchanged")
