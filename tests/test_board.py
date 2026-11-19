@@ -5309,6 +5309,18 @@ class BoardTest(unittest.TestCase):
         self.assertIn("Claims during cool down: 1 — app 12\nHand-started during cool down: 0\n"
                       "Claims while CPU load over 500%: 0\nOther starts while CPU load over 500%: 0\n", text)
 
+    def test_pulse_cool_down_skips_digest_claims(self):
+        """Job 1206: a digest-apply bookkeeping job (started_by digest) is neither a cool-down claim nor Hand-started;
+        the hand and serve jobs in the same rise still count."""
+        self.assertIn("digest", board.STARTED_BY)
+        job_id = board.cmd_new(Path(self.tmp.name) / "own", "Apply digest 001 p1", started_by="digest")
+        self.assertEqual(json.loads((Path(self.tmp.name) / "own" / "board.json").read_text())["jobs"][0]["started_by"],
+                         "digest")
+        self.assertEqual(job_id, "001-apply-digest-001-p1")
+        text = self.claim_pulse(60, {"app": [{"id": "011-a", "started_by": "digest"}, {"id": "012-b", "started_by": "hand"},
+                                             {"id": "013-c", "started_by": "serve"}]})
+        self.assertIn("Claims during cool down: 1 — app 13\nHand-started during cool down: 1 — app 12\n", text)
+
     def test_pulse_missing_log(self):
         empty = "# Pulse: digest 001\n\nNo pulse lines since the last digest.\n"
         self.assertEqual(self.pulse_digest(None)[0], empty)

@@ -6578,6 +6578,7 @@ class DigestTest(unittest.TestCase):
         self.assertEqual((x.read_text(), y.read_text()), ("keep A\nnew line\nkeep B\n",) * 2)
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertEqual((job["lane"], job["stage"], job.get("reason") or ""), ("lilguy", "done", ""))
+        self.assertEqual(job["started_by"], "digest")  # job 1206: write_pulse skips it, it is no hand start
         self.assertEqual(self.statuses(), ["applied", "applied"])
 
     def test_digest_apply_queues_symlink_escape(self):
@@ -6695,6 +6696,7 @@ class DigestTest(unittest.TestCase):
                                               "old": "old line", "new": "new line", "status": "reverted", "kind": "edit"}))
         self.assertEqual(agent.read_bytes(), b"keep A\nold line\nkeep B\n")
         self.assertEqual((job["lane"], job["stage"], job["title"]), ("lilguy", "done", "Revert digest 001 p1"))
+        self.assertEqual(job["started_by"], "digest")  # job 1206: the revert job goes through digest_apply too
         self.assertEqual((self.scrum / "jobs" / job["id"] / "feature.md").read_text(),
                          "Revert digest 001 p1:\n\n- digest 001 p1 → agents/scrum-x.md: Seen in 001-a and 002-b (p1).\n")
         self.assert_worktree_runs(runs(), 1)

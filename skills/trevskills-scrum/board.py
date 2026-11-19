@@ -367,7 +367,7 @@ def short_title(text, n=60) -> str:
     return (cut or head) + "…"
 
 
-STARTED_BY = ("serve", "runall", "wake", "hand", "shop")  # a job's started_by: who started it (write_pulse's cool-down claims skip hand and shop)
+STARTED_BY = ("serve", "runall", "wake", "hand", "shop", "digest")  # a job's started_by: who started it (write_pulse's cool-down claims skip hand, shop and digest)
 
 
 def add_job(root, board, title, job_id=None, started_by="hand"):
@@ -1618,7 +1618,7 @@ def write_pulse(root, digest_id):
     as before), peaks, claims during cool-down (each job number in a rise of a project's numeric top job number
     between two lines at most PULSE_TICK_CAP_S apart; a null top in the earlier line is 0, a project absent from it
     rises nothing; only jobs on the board (_board_job), started_by hand listed apart as Hand-started, started_by shop
-    skipped: cool-down never stops the shop), claims while
+    skipped: cool-down never stops the shop, started_by digest skipped: serve.py digest_apply's bookkeeping job), claims while
     CPU load over 500% (only the lines' `started` entries, serve.py's own non-manual starts, whose launch-time `cpu`
     is a number over 500; a missing or malformed `started` adds nothing), other starts while CPU load over 500% (rise
     jobs at a line whose cpu_load is over 500 that no `started` entry names (started_by runall and shop skipped): hand, unregistered (project not in
@@ -1709,7 +1709,8 @@ def write_pulse(root, digest_id):
                             others[group].setdefault(name, []).append(str(n))
                     if known and name not in known:
                         continue  # an unregistered project's rise is no claim
-                    if job is not None and b.get("cooldown") is True and not shop:
+                    digest = (job or {}).get("started_by") == "digest"  # digest_apply's bookkeeping job: no claim, not Trevor's
+                    if job is not None and b.get("cooldown") is True and not shop and not digest:
                         (handed if hand else claimed).setdefault(name, []).append(str(n))
                     if hand:
                         continue
