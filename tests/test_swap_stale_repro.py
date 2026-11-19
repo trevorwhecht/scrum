@@ -27,6 +27,7 @@ class StaleSwap(unittest.TestCase):
         samples = [(590, 33.6), (580, 36.65), (470, 34.3), (400, 27.9), (230, 27.1), (100, 24.5)]
         self.log.write_text(json.dumps([[time.time() - age, v] for age, v in samples]))
 
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", 4)  # a heavy start counts 2 young
     def test_stale_swap_does_not_block(self):
         self.falling_then_rebound()
         with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="27"):
@@ -34,7 +35,7 @@ class StaleSwap(unittest.TestCase):
         self.falling_then_rebound()
         self.ps.write_text("   30:00 claude -p /trevskills-scrum run-all\n   00:30 claude -p /trevskills-scrum start 1-a\n")
         with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="27"):
-            self.assertEqual(board.ram_room(floor=0), 1, "71% free: 51 // 5 - 1 young, young cap 2 - 1 (job 966)")
+            self.assertEqual(board.ram_room(floor=0), 1, "71% free: 51 // 5 - 1 young, young cap (4 - 1) // 2 (job 966)")
 
 
 if __name__ == "__main__":

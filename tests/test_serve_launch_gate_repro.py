@@ -20,6 +20,7 @@ class LaunchGate(ServeBase):
         self.addCleanup(lambda: self.stage_of(job_id)["stage"] == "aborted" or b.cmd_abort(self.root, job_id, False))
         return job_id
 
+    @mock.patch("board.MAX_YOUNG_SESSIONS", 4)  # a heavy start counts 2 young
     def test_resolving_n_needs_human_jobs_starts_at_most_ram_room(self):
         b = self.serve.board
         approve = self.needs_human("Gate approve", reason="approve: ready to merge")
