@@ -505,7 +505,7 @@ def wake_waiting(project, root):
         approve_job(project, root, job_id)
 
 
-def resume_job(project, root, job, jobs, manual=False):
+def resume_job(project, root, job, jobs, manual=False, note=None):
     """Restart a watchdog-flagged or paused job (the Resume and Play buttons, and the auto-resume sweep). Play on a
     paused parent resumes its paused children that resume_refusal lets through and starts whatever is ready instead. A
     refused child is unpaused and flagged stalled, so the auto-resume sweep starts it once a slot frees. A refused lilguy
@@ -533,7 +533,8 @@ def resume_job(project, root, job, jobs, manual=False):
                 spawn(project, root, k, "resume", f"/trevskills-scrum resume {k}", manual=manual)
         start_ready(project, root, job_id, manual=manual)
         return True
-    return spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id}", manual=manual)
+    cmd = f"/trevskills-scrum resume {job_id}" + (f" {json.dumps(note)}" if note else "")
+    return spawn(project, root, job_id, "resume", cmd, manual=manual)
 
 
 def resumable(job):
@@ -876,6 +877,7 @@ def answer_job(project, root, job, jobs, key, note=None, raise_window=False):
     return 202, {"id": job_id, "action": "answer", "command": verb, **queued(started)}
 
 
+LOAD_BLOCK_NOTE = "re-read assessment.md, reproduce on a quiet machine and diagnose again"
 AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit outage kills every session, this brings them back
 AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) is parked for Trevor (park_spent)
 SESSION_WINDOW = 5 * 3600  # a session limit resets at most this far ahead; a hold on a bare clock time is capped here
@@ -1388,6 +1390,11 @@ def auto_resume(project, root, jobs):
                 busy = True
                 CI_BILLING[key] = (False, now)
                 resume_job(project, root, job, jobs)
+            continue
+        if str(job.get("reason") or "").startswith(board.STALL + board.LOAD_BLOCK_WAIT):  # no try spent, never spent
+            if refused(job) is None and room(job):
+                busy = True
+                resume_job(project, root, job, jobs, note=LOAD_BLOCK_NOTE)
             continue
         tries, due = AUTO_RESUME.get(key, [0, 0.0])
         if tries >= AUTO_RESUME_MAX:

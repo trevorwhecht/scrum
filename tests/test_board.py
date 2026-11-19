@@ -822,6 +822,43 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, job_id, [f"stage={stage}"])
         return job_id
 
+    LOAD_Q = "debug: blocked \u2014 CPU load 14 swap full, repro timed out"
+
+    def test_ask_debug_blocked_machine_load_is_stalled(self):
+        job_id = self.staged("build")
+        want = "stalled: debug blocked by machine load; retrying on a quiet machine"
+        before = len(self.log_lines())
+        with mock.patch.object(board, "play") as play:
+            out = board.cmd_ask(self.root, job_id, self.LOAD_Q, [f"R=resume {job_id}", f"A=abort {job_id}"], title="BUILDER_BLOCKED")
+        self.assertEqual(out, {"stalled": True})
+        play.assert_not_called()
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual((job["stage"], job["stalled"], job["reason"], job["loadBlocked"]), ("build", True, want, True))
+        for k in ("question", "options", "recommend"):
+            self.assertNotIn(k, job)
+        self.assertEqual([(l["kind"], l.get("auto")) for l in self.log_lines()[before:]], [("stall", True)])
+
+    def test_ask_debug_blocked_machine_load_second_time_parks(self):
+        job_id = self.staged("build")
+        with mock.patch.object(board, "play") as play:
+            board.cmd_ask(self.root, job_id, self.LOAD_Q, [f"R=resume {job_id}", f"A=abort {job_id}"], title="BUILDER_BLOCKED")
+            self.assertEqual(play.call_count, 0)
+            board.cmd_ask(self.root, job_id, self.LOAD_Q, [f"R=resume {job_id}", f"A=abort {job_id}"], title="BUILDER_BLOCKED")
+            self.assertEqual(play.call_count, 1)
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual((job["stage"], job["question"]), ("needs-human", self.LOAD_Q))
+        self.assertTrue(job["options"])
+
+    def test_ask_debug_blocked_other_reason_parks(self):
+        job_id = self.staged("build")
+        q = "debug: blocked \u2014 needs prod credentials"
+        with mock.patch.object(board, "play") as play:
+            board.cmd_ask(self.root, job_id, q, [f"R=resume {job_id}", f"A=abort {job_id}"], title="BUILDER_BLOCKED")
+        play.assert_called_once()
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual((job["stage"], job["question"]), ("needs-human", q))
+        self.assertNotIn("loadBlocked", job)
+
     def test_ask_ci_billing_refusal_parks_all_merging_jobs(self):
         a, b, c = self.staged("merging"), self.staged("merging"), self.staged("build")
         with mock.patch.object(board, "play"):

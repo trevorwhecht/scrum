@@ -6055,6 +6055,15 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
         # a session that did not load the scrum agent types is a session fault: stalled in its stage, so
         # auto_resume retries it; not a human stop, so no question and no sound. A GitHub billing CI refusal stalls
         # the same way: its answer is always Try again, which auto_resume gives
+        if was in WATCHED and not job.get("loadBlocked") and question.lower().startswith("debug: blocked") \
+                and LOAD_BLOCK_RE.search(question):  # the machine, not the bug: one retry on a quiet machine
+            reason = f"{STALL}{LOAD_BLOCK_WAIT}"
+            for k in ("question", "options", "recommend", "stopTitle", "outcome"):
+                job.pop(k, None)
+            job.update(stalled=True, reason=reason, loadBlocked=True, updatedAt=now())
+            questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
+                                 "question": question, "reason": reason, "kind": "stall", "auto": True})
+            return {"stalled": True}
         billing = was in WATCHED and CI_BILLING_RE.search(question)
         if billing or (was in WATCHED and AGENT_TYPES_RE.search(question)):
             reason = f"{STALL}{CI_BILLING_WAIT if billing else question}"
@@ -6781,6 +6790,8 @@ AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not
 QUEUE_ASK_RE = re.compile(r"^waiting on the (E2E|Check) queue", re.I)  # cmd_ask holds a check job on it as waiting, not stalled
 E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT = "waiting: E2E queue", "waiting: Check queue"  # serve.py auto_resume starts it once the lock frees
 CI_BILLING_RE = re.compile(r"failed account payments|spending limit|CI refused: GitHub billing", re.I)
+LOAD_BLOCK_RE = re.compile(r"CPU load|machine load|swap|out of memory|low memory|memory pressure|free RAM", re.I)
+LOAD_BLOCK_WAIT = "debug blocked by machine load; retrying on a quiet machine"  # serve.py auto_resume re-runs the debugger once
 CI_BILLING_WAIT = "waiting on GitHub billing to run CI"  # serve.py auto_resume retries it after 60 s, then when the banner clears
 # Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
 RESUMABLE = (STALLED, STALL, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")
