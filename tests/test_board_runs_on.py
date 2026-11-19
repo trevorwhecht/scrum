@@ -100,14 +100,14 @@ class RunsOnTest(unittest.TestCase):
         text, terms, log = ask.call_args.args
         self.assertIn("Fix the widget", text)
         self.assertIn("# Spec\nLikely files", text, "spec.md is asked about too")
-        self.assertIn("VectorCraft", terms)
+        self.assertIn("PhotoCraft", terms)
         self.assertEqual(log, self.root / "jobs" / "010-a" / "jev.log")
         self.jev(False)
         self.assertEqual(board.tag_runs_on(self.root, "011-b"), "any")
         self.assertEqual(self.job("011-b")["runs_on"], "any")
 
     def test_jev_down_falls_back_to_terms(self):
-        self.jobs({"id": "010-a", "stage": "spec", "feature": "Redraw the logo in VectorCraft\n"},
+        self.jobs({"id": "010-a", "stage": "spec", "feature": "Separate the art in PhotoCraft\n"},
                   {"id": "011-b", "stage": "spec", "feature": "Fix the widget\n"})
         self.jev(None)
         self.assertEqual(board.tag_runs_on(self.root, "010-a"), "main")
@@ -169,7 +169,8 @@ class RunsOnTest(unittest.TestCase):
             self.assertEqual(board.main_only_terms(), ["VectorCraft", "MCP", "printer", ".env.prod"])
         (self.base / "workers.txt").unlink()  # shopmac, today's real notes file
         terms = board.main_only_terms()
-        for term in ("VectorCraft", "PhotoCraft", "claude-in-chrome", "computer use", "MCP", "logged-in Chrome",
+        self.assertNotIn("VectorCraft", terms)  # installed on the shop by hand, 2026-11-19
+        for term in ("PhotoCraft", "claude-in-chrome", "computer use", "MCP", "logged-in Chrome",
                      ".env.prod", "/trevskills-migrate", "/trevskills-datafix", "film printing", "iMessage",
                      "Keychain", "Homebrew", "brew", "PR merge"):
             self.assertIn(term, terms)
@@ -231,7 +232,7 @@ class RunsOnTest(unittest.TestCase):
 
     def test_ready_leaves_any_child_to_shop_and_claims_main(self):
         (self.root.parent / "src").mkdir()
-        self.runall(self.kid("010-a", "a"), self.kid("011-b", "b", feature="Redraw the logo in VectorCraft\n"))
+        self.runall(self.kid("010-a", "a"), self.kid("011-b", "b", feature="Separate the art in PhotoCraft\n"))
         self.room()
         ask = self.jev(None)  # Jev down: the term list decides
         self.assertEqual(self.ready(), ["011-b"], "the main sibling is still claimed in the same call")

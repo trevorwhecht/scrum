@@ -1166,7 +1166,7 @@ class ShopTickTest(unittest.TestCase):
     def test_runall_any_child_goes_to_shop(self):
         root = self.project("mm", self.runall({"id": "043-a", "parallel": True, "likely": ["src/a.py"]},
                                               {"id": "044-b", "parallel": True, "likely": ["src/b.py"],
-                                               "feature": "Redraw the logo in VectorCraft\n"}))
+                                               "feature": "Separate the art in PhotoCraft\n"}))
         self.serve.write_shop_room()
         with mock.patch.object(self.board, "ram_room", return_value=5), \
                 mock.patch.dict(os.environ, SCRUM_FREE_RAM="100"):  # this Mac has room too
@@ -1235,12 +1235,12 @@ class ShopTickTest(unittest.TestCase):
 
     def test_main_job_never_dispatched(self):
         root = self.project("mm", self.runall({"id": "043-a", "feature": "Runs on: main\n\nFix the widget\n"},
-                                              {"id": "044-b", "feature": "Redraw the logo in VectorCraft\n"},
+                                              {"id": "044-b", "feature": "Separate the art in PhotoCraft\n"},
                                               {"id": "045-c"})
                             + [self.queued("040-q", feature="Tell them by iMessage\n")])
         self.assertEqual(self.tick(), (True, "shop: mm: 045-c: started on shopmac (pid 4242, account owa)\n", ""))
         self.assertEqual(self.sh.start.call_count, 1)
-        self.assertNotIn("VectorCraft", self.sh.start.call_args.args[2])
+        self.assertNotIn("PhotoCraft", self.sh.start.call_args.args[2])
         self.assertEqual({j: self.job(root, j).get("runs_on") for j in ("040-q", "043-a", "044-b", "045-c")},
                          {"040-q": "main", "043-a": "main", "044-b": "main", "045-c": "any"})
         self.assertEqual([self.job(root, j)["stage"] for j in ("043-a", "044-b")], ["waiting", "waiting"])
@@ -1253,7 +1253,7 @@ class ShopTickTest(unittest.TestCase):
 
     def test_new_work_skips_item_naming_main_only_term(self):
         root = self.project("mm", [], AUTO)
-        skipped = ["Redraw the logo in VectorCraft {p:5}", "Tidy the copy {p:5}"]
+        skipped = ["Separate the art in PhotoCraft {p:5}", "Tidy the copy {p:5}"]
         self.backlog(root, *skipped, "Fix the gadget {p:3}",
                      specs={"Tidy the copy": "# Spec\nSend it by iMessage.\n\n## Likely files\n- `src/z.py`\n"})
         inside, asked, real = [], [], self.board.cmd_next
