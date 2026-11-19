@@ -1,0 +1,8 @@
+- Artifacts home fetches into a private ref refs/scrum-home/<id>, not the shared FETCH_HEAD
+- Deletes the remote artifacts branch only when its commit subject is exactly "[scrum <id>] artifacts"
+- Test runs the block under bash and zsh against a temp origin
+
+Scrum lane: fast
+Fast lane: check gate + code review. Spec and review: scrum/jobs/1198-cloud-home-artifacts-home-races-on-the-s/
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
