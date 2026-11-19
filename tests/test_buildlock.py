@@ -25,7 +25,8 @@ class BuildLockTest(unittest.TestCase):
         self.lock = self.dir / "sub" / "build.lock"
         self.env = {**os.environ, "SCRUM_BUILD_LOCK": str(self.lock),
                     "SCRUM_REGISTRY": str(self.dir / "none.json"),  # never Trevor's real boards
-                    "SCRUM_COOLDOWN": str(self.dir / "no-cooldown")}  # never Trevor's real cool-down flag
+                    "SCRUM_COOLDOWN": str(self.dir / "no-cooldown"),  # never Trevor's real cool-down flag
+                    "SCRUM_CPU_LOAD_PCT": "1", "SCRUM_SWAP_PCT": "1"}  # calm: no test holds on this machine's readings
         self.env.pop("SCRUM_BUILD_LOCK_TIMEOUT", None)
         self.procs = []
 
@@ -451,6 +452,105 @@ class BuildLockTest(unittest.TestCase):
     def test_holder_write_failure_keeps_exit_code(self):
         (self.dir / "sub" / "build.lock.holder").mkdir(parents=True)  # a directory: write and unlink both fail
         self.assertEqual(self.run_wrap(sys.executable, "-c", "raise SystemExit(7)").returncode, 7)
+
+    LOAD = "CPU load 400% of 8 cores (> 300%)"
+
+    def fake_board(self, *reasons, seen=None):
+        """A board whose heavy_hold gives `reasons` in turn (the last one for ever after), raising an exception reason;
+        each call appends to `seen` what seen_now() reads."""
+        fake = mock.Mock()
+        fake.calls = 0
+
+        def heavy_hold():
+            fake.calls += 1
+            if seen is not None:
+                seen.append(self.seen_now())
+            r = reasons[min(fake.calls, len(reasons)) - 1]
+            if isinstance(r, BaseException):
+                raise r
+            return r
+        fake.heavy_hold = heavy_hold
+        return fake
+
+    def seen_now(self):
+        """(the lock is flocked by someone, its holder file exists, the command has run)."""
+        lock = Path(os.environ["SCRUM_BUILD_LOCK"])
+        with open(lock, "a") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = False
+            except BlockingIOError:
+                locked = True
+        return locked, lock.with_name(lock.name + ".holder").exists(), (self.dir / "ran").exists()
+
+    def main_inproc(self, bl, board, lock="build.lock", code=0):
+        """main() in-process on `lock` with board_module() giving `board`; (exit code, stderr)."""
+        ran = self.dir / "ran"
+        ran.unlink(missing_ok=True)
+        env = {**self.env, "SCRUM_BUILD_LOCK": str(self.dir / "sub" / lock)}
+        with mock.patch.dict(os.environ, env), mock.patch.object(bl, "board_module", return_value=board), \
+                mock.patch("sys.stderr", new=io.StringIO()) as err:
+            got = bl.main([sys.executable, "-c", f"open({str(ran)!r}, 'w').close(); raise SystemExit({code})"])
+        self.assertTrue(ran.exists(), "the command ran")
+        return got, err.getvalue()
+
+    def test_hold_waits_until_calm(self):
+        bl = load()
+        self.assertEqual((bl.HEAVY_LOCKS, bl.HOLD_MAX, bl.HOLD_POLL), (("build", "e2e"), 300.0, 15.0))
+        bl.HOLD_POLL = 0.05
+        board = self.fake_board(self.LOAD, self.LOAD, None)
+        with mock.patch("sys.stderr", new=io.StringIO()) as err:
+            held = bl.hold(board, "render.py")
+        self.assertEqual(board.calls, 3)
+        self.assertGreaterEqual(held, 0.1)
+        self.assertLess(held, 5)
+        self.assertEqual(err.getvalue(), f"render.py: holding for the machine guard: {self.LOAD}\n")
+        for lock in ("build.lock", "e2e.lock"):
+            with self.subTest(lock=lock):
+                seen = []
+                code, err = self.main_inproc(bl, self.fake_board(self.LOAD, None, seen=seen), lock, code=5)
+                self.assertEqual(code, 5)
+                self.assertEqual(seen, [(True, True, False)] * 2, "slot taken, holder written, command not started")
+                self.assertEqual(err, f"buildlock: holding for the machine guard: {self.LOAD}\n")
+
+    def test_hold_skips_check_lock(self):
+        bl = load()
+        bl.HOLD_POLL = bl.HOLD_MAX = 30.0  # a hold here would stall the test
+        for lock in ("check.lock", "other.lock"):
+            with self.subTest(lock=lock):
+                board = self.fake_board(self.LOAD)
+                start = time.monotonic()
+                self.assertEqual(self.main_inproc(bl, board, lock, code=4), (4, ""))
+                self.assertEqual(board.calls, 0)
+                self.assertLess(time.monotonic() - start, 10)
+
+    def test_hold_gives_up_after_max(self):
+        bl = load()
+        bl.HOLD_MAX, bl.HOLD_POLL = 0.3, 0.05
+        board = self.fake_board(self.LOAD)
+        code, err = self.main_inproc(bl, board, code=3)
+        self.assertEqual(code, 3)
+        self.assertEqual(err, f"buildlock: holding for the machine guard: {self.LOAD}\n"
+                              f"buildlock: machine guard still over after 0.3 s ({self.LOAD}); running anyway\n")
+        self.assertGreater(board.calls, 2)
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            held = bl.hold(self.fake_board(self.LOAD), "buildlock")
+        self.assertGreaterEqual(held, 0.3)
+        self.assertLess(held, 5)
+
+    def test_hold_without_board_runs_at_once(self):
+        bl = load()
+        bl.HOLD_POLL = bl.HOLD_MAX = 30.0
+        with mock.patch("sys.stderr", new=io.StringIO()) as err:
+            self.assertEqual(bl.hold(None, "buildlock"), 0)
+            for boom in (RuntimeError("boom"), SystemExit("board says no")):
+                with self.subTest(boom=boom):
+                    board = self.fake_board(boom)
+                    self.assertEqual(bl.hold(board, "buildlock"), 0)
+                    self.assertEqual(board.calls, 1)
+        self.assertEqual(err.getvalue(), "")
+        self.assertEqual(self.main_inproc(bl, None, code=6), (6, ""))
+        self.assertEqual(self.main_inproc(bl, self.fake_board(RuntimeError("boom")), code=6), (6, ""))
 
 
 if __name__ == "__main__":

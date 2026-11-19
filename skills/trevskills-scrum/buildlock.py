@@ -9,12 +9,17 @@ SCRUM_BUILD_LOCK overrides the lock file; SCRUM_BUILD_LOCK_TIMEOUT the wait in s
 SCRUM_<STEM>_LOCK_SLOTS how many may hold it at once (see slots(); default 2 for check.lock, else 1).
 While board.py's cool-down flag is on, waiters go in board.lock_rank order (nearest the finish line first), then by
 arrival; the waiting marker holds `<cwd>\n<rank>`.
+On a HEAVY_LOCKS lock (build.lock, e2e.lock) the slot holder waits out board.heavy_hold() before it starts the command
+(hold(); at most HOLD_MAX s, then it runs anyway).
 Exits with the command's exit code, 124 on a lock timeout, 127 when the command is not found.
 """
 import fcntl, math, os, re, subprocess, sys, time
 from pathlib import Path
 
 DEFAULT_TIMEOUT = 1800.0
+HEAVY_LOCKS = ("build", "e2e")  # lock stems whose holder waits out board.heavy_hold first (job 1227); check.lock never
+HOLD_MAX = 300.0  # hold(): seconds at most, then the command runs anyway: the scrum's own jobs are the load (job 226)
+HOLD_POLL = 15.0  # hold(): seconds between heavy_hold re-checks
 
 
 def lock_path() -> Path:
@@ -92,6 +97,30 @@ def board_module():
         return board
     except (Exception, SystemExit):
         return None
+
+
+def hold(board, label: str) -> float:
+    """While board.heavy_hold() gives a reason, print `<label>: holding for the machine guard: <reason>` once to stderr
+    and re-check every HOLD_POLL s; after HOLD_MAX s print that it runs anyway and stop. Returns the seconds held. No
+    board, or a heavy_hold that raises, holds nothing: the step never fails over it."""
+    def reason():
+        try:
+            return board.heavy_hold() if board else None
+        except (Exception, SystemExit):
+            return None
+    start, why = time.monotonic(), reason()
+    if not why:
+        return 0.0
+    print(f"{label}: holding for the machine guard: {why}", file=sys.stderr, flush=True)
+    while why:
+        left = HOLD_MAX - (time.monotonic() - start)
+        if left <= 0:
+            print(f"{label}: machine guard still over after {HOLD_MAX:g} s ({why}); running anyway", file=sys.stderr,
+                  flush=True)
+            break
+        time.sleep(min(HOLD_POLL, left))
+        why = reason()
+    return time.monotonic() - start
 
 
 def marker_rank(m: Path) -> int:
@@ -192,6 +221,8 @@ def main(argv: list[str]) -> int:
         except OSError:
             pass  # the holder file is only a hint; never fail the build over it
         try:
+            if path.stem in HEAVY_LOCKS:  # after the slot and holder file: at most one held step per lock
+                hold(board_module(), "buildlock")
             # the child inherits the lock fd, so the lock outlives a SIGKILLed wrapper until the build exits
             # ponytail: a build that daemonizes a long-lived grandchild keeps the lock until that grandchild exits
             # (serve.py e2e_lock_reap frees e2e.lock from one once a waiter has waited 2 h)
