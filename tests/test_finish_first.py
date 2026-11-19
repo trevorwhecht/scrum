@@ -64,6 +64,7 @@ class FinishFirst(unittest.TestCase):
         return out["id"], out["children"]
 
     # --- (a) the hold ---
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", 4)  # a heavy start counts 2 young
     def test_queue_wait_in_another_project_holds_child_claims(self):
         parent, (a, b) = self.runall()
         self.other_jobs({"id": "050-queued", "stage": "check", "reason": "waiting: E2E queue (lock busy)"})
@@ -78,6 +79,7 @@ class FinishFirst(unittest.TestCase):
         self.assertIsNone(board.finish_first(self.root))
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [a, b], "claims again once the queue wait ends")
 
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", 4)  # a heavy start counts 2 young
     def test_trevor_click_claims_past_the_hold(self):
         parent, (a, b) = self.runall()
         self.other_jobs({"id": "050-queued", "stage": "check", "reason": "waiting: Check queue (lock busy)"})

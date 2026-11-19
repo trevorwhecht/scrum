@@ -205,7 +205,7 @@ class ReadyPacingTest(unittest.TestCase):
     def test_ready_ignores_usage_pacing_and_runall_cap(self):
         """8 waiting non-overlapping children beside 6 in progress: only free RAM and, at 40% free or less, the young-session ramp (ram_room)
         and machine_ok limit the batch, never usage.json or a Run-all count cap."""
-        for ram, claims, reason in (("40", board.MAX_YOUNG_SESSIONS, None), ("14", 0, "waiting: free RAM 14% (< 20%)")):
+        for ram, claims, reason in (("40", 1, None), ("14", 0, "waiting: free RAM 14% (< 20%)")):
             self.tmp.cleanup()
             self.root.parent.mkdir(parents=True, exist_ok=True)
             self.write_usage(130)  # projected 130 %: the old pace cap was 1
@@ -219,11 +219,12 @@ class ReadyPacingTest(unittest.TestCase):
 
     def test_ram_room_ramps_young_sessions(self):
         """Free RAM at 2x the minimum still starts at most MAX_YOUNG_SESSIONS at once: the 2026-11-04 wake burst started 10."""
-        for young, room in ((0, 2), (1, 1), (2, 0)):
+        for young, room, light_room in ((0, 1, 2), (1, 0, 1), (2, 0, 0)):
             ages = [5] * young + [600] * 3
             with mock.patch.dict(os.environ, SCRUM_FREE_RAM="40", SCRUM_SWAP_PCT="0"), \
                     mock.patch.object(board, "session_ages", return_value=ages):
                 self.assertEqual(board.ram_room(floor=0), room, young)
+                self.assertEqual(board.ram_room(floor=0, light=True), light_room, young)
 
     def held_board(self, held, pct):
         """Run-all parent with 3 children sharing Likely file x: `held` of A, C limit-held in build, B waiting."""
