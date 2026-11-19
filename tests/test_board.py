@@ -1,4 +1,4 @@
-import hashlib, io, json, os, re, shutil, subprocess, sys, tempfile, time, unittest
+import hashlib, io, json, os, re, shlex, shutil, subprocess, sys, tempfile, time, unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -7208,6 +7208,17 @@ print("stub err", file=sys.stderr)
         out = self.cli("999-not-a-job", "digest", "--model", "so net")
         self.assertNotEqual(out.returncode, 0)
         self.assertEqual(sorted((self.root / "runs").iterdir()), logs)  # nothing started, no log
+
+    def test_spawn_settings_hold_model_clamp_hook(self):
+        argv = self.argv("approve")
+        settings = json.loads(argv[argv.index("--settings") + 1])
+        self.assertEqual(settings["enabledPlugins"], {"cache-tax@claude-code-mods": False})
+        self.assertEqual(settings["hooks"]["PreToolUse"][0]["matcher"], "Agent|Task")
+        hook = settings["hooks"]["PreToolUse"][0]["hooks"][0]
+        self.assertEqual(hook["type"], "command")
+        script = ROOT / "skills" / "trevskills-scrum" / "agent-model-clamp.py"
+        self.assertEqual(shlex.split(hook["command"]), ["python3", str(script)])
+        self.assertTrue(script.is_file())
 
     def test_spawn_sets_runlog(self):
         job_id = board.cmd_new(self.root, "x")
