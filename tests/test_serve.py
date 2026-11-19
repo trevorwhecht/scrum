@@ -3650,12 +3650,15 @@ class ServeTest(unittest.TestCase):
     NO_CLAUDE = {"5h": None, "weekly": None, "5h_resets_at": None, "weekly_resets_at": None, "as_of": None}
 
     def test_routing_status_endpoint(self):
-        fixed = {"codex": {"5h": 42, "weekly": None}, "claude_exhausted_until": None}
+        fixed = {"codex": {"5h": 42, "weekly": None, "5h_resets_at": 4102444800, "weekly_resets_at": None},
+                 "codex_limits": {"5h": 85, "weekly": 90}, "claude_exhausted_until": None}
         with mock.patch.object(self.serve.route, "status", return_value=fixed) as status, \
                 mock.patch.object(self.serve.route, "loaded" + "_models", create=True) as models, \
                 mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen") as popen:
             self.assertEqual(self.req("GET", "/api/routing-status"),
-                             (200, {"codex": {"5h": 42, "weekly": None}, "claude_exhausted_until": None,
+                             (200, {"codex": {"5h": 42, "weekly": None, "5h_resets_at": 4102444800,
+                                              "weekly_resets_at": None},
+                                    "codex_limits": {"5h": 85, "weekly": 90}, "claude_exhausted_until": None,
                                     "claude": self.NO_CLAUDE, "jev": {"today": 0, "last": None}}))
             self.assertEqual(self.req("GET", "/api/routing-status", headers={"Host": "evil.example"})[0], 403)
         self.assertEqual(status.call_count, 1)
