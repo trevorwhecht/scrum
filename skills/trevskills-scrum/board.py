@@ -5069,8 +5069,12 @@ MAX_CPU_BUSY_PCT = 90  # ... or with the CPU busier than this (cpu_busy_pct, 0-1
 MAX_CPU_LOAD_PCT = 300  # ... or with the 1-minute load average above this share of the cores (cpu_load_pct): load 13.4 on 8
 #                        cores (168%) timed out next dev, jest and Playwright while busy read 51% (2026-10-26, job 459);
 #                        150 -> 300 by job 958: load counts disk/swap waits; 150 held claims ~16 h in 3 days at 30% idle
-# Jobs 1373, 1403, 1420, 1386: cache-tax drops a cold session's wake prompt, so the -p session exits mid-job
-NO_CACHE_TAX = '{"enabledPlugins": {"cache-tax@claude-code-mods": false}}'
+# Jobs 1373, 1403, 1420, 1386: cache-tax drops a cold session's wake prompt, so the -p session exits mid-job.
+# Job 1240: agent-model-clamp.py keeps a sonnet/haiku-pinned scrum agent off an Opus `model` override; --settings
+# hooks merge with settings.json's (code.claude.com/docs/en/hooks: "Hook entries merge across settings levels")
+NO_CACHE_TAX = json.dumps({"enabledPlugins": {"cache-tax@claude-code-mods": False}, "hooks": {"PreToolUse": [
+    {"matcher": "Agent|Task", "hooks": [{"type": "command", "command": "python3 " + shlex.quote(
+        str(Path(__file__).resolve().parent / "agent-model-clamp.py"))}]}]}})
 SESSION_NICE = 10  # spawn: every headless claude -p session runs at this nice level, below Trevor's own apps
 MAX_LAUNCH_CPU_LOAD_PCT = 500  # serve.spawn queues every non-manual job launch (resume, approve, rework, start) above this load
 CPU_SAMPLES = 3  # cpu_busy_pct: the mean of at most this many watchdog samples (record_cpu_sample) ...
