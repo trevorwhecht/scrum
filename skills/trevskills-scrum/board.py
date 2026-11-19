@@ -7689,7 +7689,8 @@ def main(argv=None):
                              "\"rule N\"; move the detail into stop.md and ask again.")
         commands = [o.partition("=")[2].strip() for o in (a.a, a.b, a.c) if o is not None]
         q = a.question.strip()  # cmd_ask stores it stripped
-        exempt = is_guard_ask(q) or QUEUE_ASK_RE.match(q) or CI_BILLING_RE.search(q) or AGENT_TYPES_RE.search(q)  # the automatic asks process_health already ignores
+        # the automatic asks process_health already ignores keep Carry on=resume / Remove this job=abort
+        exempt = is_guard_ask(q) or QUEUE_ASK_RE.match(q) or CI_BILLING_RE.search(q) or AGENT_TYPES_RE.search(q)
         if resume_abort_only(commands) and not exempt:
             raise SystemExit('ask refused: add a followup <id> "<fix>" option, or run B wait-on <id> <blocker> '
                              'instead of asking')
