@@ -2715,8 +2715,14 @@ class ContractTest(unittest.TestCase):
         lane = (SKILL_DIR / "lanes" / "uisweep.md").read_text()
         for phrase in ("SWEEP_DIR=", "- Unrendered: <path>", "B ui-sweep-record", "RENDER_CAP", "--cookies",
                        "**Shared dev server**", "never 8765 or 3001", "on every outcome",
-                       "- Unrendered: <path> — needs customer session"):
+                       "- Unrendered: <path> — needs customer session", "- Customer render auth:",
+                       "- Employee render auth: <repo-relative path>", "`/employee/*`",
+                       "- Unrendered: <path> — needs employee session", "strip every leading `../`",
+                       "`$REPO/<rest>`", "`../../../playwright/.auth/admin.json` becomes `$REPO/playwright/.auth/admin.json`"):
             self.assertIn(phrase, lane, phrase)
+        self.assertNotIn('"$REPO/<path>"', lane)
+        review = (SKILL_DIR / "lanes" / "review.md").read_text()
+        self.assertIn("When run for a sweep (`lanes/uisweep.md` step 2), `<path>` is the resolved `$REPO/<rest>` path", review)
         self.assertLess(lane.index("render.py"), lane.index("Spawn `scrum-review-ui`"))
         self.assertLess(lane.index("Spawn `scrum-review-ui`"), lane.index("Run `B ui-sweep-record"))
 
