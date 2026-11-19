@@ -141,6 +141,18 @@ class BacklogTest(unittest.TestCase):
             self.assertEqual(board.header_value(d / "feature.md", key, words), want)
         self.assertEqual(board.feature_text("Plain item"), "Plain item\n")
 
+    def test_inline_lane_and_complex_with_trailing_punctuation(self):
+        item = "Fix it. Lane: debug, re-report of job 583. Lane: standard, about 150+ lines. Complex: no."
+        d = self.root / "jobs" / "101-x"
+        d.mkdir(parents=True)
+        (d / "feature.md").write_text(board.feature_text(item))
+        self.assertEqual(board.header_value(d / "feature.md", "Lane", board.LANES), "standard")
+        self.assertEqual(board.header_value(d / "feature.md", "Complex", ("yes", "no")), "no")
+        d2 = self.root / "jobs" / "102-x"
+        d2.mkdir()
+        (d2 / "feature.md").write_text(board.feature_text("Fix it. Lane: debug, re-report of job 583"))
+        self.assertEqual(board.header_value(d2 / "feature.md", "Lane", board.LANES), "debug")
+
     def test_runall_start_child_feature_has_header_lines(self):
         (self.root / "backlog.md").write_text("# Backlog\n- [ ] Fix it. Lane: debug \u2014 cause unknown.\n")
         kid = board.cmd_runall_start(self.root)["children"][0]
