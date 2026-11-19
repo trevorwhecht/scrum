@@ -20,13 +20,13 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
     await page.goto(process.env.DASH_URL);
     if (mode === "empty") {
       await page.route("**/api/agents", r => r.fulfill({json: []}));
-      await page.click("#agentsBtn");
+      await page.$eval("#agentsBtn", b => b.click());
       await page.waitForFunction(() => !document.getElementById("flow").textContent.includes("loading"));
       console.log(JSON.stringify(await page.evaluate(() => ({flow: document.getElementById("flow").innerHTML,
         pipeBar: document.getElementById("pipeBar").hidden}))));
       return;
     }
-    await page.click("#agentsBtn");
+    await page.$eval("#agentsBtn", b => b.click());
     await page.waitForSelector('#pipeTabs [data-tab="fast"]:visible');
     const open = async (tab, z) => {
       await page.click(`#pipeTabs [data-tab="${tab}"]`);
