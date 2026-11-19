@@ -3667,7 +3667,7 @@ class BoardTest(unittest.TestCase):
             board.find(bd, b).update(stage="waiting", depends_on=["ghost-1"])
         out = board.cmd_ready(self.root, parent)
         self.assertEqual(out["ready"], [])
-        self.assertTrue(self.child(parent)["reason"].startswith("blocked"), self.child(parent)["reason"])
+        self.assertTrue(self.child(parent)["reason"].startswith("bigboy blocked"), self.child(parent)["reason"])
         self.assertNotIn("left", out)
 
     def test_runall_ready_parent_waits_and_resumes(self):
