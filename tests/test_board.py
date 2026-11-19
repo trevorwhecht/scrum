@@ -3658,6 +3658,18 @@ class BoardTest(unittest.TestCase):
         p = self.child(parent)
         self.assertEqual((p["stage"], p.get("reason")), ("running", None))
 
+    def test_ready_blocked_parent_returns_no_shop_left(self):
+        """Job 1215: `left` in cmd_ready's output is only the children kept for the shop, never the BLOCKED branch's list."""
+        parent, (a, b) = self.runall(2)
+        board.cmd_ready(self.root, parent)
+        board.cmd_abort(self.root, a, requeue=False)
+        with board.locked_board(self.root) as bd:
+            board.find(bd, b).update(stage="waiting", depends_on=["ghost-1"])
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual(out["ready"], [])
+        self.assertTrue(self.child(parent)["reason"].startswith("blocked"), self.child(parent)["reason"])
+        self.assertNotIn("left", out)
+
     def test_runall_ready_parent_waits_and_resumes(self):
         parent, (a, b, c) = self.runall(3)
         board.cmd_ready(self.root, parent)

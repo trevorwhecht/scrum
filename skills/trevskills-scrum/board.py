@@ -5752,6 +5752,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
             busy.append(k)
             slots.append(k)
             ready.append(k["id"])
+        shop_left = list(left)  # the BLOCKED branch below reuses `left` for its own list
         merged = sum(k["stage"] == "done" for k in kids)
         finished = sum(k["stage"] in ("done", "aborted") for k in kids)  # an aborted child never runs again
         new = parent["stage"], parent.get("reason")
@@ -5798,7 +5799,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
                 parent["stopTitle"] = "BIGBOY_BLOCKED"
         out = {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
                "all_merged": finished == len(kids), "held": machine or ("ram_room" if ram_full else None),
-               **({"left": left} if left else {})}  # `left`: waiting children kept for the shop (serve.py start_ready notes it)
+               **({"left": shop_left} if shop_left else {})}  # `left`: waiting children kept for the shop (serve.py start_ready notes it)
     if was != "needs-human" and parent["stage"] == "needs-human":
         play(sound("needs-human"))
     return out
