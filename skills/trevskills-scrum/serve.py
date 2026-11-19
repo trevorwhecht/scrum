@@ -1599,6 +1599,8 @@ def resume_held(project, root, job, jobs, now):
 
 
 CLOUD_EVERY = 600  # seconds between one project's cloud-sync polls; fixed, not a setting
+SHOP_ENDED_EVERY = 60  # seconds between one project's shop.ended probes between cloud-sync polls; fixed
+SHOP_PROBE_LAST = {}  # project -> time of its last shop.ended probe
 CLOUD_LAST = {}  # project -> time of its last cloud-sync poll (0 = never, so the first one runs at once)
 CLOUD_HOME = ("Hard stop: schema",)  # moved jobs whose Sync tail needs a session
 
@@ -1630,6 +1632,8 @@ def cloud_tick(project, root, jobs, now=None):
     artifactsPending mark (board.cloud_pending_clear); a hard-stop move without the branch, a skipped or a failed
     spawn keeps the mark, so a later poll reports the id again. Held during cool-down (no sync, no spawn, CLOUD_LAST
     unstamped, so the first tick after it polls at once). Errors are printed, never raised.
+    Between polls, a stage-cloud `shop` job is probed with shop.ended at most every SHOP_ENDED_EVERY seconds, and a
+    session that has ended runs the sync at once (so shop_tick can refill the slot in the same tick).
     Before the sync, each stage-cloud job with a `shop` pid asks shop.ended on its own worker (its `worker` alias, else
     shop.ALIAS: jobs dispatched before workers.txt ran on shopmac); after a sync with no error, one whose
     session ended (a str) and that is still in stage cloud after the sync is aborted with SHOP_ENDED
@@ -1638,14 +1642,20 @@ def cloud_tick(project, root, jobs, now=None):
     if board.cooling_down():
         return
     now = time.time() if now is None else now
-    if not any(j.get("stage") == "cloud" or j.get("artifactsPending") for j in jobs) \
-            or now - CLOUD_LAST.get(project, 0) < CLOUD_EVERY:
+    if not any(j.get("stage") == "cloud" or j.get("artifactsPending") for j in jobs):
         return
-    CLOUD_LAST[project] = now
+    due = now - CLOUD_LAST.get(project, 0) >= CLOUD_EVERY
+    probe = due or now - SHOP_PROBE_LAST.get(project, 0) >= SHOP_ENDED_EVERY
     try:
-        ended = {j["id"]: shop.ended(Path(root).parent.name, j["id"], int(j["shop"]),
-                                     alias=j.get("worker") or shop.ALIAS)
-                 for j in jobs if j.get("stage") == "cloud" and j.get("shop")}  # read before the sync, so a PR wins
+        ended = {}
+        if probe:
+            ended = {j["id"]: shop.ended(Path(root).parent.name, j["id"], int(j["shop"]),
+                                         alias=j.get("worker") or shop.ALIAS)
+                     for j in jobs if j.get("stage") == "cloud" and j.get("shop")}  # read before the sync, so a PR wins
+            SHOP_PROBE_LAST[project] = now
+        if not due and all(t is None for t in ended.values()):  # an ended shop session syncs at once, freeing its slot
+            return
+        CLOUD_LAST[project] = now
         out = board.cmd_cloud_sync(root)
         for m in out.get("moved") or []:
             board.log_process("Cloud jobs", m.get("state"), repo=str(Path(root).parent), job=m.get("id"), pr=m.get("pr"))
