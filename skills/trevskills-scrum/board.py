@@ -4317,7 +4317,8 @@ def resume_first(jobs: list[dict]) -> int:
 ACCOUNTS = (("main", "~/.claude", (None, 90)), ("owa", "~/.claude-owa", (None, 90)))
 # (5h, 7d) used % at which an account is held while it is primary_account; an unlisted account has no primary cap.
 # Trevor 2026-11-18 (job 1208): OWA as primary hands new work to main at 97% 7d, keeping room for messageManager and his chats.
-PRIMARY_RESERVE = {"owa": (None, 97)}
+# Trevor 2026-11-19 (job 1228): main as primary keeps 1% so a Trevor-run job (grocery run) can still start.
+PRIMARY_RESERVE = {"owa": (None, 97), "main": (None, 99)}
 Account = namedtuple("Account", "name dir reserve")
 ACCOUNT_RE = re.compile(r"[a-z0-9-]{1,20}")
 

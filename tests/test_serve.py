@@ -2165,14 +2165,14 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("GET", "/api/machine")
             self.assertEqual(code, 200)
             self.assertEqual(out["usage"], {"accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400,
-                                                          "max_pct": 90}],
+                                                          "max_pct": 99}],
                                             "allowance": 0, "fable": "paused", "hold_until": now + 3600})  # 93 % 5h: held
             self.assertNotIn("five_hour_pct", json.dumps(out["usage"]), "the header has no 5h reading")
             self.assertEqual(out["verdict"], None, "the existing keys are unchanged")
             fresh["written_at"] = time.time() - 301  # stale: the weekly reading stays, the allowance and holds go
             usage.write_text(json.dumps(fresh))
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], {
-                "accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400, "max_pct": 90}],
+                "accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400, "max_pct": 99}],
                 "allowance": None, "fable": "unknown", "hold_until": None})
             fresh["rate_limits"]["seven_day"]["resets_at"] = now - 60  # a past reset reads null, as claude_usage
             usage.write_text(json.dumps(fresh))
@@ -2184,8 +2184,7 @@ class ServeTest(unittest.TestCase):
 
     def test_machine_usage_one_weekly_reading_per_account(self):
         """main 49% from a day-old file, owa 90% with its 80/90 reserve: each account's weekly %, its reset and the
-        used % its red starts at (owa: its 7d reserve, or PRIMARY_RESERVE's 97 while primary; main, no reserve:
-        board.USAGE_HOLD_PCT)."""
+        used % its red starts at (owa: its 7d reserve, or PRIMARY_RESERVE's 97 while primary; main primary: 99, job 1228)."""
         base = Path(tempfile.mkdtemp(dir=self.tmp.name))
         (base / "main").mkdir()
         (base / "owa").mkdir()
@@ -2197,7 +2196,7 @@ class ServeTest(unittest.TestCase):
         accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [80, 90]]])
         with mock.patch.dict(os.environ, SCRUM_ACCOUNTS=accounts, SCRUM_USAGE=str(base / "main" / "usage.json")):
             self.assertEqual(self.serve.machine_usage(now), {
-                "accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": now + 86400, "max_pct": 90},
+                "accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": now + 86400, "max_pct": 99},
                              {"name": "owa", "seven_day_pct": 90, "resets_at": now + 2 * 86400, "max_pct": 90}],
                 "allowance": None, "fable": "unknown", "hold_until": None})
             accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [70, 85]]])
