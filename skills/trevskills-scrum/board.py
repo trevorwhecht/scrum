@@ -2304,6 +2304,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
     pulse.log (unused_windows skips a window whose pulse lines all have Auto continue off in every project) and
     board.json; a window counts only in the first digest, across projects, that flags it (windows_flagged_path); each carries the previous digest's value and a flag ("worse", "over twice" or null). A missing or
     broken input counts 0. auto_stalls ({"value", "jobs"}, no limit or flag) counts the auto stall lines of those jobs.
+    A questions.log line dated at or before the previous digest's Since (cmd_digest_trevor's) is skipped.
     Writes digests/<NNN>/health.json."""
     root = Path(root)
     d = root / "digests" / str(digest_id)
@@ -2326,8 +2327,12 @@ def cmd_process_health(root, digest_id: str) -> dict:
         return main_prs[0]
     last = {}  # job -> kind of its last counted stop line: a stall right after a stall is the same episode
     auto_stalls = []  # one job id per auto stall line: cleared without Trevor, shown on its own line
+    earlier = _trevor_previous(root, digest_id)  # cmd_digest_trevor's Since: a job listed again keeps no old lines
+    since = getattr(earlier.stat(), "st_birthtime", earlier.stat().st_mtime) if earlier else None
     for q in _json_lines(root / "questions.log"):
         job, kind = q.get("job"), q.get("kind")
+        if since is not None and (at := _epoch(q.get("date"))) is not None and at <= since:
+            continue  # counted by an earlier digest; a dateless line still counts
         if q.get("auto") is True:  # cleared without Trevor (log_stop auto): never a stop
             if kind == "stall" and str(job) in claimed:
                 auto_stalls.append(job)

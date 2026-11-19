@@ -11004,6 +11004,25 @@ class ProcessHealthTest(unittest.TestCase):
         m = self.run_health("001")["metrics"]
         self.assertEqual((m["stops_per_job"]["value"], m["stops_per_job"]["jobs"]), (0.5, ["102-beta"]))
 
+    def test_process_health_skips_lines_before_previous_since(self):
+        # Job 1196: a job listed again counts only its ask lines dated after the previous digest's Since.
+        self.board(("101-alpha", "done", "standard", None, "merged"))
+        names = ("stops_per_job", "resume_abort_stops", "unreadable_asks")
+        ask = {"job": "101-alpha", "kind": "ask", "question": "See .claude/skills/x/SKILL.md first?",
+               "options": [{"command": "resume 101-alpha"}, {"command": "abort 101-alpha"}]}
+
+        def counts(n, date):
+            self.lines("questions.log", [{**ask, **({"date": date} if date else {})}])
+            m = self.run_health(n)["metrics"]
+            return [(m[k]["value"], m[k]["jobs"]) for k in names]
+        old, new = "2020-01-01T00:00:00+00:00", "2999-01-01T00:00:00+00:00"
+        self.digest("001", "101-alpha")
+        self.assertEqual(counts("001", old), [(1, ["101-alpha"])] * 3, "no previous digest: no cutoff")
+        self.digest("002", "101-alpha")
+        self.assertEqual(counts("002", old), [(0, [])] * 3, "dated before 001's birth time")
+        self.assertEqual(counts("002", new), [(1, ["101-alpha"])] * 3, "dated after 001's birth time")
+        self.assertEqual(counts("002", None), [(1, ["101-alpha"])] * 3, "no date: still counts")
+
     def test_followup_option_not_resume_abort_stop(self):
         self.board(("101-alpha", "done", "standard", None, "merged"))
         self.digest("001", "101-alpha")
