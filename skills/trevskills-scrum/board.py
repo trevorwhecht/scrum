@@ -2304,6 +2304,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
     pulse.log (unused_windows skips a window whose pulse lines all have Auto continue off in every project) and
     board.json; a window counts only in the first digest, across projects, that flags it (windows_flagged_path); each carries the previous digest's value and a flag ("worse", "over twice" or null). A missing or
     broken input counts 0. auto_stalls ({"value", "jobs"}, no limit or flag) counts the auto stall lines of those jobs.
+    A questions.log line dated at or before the previous digest's Since (cmd_digest_trevor's) is skipped.
     Writes digests/<NNN>/health.json."""
     root = Path(root)
     d = root / "digests" / str(digest_id)
@@ -2326,8 +2327,12 @@ def cmd_process_health(root, digest_id: str) -> dict:
         return main_prs[0]
     last = {}  # job -> kind of its last counted stop line: a stall right after a stall is the same episode
     auto_stalls = []  # one job id per auto stall line: cleared without Trevor, shown on its own line
+    earlier = _trevor_previous(root, digest_id)  # cmd_digest_trevor's Since: a job listed again keeps no old lines
+    since = getattr(earlier.stat(), "st_birthtime", earlier.stat().st_mtime) if earlier else None
     for q in _json_lines(root / "questions.log"):
         job, kind = q.get("job"), q.get("kind")
+        if since is not None and (at := _epoch(q.get("date"))) is not None and at <= since:
+            continue  # counted by an earlier digest; a dateless line still counts
         if q.get("auto") is True:  # cleared without Trevor (log_stop auto): never a stop
             if kind == "stall" and str(job) in claimed:
                 auto_stalls.append(job)
@@ -5961,8 +5966,9 @@ def is_guard_ask(reason) -> bool:
     return reason.startswith(GUARD_ASK_PREFIXES) or GUARD_ASK_WRONG_BRANCH in reason[:80]
 
 
-def park(root, job, question, parsed, title, recommend=None):
-    """The needs-human field update and questions.log line of cmd_ask. Caller holds the board lock and plays the sound."""
+def park(root, job, question, parsed, title, recommend=None, auto=False):
+    """The needs-human field update and questions.log line of cmd_ask. Caller holds the board lock and plays the sound.
+    auto: the scrum answers it itself (claude_batch's Terminal batch), so the line carries "auto": true."""
     if job.get("reason") != question:
         job.pop("outcome", None)  # a new blocker: the last run's outcome no longer applies
     job.update(stage="needs-human", reason=question, question=question, options=parsed, stopTitle=title,
@@ -5972,8 +5978,8 @@ def park(root, job, question, parsed, title, recommend=None):
     entry = {"date": now(), "project": Path(root).resolve().parent.name, "job": job["id"],
              "question": question, "options": parsed, "reason": question, "stopTitle": title,
              "kind": "bigboy" if question.startswith(("bigboy review: main not updated", BLOCKED)) else "ask"}
-    if is_guard_ask(question):
-        entry["auto"] = True  # the scrum resumes it once the checkout is clear: no stop for process_health
+    if auto or is_guard_ask(question):
+        entry["auto"] = True  # the scrum resumes or answers it itself: no stop for process_health
     if recommend:
         job["recommend"] = entry["recommend"] = recommend
     else:
@@ -6197,9 +6203,9 @@ def cmd_unblock_log(root, job_id):
     return {"verdict": verdict, "blocker": blocker, "kind": kind, "n": n}
 
 
-def cmd_answer(root, job_id, key, note=None):
+def cmd_answer(root, job_id, key, note=None, auto=False):
     """Log Trevor's pick on the job's open question and return that option; the stage is left to the command it names.
-    A non-blank note he typed with the pick goes on the same line."""
+    A non-blank note he typed with the pick goes on the same line; auto (the scrum picked it) adds "auto": true."""
     with locked_board(root) as board:
         job = find(board, check_id(job_id))
         if job["stage"] != "needs-human" or not job.get("options"):
@@ -6210,6 +6216,8 @@ def cmd_answer(root, job_id, key, note=None):
         entry = {"date": now(), "job": job_id, "pick": option["label"]}
         if note := clean(note or "", ITEM_MAX):
             entry["note"] = note
+        if auto:
+            entry["auto"] = True
         questions_log(root, entry)
     return option
 
@@ -6639,7 +6647,8 @@ def claude_batch(root, board, job) -> tuple[dict, bool]:
         park(root, batch, TERMINAL_BATCH_QUESTION,
              [{"key": "a", "label": "Run it in a Terminal window", "command": f"lilguy {bid}"},
               {"key": "b", "label": "Remove this job", "command": f"abort {bid} --cascade"}],
-             "BUILDER_BLOCKED", {"key": "a", "why": "Only a Terminal window can approve project .claude edits."})
+             "BUILDER_BLOCKED", {"key": "a", "why": "Only a Terminal window can approve project .claude edits."},
+             auto=True)  # serve.py terminal_batch_tick opens it
         created = True
     bid = batch["id"]
     feature_path = Path(root) / "jobs" / bid / "feature.md"

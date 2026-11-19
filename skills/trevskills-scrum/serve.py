@@ -828,11 +828,12 @@ def refused(root, job_id, refusal):
     return 409, {"error": refusal}
 
 
-def answer_job(project, root, job, jobs, key, note=None, raise_window=False):
+def answer_job(project, root, job, jobs, key, note=None, raise_window=False, auto=False):
     """Trevor picked option `key` of a needs-human job's closed question. Every check runs before board.cmd_answer
     records the pick; the command it returns runs through the same helpers as the matching button, on this job.
     A non-blank note replaces a rework option's preset text; other options ignore it.
-    raise_window: Trevor's own click brings the job's Terminal tab to the front; watchdog opens stay in the background."""
+    raise_window: Trevor's own click brings the job's Terminal tab to the front; watchdog opens stay in the background.
+    auto: the watchdog picked it (terminal_batch_tick), so board.cmd_answer marks the pick line "auto": true."""
     opts = job.get("options") if job else None
     opt = next((o for o in opts or [] if isinstance(o, dict) and isinstance(key, str) and o.get("key") == key), None)
     if not job or job["stage"] != "needs-human" or running(project, job["id"]) or not opt:
@@ -841,6 +842,7 @@ def answer_job(project, root, job, jobs, key, note=None, raise_window=False):
         return 409, {"error": f"unknown option command: {opt.get('command')}"}
     job_id = job["id"]
     typed = {"note": n} if (n := board.clean(note or "", board.ITEM_MAX)) else {}  # the pick line keeps what he typed
+    typed.update({"auto": True} if auto else {})
     if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(project, root, job, manual=True)):
         if not refusal.startswith(board.MACHINE_WAIT) and not getattr(refusal, "blocker", None):
             return refused(root, job_id, refusal)
@@ -3249,7 +3251,7 @@ def terminal_batch_tick(project, root, jobs):
             live["terminal_opened"] = board.now()
             live = dict(live)
         try:
-            code, _ = answer_job(project, root, live, jobs, "a")
+            code, _ = answer_job(project, root, live, jobs, "a", auto=True)
         except (Exception, SystemExit) as e:
             code = None
             print(f"watchdog: {project}: terminal batch {live['id']}: {e}", file=sys.stderr, flush=True)

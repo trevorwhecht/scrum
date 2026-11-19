@@ -1930,6 +1930,14 @@ class ServeTest(unittest.TestCase):
             self.batch_tick(bad)
         self.assertEqual(rt.call_count, 1, "a malformed terminal_failed still opens")
 
+    def test_terminal_batch_tick_pick_is_auto(self):
+        # Job 1196: the watchdog's own pick is no Trevor click, so its line carries "auto": true.
+        job_id = self.batch_job()
+        with mock.patch.object(self.serve, "run_terminal", return_value=(200, {"message": "Opened"})):
+            self.batch_tick(job_id)
+        picks = [l for l in self.log_for(job_id) if "pick" in l]
+        self.assertEqual([(l["pick"], l.get("auto")) for l in picks], [("Run it in a Terminal window", True)])
+
     def test_terminal_batch_tick_skips_other_jobs(self):
         other = self.batch_job(title="Something else")
         built = self.batch_job(stage="build")
