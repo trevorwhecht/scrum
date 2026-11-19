@@ -4214,19 +4214,86 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "The final report quotes the block's last line"):
             self.assertIn(phrase, artifacts, phrase)
         sync = cloud[cloud.index("3. **Sync**"):]
-        for phrase in ("git fetch origin scrum-artifacts/$ID", "missing branch", "git archive FETCH_HEAD",
+        for phrase in ('git fetch origin "+refs/heads/scrum-artifacts/${ID}:$H"', "refs/scrum-home/$ID",
+                       "missing branch", 'git archive "$H"', "[scrum $ID] artifacts",
+                       "artifacts: kept scrum-artifacts/$ID", 'git update-ref -d "$H"',
                        "scrum/jobs/$ID", "all but `feature.md`", "never overwrites the local `feature.md`",
                        "git push origin --delete scrum-artifacts/$ID", "never force",
                        "B backlog-spec $ID", "B backlog-add", "(from $ID)", "**Approve** step 3", "Fallback",
                        "B digest-due", '"due": true', "**Digest**"):
             self.assertIn(phrase, sync, phrase)
         self.assertNotIn("--force", sync)
+        self.assertNotIn("git archive FETCH_HEAD", sync)
         # Artifacts come home after the B set, follow-ups after extracting, and the digest check last.
-        self.assertLess(sync.index("B set $ID stage=done pr=<url> reason="), sync.index("git fetch origin scrum-artifacts/$ID"))
-        self.assertLess(sync.index("git fetch origin scrum-artifacts/$ID"), sync.index("B backlog-spec $ID"))
+        self.assertLess(sync.index("B set $ID stage=done pr=<url> reason="), sync.index('git fetch origin "+refs/heads/scrum-artifacts/${ID}:$H"'))
+        self.assertLess(sync.index('git fetch origin "+refs/heads/scrum-artifacts/${ID}:$H"'), sync.index("B backlog-spec $ID"))
         self.assertLess(sync.index("B backlog-spec $ID"), sync.index("B digest-due"))
         readme = self.h2((ROOT / "README.md").read_text(), "## Cloud lane")
         self.assertIn("scrum-artifacts/<id>", readme)
+
+    def test_cloud_artifacts_home_block_runs(self):
+        import os, tempfile, textwrap
+        cloud = self.lane("cloud")
+        after = cloud[cloud.index("**Artifacts home.**"):]
+        fence = after.index("```bash\n") + len("```bash\n")
+        block = textwrap.dedent(after[fence:after.index("```", fence)])
+
+        def git(cwd, *args):
+            return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+                                  env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                                       "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}).stdout
+
+        for shell in ("bash", "zsh"):
+            if not shutil.which(shell):
+                continue
+            for case in ("incident", "good", "missing", "legacy"):
+                with self.subTest(shell=shell, case=case), tempfile.TemporaryDirectory() as tmp:
+                    tmp = Path(tmp)
+                    origin, repo, fdir, work = tmp / "o.git", tmp / "repo", tmp / "F", tmp / "w"
+                    git(tmp, "init", "--bare", "-q", str(origin))
+                    git(tmp, "clone", "-q", str(origin), str(repo))
+                    git(tmp, "clone", "-q", str(origin), str(work))
+                    fdir.mkdir()
+                    if case != "missing":
+                        git(work, "checkout", "-q", "-b", "scrum-artifacts/1501")
+                        job = "1502" if case == "incident" else "1501"
+                        subject = f"[scrum {job}] artifacts"
+                        if case != "legacy":
+                            d = work / "scrum" / "jobs" / job
+                            d.mkdir(parents=True)
+                            (d / "spec.md").write_text("spec")
+                            (d / "feature.md").write_text("remote")
+                        else:
+                            (work / "other.txt").write_text("x")
+                        git(work, "add", "-A")
+                        git(work, "commit", "-q", "-m", subject)
+                        git(work, "push", "-q", "origin", "scrum-artifacts/1501")
+                    if case == "good":
+                        (fdir / "jobs" / "1501").mkdir(parents=True)
+                        (fdir / "jobs" / "1501" / "feature.md").write_text("local")
+                    if case == "missing":
+                        git(repo, "commit", "-q", "--allow-empty", "-m", "x")
+                        git(repo, "update-ref", "refs/scrum-home/1501", "HEAD")
+                    env = {**os.environ, "REPO": str(repo), "F": str(fdir), "ID": "1501"}
+                    r = subprocess.run([shell, "-c", block], capture_output=True, text=True, env=env)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    remote = git(tmp, "ls-remote", str(origin), "refs/heads/scrum-artifacts/1501").strip()
+                    self.assertEqual(git(repo, "for-each-ref", "refs/scrum-home/").strip(), "")
+                    if case == "incident":
+                        self.assertTrue(remote)
+                        self.assertFalse((fdir / "jobs" / "1501").exists())
+                        self.assertEqual(r.stdout.strip(),
+                                         "artifacts: kept scrum-artifacts/1501, its commit is not [scrum 1501] artifacts")
+                    elif case == "good":
+                        self.assertEqual(remote, "")
+                        self.assertEqual((fdir / "jobs" / "1501" / "spec.md").read_text(), "spec")
+                        self.assertEqual((fdir / "jobs" / "1501" / "feature.md").read_text(), "local")
+                    elif case == "missing":
+                        self.assertEqual(r.stdout, "")
+                        self.assertFalse((fdir / "jobs" / "1501").exists())
+                    else:
+                        self.assertEqual(remote, "")
+                        self.assertFalse((fdir / "jobs" / "1501").exists())
 
     def test_skill_cloud_stale_skill_stops(self):
         cloud = self.lane("cloud")
