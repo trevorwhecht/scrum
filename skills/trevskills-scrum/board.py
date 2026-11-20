@@ -3238,6 +3238,7 @@ CARRIED = "VERDICT: PASS\nCarried forward from round {}: no blocking findings.\n
 UI_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n"
 SECURITY_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n"
 DELETION_SKIP = "VERDICT: PASS\nSkipped by orchestrator: diff is at least 90% deletions.\n"
+NOMARKUP_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no UI file's diff touches markup, styling or copy.\n"
 VISUAL_SKIP = "VERDICT: PASS\nSkipped by orchestrator: visual diff found every captured pair identical and the spec says no visual change.\n"
 
 
@@ -3288,8 +3289,36 @@ def _names(wt, *args):
 
 
 ORCH_REVIEW_RE = re.compile(
-    "|".join(re.escape(t) for t in (UI_SKIP, SECURITY_SKIP, DELETION_SKIP, VISUAL_SKIP)) + "|"
+    "|".join(re.escape(t) for t in (UI_SKIP, SECURITY_SKIP, DELETION_SKIP, VISUAL_SKIP, NOMARKUP_SKIP)) + "|"
     + re.escape(CARRIED).replace(r"\{\}", r"\d+"))
+
+
+SCRIPT_EXT_RE = re.compile(r"\.(tsx?|jsx?|mjs|cjs)$")
+_KW = r"(return|const|let|var|if|else|import|export|throw|await|break|continue|case|default|function|type|interface|async|new)\b"
+MARKUP_LINE_RE = re.compile(
+    r"(?<![\w>)\]])</?[A-Za-z>]"  # a JSX tag (not a generic like useState<Foo>)
+    r"|/>|\bclassName\b|\bclass\s*=|\bstyle\b|\bsx\s*=|\b(cn|clsx|cva|twMerge)\("  # markup and styling
+    r"|[\"'`][^\"'`]*[A-Za-z]{2,}\s+[A-Za-z]{2,}[^\"'`]*[\"'`]"  # a quoted string of two or more words (copy)
+    rf"|^\s*(?!{_KW})[A-Za-z][A-Za-z,.'!?:-]*(\s+[A-Za-z][A-Za-z,.'!?:-]*)+\s*$")  # bare JSX text of two or more words
+
+
+def _no_markup_change(wt, base, files):
+    """True when every file of `files` (UI-glob runtime paths) is a script file (ts/tsx/js/jsx) whose added and removed
+    lines in base...HEAD match none of MARKUP_LINE_RE: a logic-only change. Any other extension, an unreadable diff or
+    an empty `files` is False, so the reviewers run."""
+    if not files:
+        return False
+    for f in files:
+        if not SCRIPT_EXT_RE.search(f):
+            return False
+        try:
+            out = _git(wt, "-c", "core.quotePath=false", "diff", "-U0", "--no-color", f"{base}...HEAD", "--", f).decode()
+        except (ValueError, OSError, UnicodeDecodeError, subprocess.SubprocessError):
+            return False
+        for line in out.splitlines():
+            if line[:1] in "+-" and not line.startswith(("+++", "---")) and MARKUP_LINE_RE.search(line[1:]):
+                return False
+    return True
 
 
 def _drop_stale(rd, spawn):
@@ -3788,8 +3817,11 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
     if files is not None:
         skips = {}
         globs = ui_globs(root)
-        if globs and not any(f and not RUNTIME_EXCLUDE_RE.search(f) and glob_match(f, globs) for f in files):
+        ui_files = [f for f in sorted(files) if f and not RUNTIME_EXCLUDE_RE.search(f) and glob_match(f, globs or [])]
+        if globs and not ui_files:
             skips.update(ui=UI_SKIP, ux=UI_SKIP)
+        elif globs and _no_markup_change(wt, base, ui_files):
+            skips.update(ui=NOMARKUP_SKIP, ux=NOMARKUP_SKIP)
         if not any(rx.search(f) for f in files for rx in SECURITY_RES):
             skips["security"] = SECURITY_SKIP
         if skips:
