@@ -101,11 +101,11 @@ For `## Builder model`, use the `jev.log` of every job read:
 
 For `## Repeated questions`, read every `JOBS_DIR/../questions.log` line inside the 7-day cutoff above, not only the jobs in `jobs.txt`:
 - A line that is not valid JSON, or has neither `question` nor `pick`, is skipped.
-- Skip a line with `"auto": true`, every line whose `kind` is `stall`, `machine` or `refused` (serve.py clears those itself and `## Stops` counts them), and every `Terminal batch: project .claude edits` ask and its pick: `SKILL.md` `## Lilguy lane` already makes `Run it in a Terminal window` its default.
+- Skip a line with `"auto": true`, every line whose `kind` is `stall`, `machine` or `refused` even when it also has a `question` (serve.py clears those itself and `## Stops` counts them), and every `Terminal batch: project .claude edits` ask and its pick: `SKILL.md` `## Lilguy lane` already makes `Run it in a Terminal window` its default.
 - Join each ask line to the next pick line for the same job that comes after it in the file, unless that job asks a different normalised question first: a pick never answers an earlier, different question. An ask with no later pick still counts as asked, with pick `unanswered`; an `unanswered` pick never wins.
 - Group picks by label after trimming and lowercasing.
 - Normalise question text before grouping: lowercase it, then strip numbers, job ids, branch names, file paths and commit hashes.
-- List every normalised question asked 3 or more times (count ask lines, not jobs), sorted by count, highest first. Add ` — DEFAULT: <label>` when one pick won 3 or more times, and ` (unanimous)` after it when that same pick won every time.
+- List every normalised question asked 3 or more times (count ask lines, not jobs) with at least one ask dated after the `Since:` line in `DIGEST_DIR/trevor.md` (any date counts when that line is missing), sorted by count, highest first. Add ` — DEFAULT: <label>` when one pick won 3 or more times, and ` (unanimous)` after it when that same pick won every time.
 - This section is exempt from the 2 or more different jobs rule. Write `None` when no question qualifies.
 
 For `## Recurring blockers`, read every `JOBS_DIR/../questions.log` line inside the 7-day cutoff above, not only the jobs in `jobs.txt`:

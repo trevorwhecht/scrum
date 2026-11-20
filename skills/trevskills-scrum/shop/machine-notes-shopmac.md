@@ -24,3 +24,4 @@ Only the main Mac has these, so the main Mac's scrum never sends a job that need
 - printer, film printing
 - iMessage, Messages, Contacts
 - Keychain, Homebrew, brew, PR merge
+- scrum/briefs, scroll-lab, agent draft API, AGENT_API_TOKEN
