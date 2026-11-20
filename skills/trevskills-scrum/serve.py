@@ -1041,6 +1041,11 @@ E2E_FULL_ENTRY_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*›\s*)?(\S+?):(\d+):\d+\s*
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 E2E_FULL_DETAIL_RE = re.compile(r"^\s*\d+\)\s+(.*)$")  # a failure-detail header: `  1) [chromium] › a.spec.ts:3:5`
 E2E_FULL_TIMEOUT_RE = re.compile(r"Test timeout of \d+ms exceeded")  # a test-level timeout, never an expect one
+E2E_FULL_EARLY = "webServer exited early"  # Playwright: the webServer command quit before its URL answered
+E2E_FULL_LOCK = "Another next dev server is already running"  # Next's dev lock refusal (next/dist/build/lockfile.js)
+E2E_FULL_LOCK_RES = (re.compile(r"PID:\s*(\d+)"), re.compile(r"Local:.*?localhost:(\d+)"),
+                     re.compile(r"Dir:\s*(\S.*?)\s*$", re.M))  # the lock block's pid, port and project dir
+E2E_FULL_DEV_LOG = "/tmp/e2e-next-dev-{}.log"  # a webServer's tee'd next dev log by port (onewitharts playwright.config)
 
 
 def e2e_full_due(record, head, merges, now, settled=False) -> bool:
@@ -1185,54 +1190,129 @@ def e2e_full_from_log(repo, root, rec) -> dict | None:
     return new
 
 
+def e2e_full_term_kill(pids, wait) -> list[int]:
+    """SIGTERM each pid, then SIGKILL each one still alive after polling every 0.25 s for wait seconds, as
+    board.stop_worktree_servers does; a pid gone or not ours (ProcessLookupError, PermissionError) is skipped. Returns
+    the pids sent SIGTERM. The stop loop e2e_full_stop_new_servers and e2e_full_stop_pid share."""
+    killed = []
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed.append(pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    def gone(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+        return False
+    alive = list(killed)
+    for _ in range(int(wait / 0.25)):
+        if not alive:
+            break
+        time.sleep(0.25)
+        alive = [pid for pid in alive if not gone(pid)]
+    for pid in alive:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return killed
+
+
 def e2e_full_stop_new_servers(repo, before, wait=5.0) -> list[int]:
     """Stop the listeners a full run left on the main checkout (job 1252): its Playwright webServer `next dev` can
     outlive the run and hold the Next dev lock, so the next run's dev server exits early. Signals each board.listeners()
     pid whose cwd is repo or under it, outside <repo>/.claude/worktrees/ (job worktrees), and absent from before (the
     pre-run listeners() snapshot, by pid, so Trevor's own server survives); never a pid also on a board.KEEP_PORTS
     port, never this process. SIGTERM, then SIGKILL for each pid still alive after polling every 0.25 s for wait
-    seconds, as board.stop_worktree_servers does (it refuses the main checkout). Returns the pids sent SIGTERM; never
-    raises, so a failure here never changes the run's result."""
+    seconds (e2e_full_term_kill; board.stop_worktree_servers refuses the main checkout). Returns the pids sent SIGTERM;
+    never raises, so a failure here never changes the run's result."""
     try:
         repo = os.path.realpath(repo)
         wts = os.path.join(repo, ".claude", "worktrees")
         listening = board.listeners()
         keep = ({pid for pid, _, _ in before} | {pid for pid, port, _ in listening if port in board.KEEP_PORTS}
                 | {os.getpid()})
-        killed = []
+        stop = []
         for pid, _, cwd in listening:
-            if (pid in keep or pid in killed or not (cwd == repo or cwd.startswith(repo + os.sep))
+            if (pid in keep or pid in stop or not (cwd == repo or cwd.startswith(repo + os.sep))
                     or cwd == wts or cwd.startswith(wts + os.sep)):
                 continue
-            try:
-                os.kill(pid, signal.SIGTERM)
-                killed.append(pid)
-            except (ProcessLookupError, PermissionError):
-                pass
-
-        def gone(pid):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                return True
-            except PermissionError:
-                pass
-            return False
-        alive = list(killed)
-        for _ in range(int(wait / 0.25)):
-            if not alive:
-                break
-            time.sleep(0.25)
-            alive = [pid for pid in alive if not gone(pid)]
-        for pid in alive:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-        return killed
+            stop.append(pid)
+        return e2e_full_term_kill(stop, wait)
     except (OSError, ValueError, TypeError) as e:
         print(f"e2e_full_stop_new_servers: {e}", file=sys.stderr)
         return []
+
+
+def e2e_full_stop_pid(pid, wait=5.0) -> None:
+    """Stop the stale E2E `next dev` holding the checkout's Next dev lock (e2e_full_run, job 1269): SIGTERM, then
+    SIGKILL when it is still alive after wait seconds (e2e_full_term_kill). Never pid 0 or 1 (a signal to 0 reaches
+    the whole process group), never this process; never raises."""
+    try:
+        if pid > 1 and pid != os.getpid():
+            e2e_full_term_kill([pid], wait)
+    except (OSError, ValueError, TypeError, OverflowError) as e:
+        print(f"e2e_full_stop_pid: {e}", file=sys.stderr)
+
+
+def e2e_full_lock_block(text):
+    """(pid, port, dir) from the PID:, Local: and Dir: lines of text's first E2E_FULL_LOCK block (ANSI stripped; the
+    lock line and the 7 after it, so a banner's own `Local:` above it or a later `PID:` is never read), each None when
+    its line is missing (a pid of 0 or 1 too); None when text has no lock line."""
+    text = ANSI_RE.sub("", text)
+    at = text.find(E2E_FULL_LOCK)
+    if at < 0:
+        return None
+    block = "\n".join(text[at:].splitlines()[:8])
+    pid, port, where = (r.search(block) for r in E2E_FULL_LOCK_RES)
+    return (int(pid[1]) if pid and int(pid[1]) > 1 else None, int(port[1]) if port else None,
+            where[1] if where else None)
+
+
+def e2e_full_lock(repo, output, since):
+    """(pid, port) of the server holding repo's Next dev lock, for e2e_full_run (job 1269), either None when unparsable;
+    None when no lock block is found. Read from the run output, else, when it says E2E_FULL_EARLY, from each
+    E2E_FULL_DEV_LOG written since `since` whose block's Dir: is repo: Playwright drops a webServer's stdout, so a
+    `next dev 2>&1 | tee` webServer's lock block reaches only that log (onewitharts e2e-full.log, 2026-11-19)."""
+    block = e2e_full_lock_block(output)
+    if block is None and E2E_FULL_EARLY in ANSI_RE.sub("", output):
+        repo, pattern = os.path.realpath(repo), Path(E2E_FULL_DEV_LOG.format("*"))
+        for path in sorted(pattern.parent.glob(pattern.name)):
+            try:
+                found = e2e_full_lock_block(path.read_text(errors="replace")) if path.stat().st_mtime >= since else None
+            except OSError:
+                continue
+            if found and found[2] and os.path.realpath(found[2]) == repo:
+                block = found
+                break
+    return block[:2] if block else None
+
+
+def e2e_full_exec(repo, cmd, env, log, loads) -> int:
+    """One run of cmd in repo through buildlock.py, output to log; appends board.cpu_load_pct to loads after each
+    E2E_FULL_LOAD_SECS of the wait and once at exit. Past E2E_FULL_STALE its process group gets SIGTERM. Returns the
+    exit code."""
+    with open(log, "w") as f:
+        proc = subprocess.Popen([sys.executable, str(Path(buildlock.__file__).resolve()), cmd], cwd=repo,
+                                env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+        for _ in range(int(E2E_FULL_STALE // E2E_FULL_LOAD_SECS)):
+            try:
+                code = proc.wait(timeout=E2E_FULL_LOAD_SECS)
+                break
+            except subprocess.TimeoutExpired:
+                loads.append(board.cpu_load_pct())
+        else:  # E2E_FULL_STALE passed
+            os.killpg(proc.pid, signal.SIGTERM)
+            code = proc.wait()
+        loads.append(board.cpu_load_pct())
+    return code
 
 
 def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
@@ -1244,43 +1324,44 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
     non-zero exit with parsed failures is fail; a non-zero exit whose log says Playwright's `webServer exited early`
     (another dev server held the checkout) is busy, due at once, unless retried (the record before was busy on this
     head), when it is error; any other non-zero exit (lock timeout 124, a dev-server error) is error and adds nothing.
+    Unless retried, a non-zero exit whose lock block (e2e_full_lock) names a pid and a port off board.KEEP_PORTS whose
+    E2E_FULL_DEV_LOG exists (an earlier run's webServer, which e2e_full_stop_new_servers spared as it was in `before`)
+    stops that pid (e2e_full_stop_pid) and runs cmd once more (job 1269); a lock block left (none of that, or the
+    second run hit it too) is busy, and the log_process line names its pid and port, or the stopped one's.
     An exception before the result is recorded records error (exit None) and re-raises."""
     rec = None
     try:
         env = {**os.environ, "SCRUM_BUILD_LOCK": str(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock")}
         log = root / "e2e-full.log"
-        loads = []
         before = board.listeners()
+        lock = stopped = None
         try:
-            with open(log, "w") as f:
-                proc = subprocess.Popen([sys.executable, str(Path(buildlock.__file__).resolve()), cmd], cwd=repo,
-                                        env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
-                                        start_new_session=True)
-                for _ in range(int(E2E_FULL_STALE // E2E_FULL_LOAD_SECS)):
-                    try:
-                        code = proc.wait(timeout=E2E_FULL_LOAD_SECS)
-                        break
-                    except subprocess.TimeoutExpired:
-                        loads.append(board.cpu_load_pct())
-                else:  # E2E_FULL_STALE passed
-                    os.killpg(proc.pid, signal.SIGTERM)
-                    code = proc.wait()
-                loads.append(board.cpu_load_pct())
-            output = log.read_text(errors="replace")
+            for _ in range(2):  # the second run only after stopping a stale E2E dev server
+                loads, started = [], time.time()
+                code = e2e_full_exec(repo, cmd, env, log, loads)
+                output = log.read_text(errors="replace")
+                lock = e2e_full_lock(repo, output, started) if code and not retried else None
+                pid, port = lock or (None, None)
+                if stopped or not (pid and port and port not in board.KEEP_PORTS
+                                   and os.path.exists(E2E_FULL_DEV_LOG.format(port))):
+                    break
+                e2e_full_stop_pid(pid)
+                stopped = lock
         except OSError as e:
-            code, output = -1, str(e)
+            code, output, lock = -1, str(e), None
         finally:
             e2e_full_stop_new_servers(repo, before)
         test_dir = board._e2e_dir(Path(repo))
         failed = e2e_full_failures(output, test_dir) if code else []
         loaded = code != 0 and any((load or 0) > board.MAX_CPU_LOAD_PCT for load in loads)
-        early = not retried and "webServer exited early" in ANSI_RE.sub("", output)
-        result = "pass" if code == 0 else "loaded" if loaded else "fail" if failed else "busy" if early else "error"
+        busy = not retried and (lock or E2E_FULL_EARLY in ANSI_RE.sub("", output))
+        result = "pass" if code == 0 else "loaded" if loaded else "fail" if failed else "busy" if busy else "error"
         rec = {"at": at, "head": head, "result": result, "exit": code, "failed": failed,
                "lastGreen": head if code == 0 else last_green}
         write_e2e_full(root, rec)
+        named = lock or stopped
         board.log_process("Full E2E on main", result, repo=str(repo), head=head, exit=code, failed=len(failed),
-                          secs=int(time.time() - at))
+                          secs=int(time.time() - at), **({"pid": named[0], "port": named[1]} if named else {}))
         if failed and not loaded:
             timed_out = e2e_full_timed_out(output, test_dir)
             e2e_full_backlog(repo, root, failed, last_green, head,
@@ -4987,7 +5068,7 @@ def cached_board(root):
     return data
 
 
-BACKLOG_CACHE = {}  # str(scrum root) -> (stat keys of backlog.md and board.json, board.backlog_items)
+BACKLOG_CACHE = {}  # str(scrum root) -> (stat keys, board.backlog_items, the extra files those keys stat; see cached_backlog_items)
 BACKLOG_CACHE_LOCK = threading.Lock()
 
 
@@ -5002,15 +5083,21 @@ def file_key(path):
 
 def cached_backlog_items(root):
     """GET /api/p/<project>/backlog: board.backlog_items(root), reused while backlog.md and board.json keep their stat
-    (their `waits` read both). Stat is taken first, so a write during the parse only costs one extra parse."""
+    (their `waits` read both). While an open item has an {after repo:job} marker, whose wait reads other projects' boards
+    (board.after_blocks), the registry and every registered project's board.json must keep their stat too. Stat is taken
+    first, so a write during the parse only costs one extra parse."""
     key = (file_key(root / "backlog.md"), file_key(root / "board.json"))
     with BACKLOG_CACHE_LOCK:
         hit = BACKLOG_CACHE.get(str(root))
-    if hit and hit[0] == key:
+    if hit and hit[0] == key + tuple(map(file_key, hit[2])):
         return hit[1]
+    extra = (board.registry_path(), *(p / "scrum" / "board.json" for p in board.projects().values()))
+    stats = tuple(map(file_key, extra))
     items = board.backlog_items(root)
+    if not any(i["after"] and not i["done"] for i in items):
+        extra, stats = (), ()
     with BACKLOG_CACHE_LOCK:
-        BACKLOG_CACHE[str(root)] = (key, items)
+        BACKLOG_CACHE[str(root)] = (key + stats, items, extra)
     return items
 
 

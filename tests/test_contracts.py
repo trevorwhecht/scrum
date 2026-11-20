@@ -318,9 +318,10 @@ class ContractTest(unittest.TestCase):
     def test_code_reviewer_codex_path_includes_homebrew(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         line = next(l for l in text.splitlines() if "codex exec review --base" in l)
-        self.assertEqual(line, '    cd "$WORKTREE" && export PATH="$PATH:/opt/homebrew/bin" && START=$(date +%s) '
-                               '&& codex exec review --base "$BASE" -m gpt-6.1-sol \\')
-        self.assertIn('export PATH="$PATH:/opt/homebrew/bin"', line)
+        self.assertEqual(line, '    cd "$WORKTREE" && export PATH="$PATH:/opt/homebrew/bin:$HOME/.local/bin" '
+                               '&& START=$(date +%s) && codex exec review --base "$BASE" -m gpt-6.1-sol \\')
+        self.assertIn('First run `export PATH="$PATH:/opt/homebrew/bin:$HOME/.local/bin"; command -v codex`.', text)
+        self.assertNotIn('export PATH="$PATH:/opt/homebrew/bin"', text)  # the shop Mac's codex is in ~/.local/bin
         self.assertNotIn('cd "$WORKTREE" && START=$(date +%s)', text)
 
     def test_code_reviewer_codex_never_uses_timeout(self):
@@ -1036,7 +1037,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 27150, "newjob.md")  # +fast lane Out of scope, job 1257; +debug E2E in background, Build queue, job 1250; +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 27350, "newjob.md")  # +lilguy hand-off, job 1261; +fast lane Out of scope, job 1257; +debug E2E in background, Build queue, job 1250; +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -1739,6 +1740,9 @@ class ContractTest(unittest.TestCase):
         for phrase in ("`DIGEST_DIR/timing.md`", "    ## Time sinks\n", "For `## Time sinks`, use `DIGEST_DIR/timing.md`",
                        "3 or more different jobs or more than about 1 h in total", "no-change rounds"):
             self.assertIn(phrase, reader, phrase)
+        rule = reader[reader.index("For `## Time sinks`"):]
+        rule = rule[:rule.index("\n")]
+        self.assertIn("after depends_on)`, count only `<after>` as its Queue", rule)  # job 1268
 
     def test_digest_reader_reads_pulse(self):
         reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
@@ -1879,8 +1883,8 @@ class ContractTest(unittest.TestCase):
         line = line[:line.index("\n")]
         for phrase in ("`## Jobs`", "`## Flagged`", "`No transcript rows"):
             self.assertIn(phrase, line, phrase)
-        self.assertIn("    ## Token sinks\n    - <job id> — $<usd> — <x.x>x lane median or - — cause: <one line> — "
-                      "needed|not needed — source: <file>\n", reader)
+        self.assertIn("    ## Token sinks\n    - <job id> — $<usd> — <x.x>x lane median or - — <per line> tokens per added "
+                      "line — cause: <one line> — needed|not needed — source: <file>\n", reader)
         self.assertLess(reader.index("    ## Waste\n"), reader.index("    ## Token sinks\n"))
         self.assertLess(reader.index("    ## Token sinks\n"), reader.index("    ## Escapes\n"))
         start = reader.index("For `## Token sinks`, use `DIGEST_DIR/tokens.md`:")
@@ -1903,6 +1907,28 @@ class ContractTest(unittest.TestCase):
         self.assertLess(digester.index("**Token sinks**, "), digester.index("**Escapes**, **Backlog fallback**"))
         self.assertIn("**Escapes**, **Backlog fallback**, **New skill**, **Processes** and **Waste** read `notes.md`",
                       digester)
+
+    def test_digest_tokens_per_line_contract(self):
+        """Job 1251: digest-start runs under a 600000 ms Bash timeout (its transcript read takes ~10 s a day), and the
+        reader reads tokens.md's Window and carries each flagged job's tokens per added line into ## Token sinks."""
+        step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))
+        self.assertTrue(step1.startswith("1. Run `B digest-start` (Bash timeout 600000). Under the board lock"), step1)
+        last = step1[step1.rindex(". ", 0, len(step1) - 1) + 2:]
+        tokens = last[last.index("`$D/tokens.md`"):]
+        for phrase in ("since the earliest claimed job was created (at most 7 days back)", "its tokens per added line"):
+            self.assertIn(phrase, tokens, phrase)
+        self.assertNotIn("over the last 7 days of transcripts", step1)
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        read = reader[reader.index("**Read**"):reader.index("**Look for repeats.**")]
+        line = read[read.index("- `DIGEST_DIR/tokens.md`, read once per digest"):]
+        line = line[:line.index("\n")]
+        for phrase in ("transcripts in its `Window:` line", "· <per line> tokens per added line`",
+                       "then `- <id> · no transcript rows`", "one of 2 or more agents over 40% of the job"):
+            self.assertIn(phrase, line, phrase)
+        self.assertNotIn("from the last 7 days", line)
+        rule = reader[reader.index("For `## Token sinks`, use `DIGEST_DIR/tokens.md`:"):]
+        rule = rule[:rule.index("\n\n")]
+        self.assertIn("`<per line>` is copied from the job's `## Jobs` line as written, never recomputed", rule)
 
     def test_digest_reads_trevor(self):
         step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))
