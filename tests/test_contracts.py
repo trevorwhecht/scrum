@@ -1879,8 +1879,8 @@ class ContractTest(unittest.TestCase):
         line = line[:line.index("\n")]
         for phrase in ("`## Jobs`", "`## Flagged`", "`No transcript rows"):
             self.assertIn(phrase, line, phrase)
-        self.assertIn("    ## Token sinks\n    - <job id> — $<usd> — <x.x>x lane median or - — cause: <one line> — "
-                      "needed|not needed — source: <file>\n", reader)
+        self.assertIn("    ## Token sinks\n    - <job id> — $<usd> — <x.x>x lane median or - — <per line> tokens per added "
+                      "line — cause: <one line> — needed|not needed — source: <file>\n", reader)
         self.assertLess(reader.index("    ## Waste\n"), reader.index("    ## Token sinks\n"))
         self.assertLess(reader.index("    ## Token sinks\n"), reader.index("    ## Escapes\n"))
         start = reader.index("For `## Token sinks`, use `DIGEST_DIR/tokens.md`:")
@@ -1903,6 +1903,28 @@ class ContractTest(unittest.TestCase):
         self.assertLess(digester.index("**Token sinks**, "), digester.index("**Escapes**, **Backlog fallback**"))
         self.assertIn("**Escapes**, **Backlog fallback**, **New skill**, **Processes** and **Waste** read `notes.md`",
                       digester)
+
+    def test_digest_tokens_per_line_contract(self):
+        """Job 1251: digest-start runs under a 600000 ms Bash timeout (its transcript read takes ~10 s a day), and the
+        reader reads tokens.md's Window and carries each flagged job's tokens per added line into ## Token sinks."""
+        step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))
+        self.assertTrue(step1.startswith("1. Run `B digest-start` (Bash timeout 600000). Under the board lock"), step1)
+        last = step1[step1.rindex(". ", 0, len(step1) - 1) + 2:]
+        tokens = last[last.index("`$D/tokens.md`"):]
+        for phrase in ("since the earliest claimed job was created (at most 7 days back)", "its tokens per added line"):
+            self.assertIn(phrase, tokens, phrase)
+        self.assertNotIn("over the last 7 days of transcripts", step1)
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        read = reader[reader.index("**Read**"):reader.index("**Look for repeats.**")]
+        line = read[read.index("- `DIGEST_DIR/tokens.md`, read once per digest"):]
+        line = line[:line.index("\n")]
+        for phrase in ("transcripts in its `Window:` line", "· <per line> tokens per added line`",
+                       "then `- <id> · no transcript rows`", "one of 2 or more agents over 40% of the job"):
+            self.assertIn(phrase, line, phrase)
+        self.assertNotIn("from the last 7 days", line)
+        rule = reader[reader.index("For `## Token sinks`, use `DIGEST_DIR/tokens.md`:"):]
+        rule = rule[:rule.index("\n\n")]
+        self.assertIn("`<per line>` is copied from the job's `## Jobs` line as written, never recomputed", rule)
 
     def test_digest_reads_trevor(self):
         step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))
