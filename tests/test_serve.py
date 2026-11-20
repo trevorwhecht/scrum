@@ -3541,9 +3541,29 @@ class ServeTest(unittest.TestCase):
         self.assertRegex(job["runlog"], rf"^runs/\d{{8}}-\d{{6}}-start-{job_id}\.log$")
         self.assertEqual(job["runlog"], self.serve.RUNS[f"repo/{job_id}"]["log"])
 
+    def test_spawn_live_session_refusal_starts_nothing(self):
+        """Job 1275: board.spawn's live-session refusal is "not started": None, one stderr line, no traceback, no RUNS
+        entry, and nothing queued (play_queue_tick would retry it every tick); a queued launch it refused is dropped."""
+        job_id = self.job("already running", "stage=build")
+        self.patch_board(job_id, pid=4242, play_queued="2026-11-19T10:00:00+00:00",
+                         queued_launch={"action": "resume", "prompt": "x", "stage": "build"})
+        err = io.StringIO()
+        with mock.patch.object(self.serve.board, "session_alive_fn", return_value=lambda job: True), \
+                mock.patch.object(self.serve.subprocess, "Popen") as popen, contextlib.redirect_stderr(err):
+            for action in ("resume", "cloud-home"):  # a GATED launch, and one past the gate
+                self.assertIsNone(self.serve.spawn("repo", self.root, job_id, action, "x"), action)
+        popen.assert_not_called()
+        self.assertFalse(self.serve.running("repo", job_id))
+        self.assertEqual(err.getvalue().splitlines(), [
+            f"spawn refused: repo/{job_id} resume: job {job_id} already has a live session (pid 4242)",
+            f"spawn refused: repo/{job_id} cloud-home: job {job_id} already has a live session (pid 4242)"])
+        job = self.stage_of(job_id)
+        self.assertEqual([k for k in ("play_queued", "queued_launch", "runlog") if k in job], [])
+
     def test_spawn_clears_stale_tty(self):
         job_id = self.job("was interactive", "tty=ttys004")
-        with mock.patch.object(self.serve.subprocess, "Popen"):
+        with mock.patch.object(self.serve.subprocess, "Popen"), \
+                mock.patch.object(self.serve.board, "session_alive_fn", return_value=lambda job: False):  # not this Mac's ttys004
             rel = self.serve.spawn("repo", self.root, job_id, "approve", "x")
         self.addCleanup(self.serve.RUNS.pop, f"repo/{job_id}", None)
         job = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)

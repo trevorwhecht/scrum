@@ -157,7 +157,8 @@
   board.py spawn <id> <action> ["<prompt>"] [--model M]  start a detached headless `claude -p <prompt>` (default
                                    "/trevskills-scrum <action> <id>") from the repo, logging to runs/; start/resume get the
                                    Orchestrator model unless --model; set the job's runlog (ignored when <id> is not on the
-                                   board), print {"log","pid"}
+                                   board), print {"log","pid"}; a board job whose session is alive (not this caller's)
+                                   starts nothing and exits 1: "job <id> already has a live session (pid N)"
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
   board.py fable-ok <id> <planner|spec-writer>  print the Agent model override (claude-fable-5-1) or none: the planner, or
                                    the spec-writer on lane standard (or unset), of a complex job (header `Complex: yes`
@@ -7532,10 +7533,11 @@ def _is_claude(command):
     return bool(toks) and (os.path.basename(toks[0]) == "claude" or "claude" in toks or "claude-code" in command)
 
 
-def session_alive_fn():
+def session_alive_fn(skip: int | None = None):
     """One `ps` scan; a job is alive when a claude process line has its id, or when its recorded claude pid is live
     (a job with no pid: when a claude process runs on its recorded tty). When ps can't be read, every job counts as
-    alive, so the watchdog never flags on a guess."""
+    alive, so the watchdog never flags on a guess. `skip` (spawn's caller, job 1275) is a claude pid whose line is left
+    out: the calling session never counts as the job's live session."""
     try:
         r = subprocess.run(["ps", "-axo", "pid=,tty=,command="], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
@@ -7543,7 +7545,8 @@ def session_alive_fn():
     out = r.stdout or ""
     if r.returncode != 0 or not out.strip():  # denied (a sandboxed call) or empty: unknown, never "all dead"
         return lambda job: True
-    lines = [l.strip() for l in out.splitlines() if _is_claude((l.split(None, 2) + ["", ""])[2])]  # drop pid and tty
+    lines = [l.strip() for l in out.splitlines() if _is_claude((l.split(None, 2) + ["", ""])[2])  # drop pid and tty
+             and not (skip and l.split()[0] == str(skip))]
     pids = {int(l.split()[0]) for l in lines if l.split()[0].isdigit()}
     ttys = {l.split()[1] for l in lines if len(l.split()) > 1}
     # ponytail: a reused tty (pid-less jobs only), a recycled claude pid, or an id inside another command reads as
@@ -8301,7 +8304,7 @@ def main(argv=None):
     elif a.cmd == "prod-ok":
         print(cmd_prod_ok(a.dir, a.id, a.bullet))
     elif a.cmd == "spawn":
-        proc, log = spawn(a.dir, a.id, a.action, a.prompt, model=a.model)
+        proc, log = spawn(a.dir, a.id, a.action, a.prompt, model=a.model, caller=caller_claude_pid())
         print(json.dumps({"log": log, "pid": proc.pid}))
     elif a.cmd == "backlog-spec":
         out = cmd_backlog_spec(a.dir, a.id)
@@ -8491,9 +8494,17 @@ def spawn_settings(config_dir: Path, repo: Path) -> str:
     return json.dumps(settings)
 
 
+class LiveSession(SystemExit):
+    """spawn's refusal (job 1275): the job already has a live session, so a second one would fight it."""
+
+
 def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags=("--permission-mode", "acceptEdits"),
-          model: str | None = None, account: str | None = None, nice: int = SESSION_NICE) -> tuple[subprocess.Popen, str]:
+          model: str | None = None, account: str | None = None, nice: int = SESSION_NICE,
+          caller: int | None = None) -> tuple[subprocess.Popen, str]:
     """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/, and set the job's runlog and account.
+    A job on the board whose session reads alive (session_alive_fn, ps unreadable counting as alive) launches nothing:
+    LiveSession (a SystemExit) names it. `caller` (`B spawn`'s caller_claude_pid) is left out of that scan, so the job's
+    own session may hand it off (a lilguy hand-off, a cloud-home auto-migrate). A job not on the board is never checked.
     start/resume/run-all/cloud-home get `--model <Orchestrator model>` (or `<Big ticket model>`, see orchestrator_model) unless `model` is given.
     `account` None: pick_account, preferring the job's recorded account; with none free, the one whose limit ends soonest
     (the recorded account on a tie), else the first (Trevor's Play and Resume are never refused on usage). Any account but the first runs with
@@ -8515,6 +8526,9 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         job = find(read_board(root), job_id)
     except (SystemExit, OSError):  # not on the board (run-all, digest, weekly), or no board yet
         job = {}
+    if job and session_alive_fn(skip=caller)(job):  # job 1275: two sessions on one job fight over its worktree
+        pid = job.get("pid") if job.get("pid") != caller else None  # the caller's own pid is not the live one
+        raise LiveSession(f"job {job_id} already has a live session (pid {pid or 'unknown'})")
     if account is None:
         recorded = job.get("account")
         if recorded and str(job.get("reset") or "").isdigit() and time.time() >= int(job["reset"]):
