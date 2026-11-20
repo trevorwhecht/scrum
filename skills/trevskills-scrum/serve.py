@@ -1185,6 +1185,56 @@ def e2e_full_from_log(repo, root, rec) -> dict | None:
     return new
 
 
+def e2e_full_stop_new_servers(repo, before, wait=5.0) -> list[int]:
+    """Stop the listeners a full run left on the main checkout (job 1252): its Playwright webServer `next dev` can
+    outlive the run and hold the Next dev lock, so the next run's dev server exits early. Signals each board.listeners()
+    pid whose cwd is repo or under it, outside <repo>/.claude/worktrees/ (job worktrees), and absent from before (the
+    pre-run listeners() snapshot, by pid, so Trevor's own server survives); never a pid also on a board.KEEP_PORTS
+    port, never this process. SIGTERM, then SIGKILL for each pid still alive after polling every 0.25 s for wait
+    seconds, as board.stop_worktree_servers does (it refuses the main checkout). Returns the pids sent SIGTERM; never
+    raises, so a failure here never changes the run's result."""
+    try:
+        repo = os.path.realpath(repo)
+        wts = os.path.join(repo, ".claude", "worktrees")
+        listening = board.listeners()
+        keep = ({pid for pid, _, _ in before} | {pid for pid, port, _ in listening if port in board.KEEP_PORTS}
+                | {os.getpid()})
+        killed = []
+        for pid, _, cwd in listening:
+            if (pid in keep or pid in killed or not (cwd == repo or cwd.startswith(repo + os.sep))
+                    or cwd == wts or cwd.startswith(wts + os.sep)):
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed.append(pid)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        def gone(pid):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                pass
+            return False
+        alive = list(killed)
+        for _ in range(int(wait / 0.25)):
+            if not alive:
+                break
+            time.sleep(0.25)
+            alive = [pid for pid in alive if not gone(pid)]
+        for pid in alive:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        return killed
+    except (OSError, ValueError, TypeError) as e:
+        print(f"e2e_full_stop_new_servers: {e}", file=sys.stderr)
+        return []
+
+
 def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
     """Run cmd in repo through buildlock.py on the E2E lock (output to root/e2e-full.log), record the result in
     root/e2e-full.json and add one backlog item per failing spec not already on an open line, or one combined item
@@ -1200,6 +1250,7 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
         env = {**os.environ, "SCRUM_BUILD_LOCK": str(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock")}
         log = root / "e2e-full.log"
         loads = []
+        before = board.listeners()
         try:
             with open(log, "w") as f:
                 proc = subprocess.Popen([sys.executable, str(Path(buildlock.__file__).resolve()), cmd], cwd=repo,
@@ -1218,6 +1269,8 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
             output = log.read_text(errors="replace")
         except OSError as e:
             code, output = -1, str(e)
+        finally:
+            e2e_full_stop_new_servers(repo, before)
         test_dir = board._e2e_dir(Path(repo))
         failed = e2e_full_failures(output, test_dir) if code else []
         loaded = code != 0 and any((load or 0) > board.MAX_CPU_LOAD_PCT for load in loads)
@@ -1811,11 +1864,12 @@ def shop_tick(project, repo, root) -> bool:
     this Mac's machine guard (machine_ok, cpu_hot) is holding it; this Mac keeps launching its own work, and the claim
     (cmd_ready shop= for a child, the stage-cloud mark with expect= for a launch) stops both taking one job
     (held_work: a queued `start` launch or a waiting child; never paused, board.shop_excluded (lilguy: board lane,
-    `Lane: lilguy` anywhere in feature.md, or lilguy-fit.json fit true with no parent or a Run-all parent; or naming a
-    digest proposals.json), setup pending, nor any job of a board.shop_project_excluded project (a `- Base branch:` line
-    or docker in project.md), nor a launch whose files are not clear_of_busy(busy_files), checked only when the pool
-    holds a launch) to the first shop_worker() worker (out of backoff, room, ready, an account; later workers are not
-    probed). This Mac's cool-down does not stop the shop; a worker's own does (shop_worker).
+    `Lane: lilguy` anywhere in feature.md, or lilguy-fit.json fit true with no parent or a Run-all parent, unless this
+    Mac's gates have held it over 2 h, board.SHOP_LILGUY_HELD_SECS; or naming a digest proposals.json), setup pending,
+    nor any job of a board.shop_project_excluded project (a `- Base branch:` line or docker in project.md), nor a
+    launch whose files are not clear_of_busy(busy_files), checked only when the pool holds a launch) to the first
+    shop_worker() worker (out of backoff, room, ready, an account; later workers are not probed).
+    This Mac's cool-down does not stop the shop; a worker's own does (shop_worker).
     A job tagged Runs on main (board.tag_runs_on; Jev is asked, if at all, only here, with a worker free) is never sent: it is skipped and the next one is tried (job 1155). A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
     profile_copy and start run on that worker; a failed step puts a claimed child back to waiting, prints one
     `shop: <project>: <id>: <step> failed on <alias>` line and holds that worker for SHOP_RETRY_EVERY. With nothing in

@@ -101,11 +101,11 @@ For `## Builder model`, use the `jev.log` of every job read:
 
 For `## Repeated questions`, read every `JOBS_DIR/../questions.log` line inside the 7-day cutoff above, not only the jobs in `jobs.txt`:
 - A line that is not valid JSON, or has neither `question` nor `pick`, is skipped.
-- Skip a line with `"auto": true`, every line whose `kind` is `stall`, `machine` or `refused` (serve.py clears those itself and `## Stops` counts them), and every `Terminal batch: project .claude edits` ask and its pick: `SKILL.md` `## Lilguy lane` already makes `Run it in a Terminal window` its default.
+- Skip a line with `"auto": true`, every line whose `kind` is `stall`, `machine` or `refused` even when it also has a `question` (serve.py clears those itself and `## Stops` counts them), and every `Terminal batch: project .claude edits` ask and its pick: `SKILL.md` `## Lilguy lane` already makes `Run it in a Terminal window` its default.
 - Join each ask line to the next pick line for the same job that comes after it in the file, unless that job asks a different normalised question first: a pick never answers an earlier, different question. An ask with no later pick still counts as asked, with pick `unanswered`; an `unanswered` pick never wins.
 - Group picks by label after trimming and lowercasing.
 - Normalise question text before grouping: lowercase it, then strip numbers, job ids, branch names, file paths and commit hashes.
-- List every normalised question asked 3 or more times (count ask lines, not jobs), sorted by count, highest first. Add ` — DEFAULT: <label>` when one pick won 3 or more times, and ` (unanimous)` after it when that same pick won every time.
+- List every normalised question asked 3 or more times (count ask lines, not jobs) with at least one ask dated after the `Since:` line in `DIGEST_DIR/trevor.md` (any date counts when that line is missing), sorted by count, highest first. Add ` — DEFAULT: <label>` when one pick won 3 or more times, and ` (unanimous)` after it when that same pick won every time.
 - This section is exempt from the 2 or more different jobs rule. Write `None` when no question qualifies.
 
 For `## Recurring blockers`, read every `JOBS_DIR/../questions.log` line inside the 7-day cutoff above, not only the jobs in `jobs.txt`:
@@ -120,9 +120,9 @@ For `## Stops`, read this project's questions.log only and its `scrum/runs/` fil
 - Group stops by cause: the leading phrase of `reason`, or of `question` when `reason` is missing. Causes include "Hard stop: agent rules", "stalled in build", "Uncommitted change", "main checkout is on", "swap used", "cannot resume yet" (logged as `can't resume yet`), "spec writer too big", "bigboy review GAPS" and "blocked on sibling".
 - One table row per cause, sorted by count, highest first. Count is the number of stop lines. Jobs holds up to 3 example job ids, separated by `, `.
 - Picks holds `<label> <n>` entries separated by `, `. A stop's pick is the next pick line for the same job after it, as in `## Repeated questions`. With no pick line, the pick is `resume` only when a `resume` run log for that job has a name timestamp later than that stop's `date` (both UTC), else `unanswered`.
-- Automate is `yes` only when Count is 2 or more, no pick is `unanswered`, and every pick is the same label after trimming and lowercasing; otherwise `no`.
+- Automate is `yes` only when Count is 2 or more, no pick is `unanswered`, every pick is the same label after trimming and lowercasing, and at least one stop is dated after the `Since:` line in `DIGEST_DIR/trevor.md` (any date counts when that line is missing); otherwise `no`.
 - Automate is always `no` for a cause whose stops are all `refused` lines: a refusal is serve.py's resume gate, not a question, and the pick line after it answers a different question.
-- Automate is always `no` for a cause whose stops are all `refused` lines: a refusal is serve.py's resume gate, not a question, and the pick line after it answers a different question.
+- Automate is always `no` for a cause whose stops all carry `"auto": true`: serve.py already cleared them with no question to Trevor.
 - This section is exempt from the 2 or more different jobs rule. Write `None` under it, with no table, when there are no stops.
 
 When `jobs.txt` is empty (a digest started by questions.log growth), still write notes.md: `Jobs read: 0`, `None` under every job-based section, and the `## Repeated questions` and `## Stops` sections filled as usual.

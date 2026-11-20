@@ -8770,6 +8770,56 @@ class RenderPathsTest(unittest.TestCase):
         self.pfile.write_text("# Project\n")
         self.assertEqual(board.render_paths(self.repo, "main", self.pfile), {"paths": [], "skipped": []})
 
+    def spec(self, text):
+        f = Path(self.tmp.name) / "spec.md"
+        f.write_text(text)
+        return f
+
+    def test_render_paths_adds_spec_render_path(self):
+        self.commit("src/components/Price.tsx")
+        spec = self.spec("# S\nRender path: `/quoteBuilder?orderId=42`\nnot a Render path: /nope\n")
+        self.assertEqual(board.render_paths(self.repo, "main", self.pfile, spec),
+                         {"paths": ["/pricing", "/quoteBuilder?orderId=42"], "skipped": []})
+        spec = self.spec("- render PATH: /a?x=1, `/b?y=2` /c\n")
+        self.assertEqual(board.render_paths(self.repo, "main", self.pfile, spec)["paths"],
+                         ["/pricing", "/a?x=1", "/b?y=2", "/c"])
+
+    def test_render_paths_skips_spec_placeholder(self):
+        self.commit("src/components/Price.tsx")
+        spec = self.spec("Render path: /quoteBuilder?orderId=<a real dev id>, /order/[id], /q?id=<quote>\n")
+        self.assertEqual(board.render_paths(self.repo, "main", self.pfile, spec),
+                         {"paths": ["/pricing"], "skipped": ["/quoteBuilder?orderId=<a real dev id>: needs a real id",
+                                                             "/order/[id]: needs a real id",
+                                                             "/q?id=<quote>: needs a real id"]})
+
+    def test_render_paths_dedupes_spec_paths(self):
+        self.commit("src/components/Price.tsx")
+        spec = self.spec("Render path: /pricing, /a?x=1\n- Render path: `/a?x=1`\n")
+        self.assertEqual(board.render_paths(self.repo, "main", self.pfile, spec),
+                         {"paths": ["/pricing", "/a?x=1"], "skipped": []})
+
+    def test_render_paths_caps_spec_paths(self):
+        self.commit(*[f"src/app/p{i}/page.tsx" for i in range(1, 8)])
+        spec = self.spec("Render path: /x?a=1, /y?b=2\n")
+        out = board.render_paths(self.repo, "main", self.pfile, spec)
+        self.assertEqual(out["paths"], ["/p1", "/p2", "/p3", "/p4", "/p5", "/p6", "/p7", "/x?a=1"])
+        self.assertEqual(out["skipped"], ["/y?b=2: over the 8-page cap"])
+
+    def test_render_paths_without_spec_file(self):
+        self.commit("src/components/Price.tsx")
+        missing = Path(self.tmp.name) / "no-spec.md"
+        self.assertEqual(board.render_paths(self.repo, "main", self.pfile, missing),
+                         {"paths": ["/pricing"], "skipped": []})
+        self.assertEqual(board.render_paths(self.repo, "main", self.pfile, None),
+                         {"paths": ["/pricing"], "skipped": []})
+        self.assertEqual(board.render_paths(self.repo, "main", self.pfile, self.spec("# no lines\n")),
+                         {"paths": ["/pricing"], "skipped": []})
+
+    def test_render_paths_spec_path_replaces_root_fallback(self):
+        self.commit("src/components/Orphan.tsx")
+        self.assertEqual(board.render_paths(self.repo, "main", self.pfile, self.spec("Render path: /q?id=7\n")),
+                         {"paths": ["/q?id=7"], "skipped": []})
+
     def test_render_paths_cli(self):
         self.assertIn("render-paths <id>", board.__doc__)
         env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "no-projects.json")})
@@ -8786,6 +8836,10 @@ class RenderPathsTest(unittest.TestCase):
         r = run_board("--dir", str(root), "render-paths", job)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), {"paths": ["/pricing"], "skipped": []})
+        (root / "jobs" / job / "spec.md").write_text("# Render\nRender path: `/quoteBuilder?orderId=42`\n")
+        r = run_board("--dir", str(root), "render-paths", job)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"paths": ["/pricing", "/quoteBuilder?orderId=42"], "skipped": []})
 
 
 class UiSweepScreensTest(unittest.TestCase):

@@ -213,12 +213,13 @@ class StopBox(unittest.TestCase):
             j({{stage: "needs-human", reason: "blocked: x", question: "Ship /a/b/spec.md now?"}}),
             j({{waiting: "permission: Bash"}}), j({{stage: "waiting", setup: "pending"}}),
             j({{}}), j({{stage: "spec"}}), j({{stage: "cloud"}}), j({{stage: "waiting"}}), j({{stage: "odd"}}),
-            j({{updatedAt: new Date(Date.now() + 60000).toISOString()}})].map(statusLine));""")
+            j({{updatedAt: "garbage"}}), j({{updatedAt: undefined}})].map(statusLine).concat([clock(new Date(at))]));""")
+        c = got.pop()
         self.assertEqual(got, ["Done", "Aborted", "Waiting on 9 (x)", "Paused by you", "Paused by you", "Waiting on 222, 223 (shares SKILL.md)",
                                "Waiting: can't resume yet: 222.", "Waiting on you: The migration drops a column.",
                                "Waiting on you: Ship spec.md now?", "Waiting on you: permission: Bash",
-                               "Waiting on you: setup", "Building, 12 min", "Writing spec, 12 min", "Running in cloud, 12 min",
-                               "Queued, 12 min", "odd, 12 min", "Building, 0 min"])
+                               "Waiting on you: setup", f"Building, started {c}", f"Writing spec, started {c}", f"Running in cloud, started {c}",
+                               f"Queued, started {c}", f"odd, started {c}", "Building", "Building"])
         for line in got:
             self.assertNotIn("/", line)
         text = DASHBOARD.read_text()
@@ -322,11 +323,12 @@ class StopBox(unittest.TestCase):
             raise unittest.SkipTest("node not on PATH")
         text = DASHBOARD.read_text()
         tick = text[text.index("const tickAgo = "):text.index("const paused = ")]
-        got, = js(f"""const ago = () => ""; const card = {{textContent: "Building, 0 min", parentElement: {{dataset: {{key: "p/1"}}}}}};
+        got, = js(f"""const ago = () => ""; const card = {{textContent: "x", parentElement: {{dataset: {{key: "p/1"}}}}}};
             document.querySelectorAll = s => s.includes(".status") ? [card] : [];
             jobs = [{{key: "p/1", stage: "build", updatedAt: new Date(Date.now() - 7 * 60000 - 5000).toISOString()}}];
-            els.viewer.dataset.key = "p/1"; {tick}; tickAgo(); out([card.textContent, els.viewerStatus.textContent]);""")
-        self.assertEqual(got, ["Building, 7 min", "Building, 7 min"])
+            els.viewer.dataset.key = "p/1"; {tick}; tickAgo(); out([card.textContent, els.viewerStatus.textContent, clock(new Date(jobs[0].updatedAt))]);""")
+        self.assertEqual(got[:2], [f"Building, started {got[2]}"] * 2)
+        self.assertNotIn("min", got[0])
 
     def test_note_textarea_16px_on_mobile(self):
         text = DASHBOARD.read_text()

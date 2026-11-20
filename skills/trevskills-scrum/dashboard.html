@@ -490,7 +490,7 @@ const ago = at => {
   const s = Math.max(0, Math.round(Date.now() / 1000 - at));
   return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`;
 };
-// Also re-runs statusLine on cards and the modal, so "Building, N min" advances with no board change.
+// Also re-runs statusLine on cards and the modal, so the status text refreshes with no board change.
 const tickAgo = () => {
   document.querySelectorAll("[data-at]").forEach(el => { el.textContent = ago(+el.dataset.at); });
   document.querySelectorAll(".card[data-key] > .status").forEach(el => {
@@ -1235,7 +1235,7 @@ const statusLine = job => !job.waitingOn && job.play_queued && job.ram_hold && !
   : job.e2eWait ? e2eWaitLine(job.e2eWait)
   : job.buildLockWait ? "Waiting for the build lock"
   : job.shopWait ? "Waiting for a shop Mac slot"
-  : `${job.stage === "cloud" && job.shop ? "Running on shop Mac" : VERBS[job.stage] || job.stage}, ${Math.max(0, Math.floor((Date.now() - Date.parse(job.updatedAt)) / 60000)) || 0} min`);
+  : `${job.stage === "cloud" && job.shop ? "Running on shop Mac" : VERBS[job.stage] || job.stage}${Number.isNaN(Date.parse(job.updatedAt)) ? "" : `, started ${clock(new Date(job.updatedAt))}`}`);
 
 // The modal subtitle: the red stop box already holds the full reason, so a needs-human job with the box shows only its short title.
 const modalStatus = job => {
