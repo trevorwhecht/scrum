@@ -2175,6 +2175,17 @@ class ContractTest(unittest.TestCase):
         for name in ("cmd_weekly_start", "weekly_tick", "weekly_ask", "WEEKLY_LATE_SECS", "weekly_apply"):
             self.assertIn(name, flow, name)
 
+    def test_digester_global_files_name_home_claude_md(self):
+        """Job 1309: the chat rules moved to ~/Developer/home/CLAUDE.md, so both global-file lists name it."""
+        digester = (ROOT / "agents" / "scrum-digester.md").read_text()
+        home = "`/Users/trevorhecht/Developer/home/CLAUDE.md`"
+        land = next(l for l in digester.splitlines() if l.startswith("How they land, so you can judge"))
+        self.assertIn(f"An edit to a global file (`~/.claude/CLAUDE.md`, {home}, `~/.claude/rules/`, memory)", land)
+        weekly = next(l for l in digester.splitlines() if l.startswith("- Propose only kind `edit`"))
+        self.assertIn(f"or a global file: `~/.claude/CLAUDE.md`, {home} (the chat rules: routing, lanes, Summary "
+                      "format)", weekly)
+        self.assertIn(f"Routing or reply-format text lives in {home}, not in `~/.claude/CLAUDE.md`.", weekly)
+
     def test_digest_stops_table_parses(self):
         sample = ("DIGEST NOTES\nJobs read: 0\n## Repeated questions\nNone\n## Stops\n"
                   "| Cause | Count | Jobs | Picks | Automate |\n|---|---|---|---|---|\n"
