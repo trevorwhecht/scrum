@@ -2787,6 +2787,14 @@ class ContractTest(unittest.TestCase):
                        "<paths>` with Bash timeout 600000"):
             self.assertIn(phrase, lane, phrase)
         self.assertNotIn('"$REPO/<path>"', lane)
+        step1 = next(l for l in lane.splitlines() if l.startswith("1. **Dev server.**"))
+        install = "**Install.** When the lockfile changed between `targets.json` `since` and `head`"
+        for phrase in (install, "run PROJECT's `Install:` command in `REPO` first",
+                       "`git -C \"$REPO\" diff --quiet <since> <head> -- <lockfile>`", "unchanged lockfile skips the install",
+                       "No server of this sweep is running yet",
+                       "A failed install does not stop the sweep: append its output to `SWEEP_DIR/dev.log` and go on to the dev server and its **Probe**"):
+            self.assertIn(phrase, step1, phrase)
+        self.assertLess(step1.index(install), step1.index("**Shared dev server**"))
         review = (SKILL_DIR / "lanes" / "review.md").read_text()
         self.assertIn("When run for a sweep (`lanes/uisweep.md` step 2), `<path>` is the resolved `$REPO/<rest>` path", review)
         self.assertLess(lane.index("render.py"), lane.index("Spawn `scrum-review-ui`"))
