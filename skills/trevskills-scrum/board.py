@@ -816,6 +816,34 @@ def take_spec(root, text, job_id):
         os.replace(src, Path(root) / "jobs" / job_id / "spec.md")
 
 
+E2E_FULL_MAIN = "E2E full suite on main"
+
+
+def e2e_full_duplicate(board, jobs_dir, text, job_id):
+    """The id of another live board job (not job_id, nor job_id's parent; stage not done or aborted) whose title or
+    feature.md names a spec path in text, when text starts with E2E_FULL_MAIN (a trailing `:<line>` ignored); else
+    None. The same test as serve.py e2e_full_owned, run at claim time (job 1301). Caller holds the lock."""
+    text = str(text or "").lstrip()
+    if not text.startswith(E2E_FULL_MAIN):
+        return None
+    specs = set(re.findall(r"e2e/\S+?\.spec\.ts", text))
+    if not specs:
+        return None
+    jobs = [j for j in board.get("jobs") or [] if isinstance(j, dict)]
+    parent = next((j.get("parent") for j in jobs if j.get("id") == job_id), None)
+    for job in jobs:
+        if job.get("id") in (job_id, parent) or job.get("stage") in ("done", "aborted"):
+            continue
+        seen = str(job.get("title") or "")
+        try:
+            seen += "\n" + (Path(jobs_dir) / str(job.get("id")) / "feature.md").read_text(errors="replace")
+        except OSError:
+            pass
+        if any(spec in seen for spec in specs):
+            return job.get("id")
+    return None
+
+
 def claim_item(lines, item, job_id):
     """Mark one backlog item claimed by job_id in lines. Caller holds the lock and writes the backlog once."""
     item["done"], item["job"] = True, job_id
@@ -853,6 +881,9 @@ def cmd_next(root, index=None, shop=None):
         take_spec(root, item["text"], job_id)
         claim_item(lines, item, job_id)
         write_backlog(root, lines)
+        if twin := e2e_full_duplicate(board, Path(root) / "jobs", item["text"], job_id):
+            abort_job(root, find(board, job_id), False, f"duplicate of {twin}")  # job 1301: the line stays claimed
+            return {"id": None, "feature": None}
         return {"id": job_id, "feature": item["text"]}
 
 
@@ -6324,6 +6355,13 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
                 k.pop("overlap_hold", None)
                 for dep in undone:
                     note_queue_gate(root, k["id"], f"depends_on:{dep}")
+                continue
+            try:
+                feature = (jobs_dir / k["id"] / "feature.md").read_text(errors="replace")
+            except OSError:
+                feature = ""
+            if twin := e2e_full_duplicate(board, jobs_dir, feature, k["id"]):  # job 1301: never claimed, never ready
+                abort_job(root, k, False, f"duplicate of {twin}")
                 continue
             k_slots, k_outside = (held_by(slots), held_by(outside)) if critical(k) else (slots, outside)
             skipped = []
