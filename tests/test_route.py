@@ -291,5 +291,16 @@ class RouteTests(unittest.TestCase):
                 self.assertEqual(route_mod.codex_limits(), none, body)
 
 
+class CodexInstalledTest(unittest.TestCase):
+    def test_codex_installed_searches_local_bin(self):
+        seen = []
+        with tempfile.TemporaryDirectory() as home, \
+                patch.dict(os.environ, {'HOME': home, 'PATH': '/usr/bin:/bin'}), \
+                patch.object(route_mod.shutil, 'which', lambda name, path=None: seen.append((name, path)) or None):
+            self.assertFalse(route_mod._codex_installed())
+        self.assertEqual(seen, [('codex', f'/usr/bin:/bin:/opt/homebrew/bin:{home}/.local/bin')])
+        self.assertTrue(seen[0][1].endswith(f':/opt/homebrew/bin:{home}/.local/bin'))  # the shop Mac's npm prefix
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -318,9 +318,10 @@ class ContractTest(unittest.TestCase):
     def test_code_reviewer_codex_path_includes_homebrew(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         line = next(l for l in text.splitlines() if "codex exec review --base" in l)
-        self.assertEqual(line, '    cd "$WORKTREE" && export PATH="$PATH:/opt/homebrew/bin" && START=$(date +%s) '
-                               '&& codex exec review --base "$BASE" -m gpt-6.1-sol \\')
-        self.assertIn('export PATH="$PATH:/opt/homebrew/bin"', line)
+        self.assertEqual(line, '    cd "$WORKTREE" && export PATH="$PATH:/opt/homebrew/bin:$HOME/.local/bin" '
+                               '&& START=$(date +%s) && codex exec review --base "$BASE" -m gpt-6.1-sol \\')
+        self.assertIn('First run `export PATH="$PATH:/opt/homebrew/bin:$HOME/.local/bin"; command -v codex`.', text)
+        self.assertNotIn('export PATH="$PATH:/opt/homebrew/bin"', text)  # the shop Mac's codex is in ~/.local/bin
         self.assertNotIn('cd "$WORKTREE" && START=$(date +%s)', text)
 
     def test_code_reviewer_codex_never_uses_timeout(self):

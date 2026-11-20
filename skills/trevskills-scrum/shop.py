@@ -16,8 +16,9 @@ ssh's own failure as 255.
 probe() is one cached round trip that prints nothing when the shop Mac sleeps. setup(), ready(), env_copy(),
 profile_copy() and md_sync() never print a secret or remote output. Dispatch (serve.py's shop_tick and cloud_tick) uses
 clone() to clone or fast-forward a project in ~/scrum-work, profile_copy() to give that clone this Mac's project.md and
-Render auth file, start() to launch a headless cloud-job session there (the prompt only on stdin) and ended() to read a
-finished session's log tail. See lanes/shop.md.
+Render auth file (and the shop's home the out-of-repo Conventions files that project.md names), start() to launch a
+headless cloud-job session there (the prompt only on stdin) and ended() to read a finished session's log tail. See
+lanes/shop.md.
 """
 import argparse, io, json, os, posixpath, re, shlex, subprocess, sys, tarfile, time
 from collections import namedtuple
@@ -66,7 +67,13 @@ GH_LOGIN = ("gh auth login --hostname github.com --git-protocol https --with-tok
 # /usr/bin/python3: a bare python3 under PATH_PREFIX is uv's externally-managed one, which refuses pip install --user.
 RUFF_CHECK = "command -v ruff"
 RUFF_INSTALL = 'PYTHONUSERBASE="$HOME/.local" /usr/bin/python3 -m pip install --user -q ruff'
-OPTIONAL_STEPS = {"ruff"}  # a failed step here never holds a dispatch; setup() still prints and returns its real result
+# Codex CLI for scrum-review-code's second review, at this Mac's version so both Macs run the same Codex. --prefix: the
+# shop's npm prefix is node's own share dir, so a plain `npm i -g` would put the bin outside ~/.local/bin.
+CODEX_VERSION = "0.166.0"
+CODEX_CHECK = "command -v codex"
+CODEX_INSTALL = 'npm install -g --prefix "$HOME/.local" @openai/codex@' + CODEX_VERSION
+# A failed step here never holds a dispatch; setup() still prints and returns its real result.
+OPTIONAL_STEPS = {"ruff", "codex", "codex login"}
 GIT_HELPER = "git config --global --get-all credential.https://github.com.helper"
 
 # Entries of this Mac's ~/.claude-owa that are links into ~/.claude (read 2026-11-17); its credentials are not.
@@ -78,6 +85,10 @@ SHOP_ACCOUNTS = {"main": None, "owa": "$HOME/.claude-owa"}  # account: its CLAUD
 ACCOUNT_CHECK = "claude -p 'Reply with the single word ok' --model haiku --max-turns 1"
 NO_TOKEN = 3  # the account check's exit code when the account's oauth-token file is missing
 TOKEN_HINT = " (run claude setup-token in the shop GUI)"
+# Codex logs in from a token file saved on the shop, read in the shop's own shell; never this Mac's ~/.codex/auth.json
+# (a ChatGPT refresh token used on two machines can log this Mac out).
+CODEX_LOGIN = f'f="$HOME/.codex/access-token"; [ -r "$f" ] || exit {NO_TOKEN}; codex login --with-access-token < "$f"'
+CODEX_HINT = " (save a Codex access token to ~/.codex/access-token or run codex login on the shop)"
 JEV_KEY_FILE = "$HOME/.config/typesafe/key"  # jev's TypeSafe key on a worker: its keychain is locked over ssh
 JEV_KEYCHAIN = ["/usr/bin/security", "find-generic-password", "-s", "TypeSafe", "-a", "typesafe", "-w"]  # jev.api_key's
 JEV_KEY_WRITE = ("umask 077 && mkdir -p ~/.config/typesafe && cat > ~/.config/typesafe/key.tmp"
@@ -161,6 +172,10 @@ PROFILE_COPY = ('d="$HOME/scrum-work/{p}"; [ -d "$d/.git" ] || exit 3; mkdir -p 
 AUTH_COPY = ("umask 077 && mkdir -p ~/scrum-work/{p}/{d} && cat > ~/scrum-work/{p}/{f}.tmp"
              " && mv -f ~/scrum-work/{p}/{f}.tmp ~/scrum-work/{p}/{f}")  # {d}, {f}: shlex-quoted repo-relative paths
 RENDER_AUTH_RE = re.compile(r"^\s*-\s*Render auth:(.*)$", re.M)
+CONVENTIONS_RE = re.compile(r"^\s*-\s*Conventions to read:(.*)$", re.M)
+CONVENTIONS_DIRS = ("Developer/", ".claude/rules/")  # home-relative; never ~/.claude/CLAUDE.md, which md-sync owns
+# {d}, {f}: shlex-quoted home-relative paths. mv -f replaces a shop symlink at {f} instead of writing through it.
+CONVENTIONS_COPY = "umask 077 && mkdir -p ~/{d} && cat > ~/{f}.tmp && mv -f ~/{f}.tmp ~/{f}"
 REPO_URL_RE = re.compile(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*")  # fullmatch; .git or not
 JOB_RE = re.compile(r"[0-9]{3,}-[a-z0-9-]+")  # board.ID_RE's shape; fullmatch, so a trailing newline fails
 # Claude Code ignores a project's .claude/settings.json permissions until the folder is trusted; set the flag in each
@@ -374,16 +389,20 @@ def _account_step(name: str, alias: str) -> tuple[str, str]:
     return ("ok", "") if a == "ok" else ("not ready", TOKEN_HINT if a == "no token" else "")
 
 
-def _ruff(alias: str) -> tuple[str, str]:
-    if run(RUFF_CHECK, STEP_TIMEOUT, alias=alias).returncode == 0:
+def _codex_login(alias: str) -> tuple[str, str]:
+    """"ok" when the shop's codex is logged in; else one CODEX_LOGIN call with no input, "not ready" when its token
+    file is missing."""
+    if run("codex login status", STEP_TIMEOUT, alias=alias).returncode == 0:
         return "ok", ""
-    return _done(run(RUFF_INSTALL, INSTALL_TIMEOUT, alias=alias))
+    r = run(CODEX_LOGIN, STEP_TIMEOUT, alias=alias)
+    return ("not ready", CODEX_HINT) if r.returncode == NO_TOKEN else _done(r)
 
 
-def _chrome(alias: str) -> tuple[str, str]:
-    if run(f'[ -x "{CFT_BIN}" ]', STEP_TIMEOUT, alias=alias).returncode == 0:
+def _install(check: str, install: str, alias: str) -> tuple[str, str]:
+    """"ok" when `check` exits 0 on worker `alias`; else one `install` call of INSTALL_TIMEOUT."""
+    if run(check, STEP_TIMEOUT, alias=alias).returncode == 0:
         return "ok", ""
-    return _done(run(CFT_INSTALL, INSTALL_TIMEOUT, alias=alias))
+    return _done(run(install, INSTALL_TIMEOUT, alias=alias))
 
 
 def _jev_key(alias: str) -> tuple[str, str]:
@@ -417,7 +436,9 @@ def setup(alias: str = ALIAS) -> dict[str, str]:
              "gh login": lambda: _gh_login(alias), "gh git": lambda: _gh_git(alias),
              "permissions": lambda: _permissions(alias), "owa links": lambda: _owa_links(alias),
              **{f"account {n}": (lambda n=n: _account_step(n, alias)) for n in _accounts(alias)},
-             "ruff": lambda: _ruff(alias), "chrome": lambda: _chrome(alias), "jev key": lambda: _jev_key(alias)}
+             "codex": lambda: _install(CODEX_CHECK, CODEX_INSTALL, alias), "codex login": lambda: _codex_login(alias),
+             "ruff": lambda: _install(RUFF_CHECK, RUFF_INSTALL, alias),
+             "chrome": lambda: _install(f'[ -x "{CFT_BIN}" ]', CFT_INSTALL, alias), "jev key": lambda: _jev_key(alias)}
     out = {}
     for name, step in steps.items():
         out[name], note = step()
@@ -479,15 +500,38 @@ def _render_auth(text: str) -> str | None:
     return rel
 
 
+def _conventions(text: str, repo: str) -> list[str]:
+    """project.md's first `- Conventions to read:` line as home-relative paths, each once, in line order: the paths
+    under this Mac's home and outside `repo` (as given and as realpath) whose home-relative path starts with a
+    CONVENTIONS_DIRS entry, ends in .md and stays on [A-Za-z0-9._/-]. A relative, `~/` or quoted token never matches."""
+    m = CONVENTIONS_RE.search(text)
+    if not m:
+        return []
+    home, out = str(Path.home()) + "/", []
+    repos = {posixpath.normpath(repo), os.path.realpath(repo)}
+    for token in re.split(r"[,\s]+", m.group(1)):
+        path = posixpath.normpath(token)
+        if not path.startswith(home) or any(p == r or p.startswith(r + "/") for p in (path, os.path.realpath(path))
+                                            for r in repos):
+            continue
+        rel = path[len(home):]
+        if rel.startswith(CONVENTIONS_DIRS) and rel.endswith(".md") and re.fullmatch(r"[A-Za-z0-9._/-]+", rel) \
+                and rel not in out:
+            out.append(rel)
+    return out
+
+
 def profile_copy(project: str, repo: str, alias: str = ALIAS) -> str:
     """Write the shop's ~/scrum-work/<project>/scrum/project.md from this Mac's <repo>/scrum/project.md (stdin only,
     tmp file + mv -f), so a cloud-job session there keeps its E2E, Test sign-in and Render auth lines (cloud.md Setup).
     The repo path (as given and its realpath) becomes the shop clone and any other path under this Mac's home moves
     to the shop's $HOME; every other byte is unchanged. The same call adds setup's `scrum/` and `.claude/worktrees/`
     lines to the clone's .git/info/exclude. Then the file the Render auth line names, when _render_auth() accepts it
-    and it exists here, goes to the same repo-relative path there (mode 600, bytes on stdin only). "copied"; "none"
-    with no ssh when there is no project.md here; "failed" with no ssh for a name off PROJECT_RE, or for a down shop
-    Mac, no clone there or a failed or timed-out copy. Prints nothing."""
+    and it exists here, goes to the same repo-relative path there (mode 600, bytes on stdin only). Then each
+    Conventions file _conventions() keeps and this Mac can read goes to the same home-relative path in the shop's
+    $HOME, one CONVENTIONS_COPY call each (mode 600, bytes on stdin only; every file is read before any ssh).
+    "copied"; "none" with no ssh when there is no project.md here; "failed" with no ssh for a name off PROJECT_RE, or
+    for a down shop Mac, no clone there or a failed or timed-out copy, which runs no later copy. Prints nothing."""
     if not PROJECT_RE.fullmatch(project):
         return "failed"
     try:
@@ -501,6 +545,12 @@ def profile_copy(project: str, repo: str, alias: str = ALIAS) -> str:
         auth = (Path(repo) / rel).read_bytes() if rel else None
     except OSError:
         auth = None
+    conventions = []
+    for name in _conventions(text, repo):
+        try:
+            conventions.append((name, (Path.home() / name).read_bytes()))
+        except OSError:  # missing or unreadable here: not copied
+            pass
     paths = sorted({str(repo), os.path.realpath(repo)}, key=len, reverse=True)
     text = re.sub("(?:" + "|".join(map(re.escape, paths)) + r")(?![A-Za-z0-9._-])",
                   lambda _: f"{HOME_TOKEN}/scrum-work/{project}", text)
@@ -511,6 +561,10 @@ def profile_copy(project: str, repo: str, alias: str = ALIAS) -> str:
     if auth is not None and run(AUTH_COPY.format(p=project, d=shlex.quote(posixpath.dirname(rel)),
                                                  f=shlex.quote(rel)), STEP_TIMEOUT, input=auth, alias=alias).returncode:
         return "failed"
+    for name, data in conventions:
+        if run(CONVENTIONS_COPY.format(d=shlex.quote(posixpath.dirname(name)), f=shlex.quote(name)), STEP_TIMEOUT,
+               input=data, alias=alias).returncode:
+            return "failed"
     return "copied"
 
 

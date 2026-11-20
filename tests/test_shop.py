@@ -356,7 +356,8 @@ DONE = (("sysctl", 0, HAVE_ALL), ("gh auth status", 0, ""),
         ("credential.https://github.com.helper", 0, "\n!/u/.local/bin/gh auth git-credential\n"),
         ('mkdir -p "$HOME/.claude-owa"', 0, ""), ("python3 -", 0, "same\n"), ("claude -p", 0, "ok\n"))
 ALL_OK = ["node: ok", "gh: ok", "gh login: ok", "gh git: ok", "permissions: ok", "owa links: ok", "account main: ok",
-          "account owa: ok", "ruff: ok", "chrome: ok", "jev key: ok"]
+          "account owa: ok", "codex: ok", "codex login: ok", "ruff: ok", "chrome: ok", "jev key: ok"]
+CODEX_HINT = " (save a Codex access token to ~/.codex/access-token or run codex login on the shop)"
 GH_LOGIN = ("gh auth login --hostname github.com --git-protocol https --with-token --insecure-storage"
             " && chmod 600 ~/.config/gh/hosts.yml")
 CHECK = "claude -p 'Reply with the single word ok' --model haiku --max-turns 1"
@@ -440,28 +441,32 @@ class SetupTest(SetupCase):
         answers = (("sysctl", 0, "{ 1.00 0.50 0.25 }\n4\n/u/.local/bin/gh\n/u/.local/bin/claude\n"),
                    ("nodejs.org", 0, ""), (shop.GIT_HELPER, 1, ""), ("setup-git", 1, ""),
                    ('mkdir -p "$HOME/.claude-owa"', 0, "agents\nskills\n"), ("python3 -", 0, "changed\n"),
-                   (".claude-owa/oauth-token", 3, ""), ("claude -p", 0, "Ok.\n"), ("gh auth status", 0, ""))
+                   (".claude-owa/oauth-token", 3, ""), ("claude -p", 0, "Ok.\n"), ("gh auth status", 0, ""),
+                   ("command -v codex", 1, ""), ("codex login status", 1, ""), ("--with-access-token", 3, ""))
         self.shop(*answers)
         got, lines = self.setup_out()
         self.assertEqual(lines, ["node: ok (changed)", "gh: ok", "gh login: ok", "gh git: failed (exit 1)",
                                  "permissions: ok (changed)", "owa links: ok (changed)", "account main: ok",
-                                 "account owa: not ready (run claude setup-token in the shop GUI)", "ruff: ok",
-                                 "chrome: ok", "jev key: ok"])
+                                 "account owa: not ready (run claude setup-token in the shop GUI)", "codex: ok (changed)",
+                                 "codex login: not ready" + CODEX_HINT, "ruff: ok", "chrome: ok", "jev key: ok"])
         self.assertEqual(got, {"node": "changed", "gh": "ok", "gh login": "ok", "gh git": "failed",
                                "permissions": "changed", "owa links": "changed", "account main": "ok",
-                               "account owa": "not ready", "ruff": "ok", "chrome": "ok", "jev key": "ok"})
+                               "account owa": "not ready", "codex": "changed", "codex login": "not ready",
+                               "ruff": "ok", "chrome": "ok", "jev key": "ok"})
         self.assertEqual(list(got), ["node", "gh", "gh login", "gh git", "permissions", "owa links", "account main",
-                                     "account owa", "ruff", "chrome", "jev key"])
+                                     "account owa", "codex", "codex login", "ruff", "chrome", "jev key"])
         self.assertEqual([(c[0].split()[0], c[1]) for c in self.calls[1:]],
                          [("d=$(mktemp", 600), ("gh", 60), ("git", 60), ("gh", 60), ("python3", 60), ("mkdir", 60),
-                          ("ln", 60), ("[", 120), ("[", 120), ("command", 60), ("[", 60), ("[", 60)])
+                          ("ln", 60), ("[", 120), ("[", 120), ("command", 60), ("npm", 600), ("codex", 60),
+                          ('f="$HOME/.codex/access-token";', 60), ("command", 60), ("[", 60), ("[", 60)])
         self.assertEqual(self.calls[-1], (JEV_CHECK, 60, None))
         self.assertEqual(self.setup_out(cli=True)[0], 1)
         self.shop(("setup-git", 0, ""), *answers)
         self.assertEqual(self.setup_out(cli=True), (0, [
             "node: ok (changed)", "gh: ok", "gh login: ok", "gh git: ok (changed)", "permissions: ok (changed)",
             "owa links: ok (changed)", "account main: ok",
-            "account owa: not ready (run claude setup-token in the shop GUI)", "ruff: ok", "chrome: ok", "jev key: ok"]))
+            "account owa: not ready (run claude setup-token in the shop GUI)", "codex: ok (changed)",
+            "codex login: not ready" + CODEX_HINT, "ruff: ok", "chrome: ok", "jev key: ok"]))
 
     def test_worker_accounts_only(self):
         self.worker_file("shopmac 2 owa,main\nnewmac 1 owa\n")
@@ -473,7 +478,8 @@ class SetupTest(SetupCase):
                 with contextlib.redirect_stdout(io.StringIO()) as out:
                     got = shop.setup(alias=alias)
                 self.assertEqual(out.getvalue().splitlines(),
-                                 base + [f"account {n}: ok" for n in accounts] + ["ruff: ok", "chrome: ok", "jev key: ok"])
+                                 base + [f"account {n}: ok" for n in accounts]
+                                 + ["codex: ok", "codex login: ok", "ruff: ok", "chrome: ok", "jev key: ok"])
                 self.assertEqual([k for k in got if k.startswith("account ")], [f"account {n}" for n in accounts])
                 self.assertEqual(len(self.cmds("claude -p")), len(accounts))
                 self.assertEqual({a[1] for a in self.argv if a[0] == "ssh"}, {alias})
@@ -483,7 +489,8 @@ class SetupTest(SetupCase):
         got, lines = self.setup_out()
         self.assertEqual(lines, ALL_OK)
         self.assertEqual(set(got.values()), {"ok"})
-        for key in ("curl", "gh auth login", "ln -s", "setup-git", 'mkdir -p "$HOME/.local'):
+        for key in ("curl", "gh auth login", "ln -s", "setup-git", 'mkdir -p "$HOME/.local', "npm install",
+                    "--with-access-token"):
             self.assertEqual(self.cmds(key), [], key)
         self.assertEqual(len(self.cmds("python3 -")), 1)  # the merge script writes only on a change (PermissionsMergeTest)
         self.assertNotIn(["gh", "auth", "token"], self.argv)
@@ -643,7 +650,68 @@ class SetupTest(SetupCase):
         self.shop(("command -v ruff", 1, ""), ("pip install", 1, "error: externally-managed-environment"), *DONE)
         got, lines = self.setup_out()
         self.assertEqual((lines[-3], got["ruff"]), ("ruff: failed (exit 1)", "failed"))
-        self.assertEqual(shop.OPTIONAL_STEPS, {"ruff"})
+        self.assertEqual(shop.OPTIONAL_STEPS, {"ruff", "codex", "codex login"})
+
+    def test_codex_steps_optional(self):
+        self.assertEqual(shop.OPTIONAL_STEPS, {"ruff", "codex", "codex login"})  # never holds a dispatch
+        self.shop(("codex login status", 1, ""), ("--with-access-token", 3, ""), *DONE)
+        self.assertEqual(self.setup_out(cli=True), (0, ALL_OK[:9] + ["codex login: not ready" + CODEX_HINT]
+                                                    + ALL_OK[10:]))
+        self.shop(("command -v codex", 1, ""), ("npm install", 1, ""), *DONE)
+        self.assertEqual(self.setup_out(cli=True), (1, ALL_OK[:8] + ["codex: failed (exit 1)"] + ALL_OK[9:]))
+
+    def test_codex_installed_into_local_when_missing(self):
+        self.assertEqual(shop.CODEX_VERSION, "0.166.0")
+        self.shop(*DONE)  # `command -v codex` exits 0: nothing else runs
+        got, lines = self.setup_out()
+        self.assertEqual((lines[8], got["codex"]), ("codex: ok", "ok"))
+        self.assertEqual(self.cmds("command -v codex"), [("command -v codex", 60, None)])
+        self.assertEqual(self.cmds("npm install"), [])
+        self.shop(("command -v codex", 1, ""), *DONE)
+        got, lines = self.setup_out()
+        self.assertEqual((lines[8], got["codex"]), ("codex: ok (changed)", "changed"))
+        self.assertEqual(self.cmds("npm install"),
+                         [('npm install -g --prefix "$HOME/.local" @openai/codex@0.166.0', 600, None)])
+        self.shop(("command -v codex", 1, ""), ("npm install", 1, ""), *DONE)
+        rc, lines = self.setup_out(cli=True)
+        self.assertEqual((rc, lines[8]), (1, "codex: failed (exit 1)"))
+        self.assertEqual(len(self.cmds("npm install")), 1)
+
+    def test_codex_login_states(self):
+        login = 'f="$HOME/.codex/access-token"; [ -r "$f" ] || exit 3; codex login --with-access-token < "$f"'
+        hint = " (save a Codex access token to ~/.codex/access-token or run codex login on the shop)"
+        for name, status, write, result, line in (
+                ("logged in", 0, None, "ok", "codex login: ok"),
+                ("token login", 1, 0, "changed", "codex login: ok (changed)"),
+                ("no token file", 1, 3, "not ready", "codex login: not ready" + hint),
+                ("login fails", 1, 1, "failed", "codex login: failed (exit 1)"),
+                ("ssh fails", 1, 255, "failed", "codex login: failed (exit 255)"),
+                ("timeout", 1, subprocess.TimeoutExpired(["ssh"], 60), "failed", "codex login: failed (exit 124)")):
+            with self.subTest(name=name):
+                self.shop(("codex login status", status, ""), ("--with-access-token", write, ""), *DONE)
+                got, lines = self.setup_out()
+                self.assertEqual((lines[9], got["codex login"]), (line, result))
+                self.assertEqual(self.cmds("codex login"), [("codex login status", 60, None)]
+                                 + ([] if write is None else [(login, 60, None)]))  # no input: no token from this Mac
+                self.assertEqual([a for a in self.argv if a[0] != "ssh"], [])  # no local read of any kind
+
+    def test_codex_login_reads_shop_token_file(self):
+        """The login call runs in a local sh under a temp home with a fake codex, as the shop would."""
+        h = Path(self.home)
+        (h / ".local" / "bin").mkdir(parents=True)
+        codex = h / ".local" / "bin" / "codex"
+        codex.write_text('#!/bin/sh\n[ "$2" = status ] && exit 1\necho "$*" > "$HOME/args"\ncat > "$HOME/stdin"\n')
+        codex.chmod(0o755)
+        self.shop(("codex login", LOCAL, ""), *DONE)
+        self.assertEqual(self.setup_out()[1][9], "codex login: not ready (save a Codex access token to "
+                                                 "~/.codex/access-token or run codex login on the shop)")
+        self.assertEqual(sorted(os.listdir(h)), [".local"])  # exit 3 before codex login ran
+        (h / ".codex").mkdir()
+        (h / ".codex" / "access-token").write_text("cdx-tok-1245\n")
+        self.assertEqual(self.setup_out()[1][9], "codex login: ok (changed)")
+        self.assertEqual(((h / "args").read_text(), (h / "stdin").read_text()),
+                         ("login --with-access-token\n", "cdx-tok-1245\n"))
+        self.assertFalse([a for a in self.argv if "cdx-tok" in " ".join(a)])
 
     def test_jev_key_skipped_when_file_exists(self):
         self.shop((JEV_CHECK, 0, ""), *DONE)
@@ -1041,6 +1109,16 @@ AUTH_CMD = ("umask 077 && mkdir -p ~/scrum-work/onewitharts/playwright/.auth && 
             "~/scrum-work/onewitharts/playwright/.auth/admin.json.tmp && mv -f "
             "~/scrum-work/onewitharts/playwright/.auth/admin.json.tmp ~/scrum-work/onewitharts/playwright/.auth/admin.json")
 GIT_EXCLUDE = b"# git ls-files --others --exclude-from=.git/info/exclude\n# *~\n"
+# This Mac's Conventions files by home-relative path; .claude/rules/performance.md is a link on this Mac.
+CONV = [("Developer/repos/CLAUDE.md", b"# repos conventions 1245\n"),
+        ("Developer/repos/.claude/rules/debugging.md", b"# debugging rule 1245\n"),
+        (".claude/rules/performance.md", b"# performance rule 1245\n")]
+CONV_CMDS = ["umask 077 && mkdir -p ~/Developer/repos && cat > ~/Developer/repos/CLAUDE.md.tmp"
+             " && mv -f ~/Developer/repos/CLAUDE.md.tmp ~/Developer/repos/CLAUDE.md",
+             "umask 077 && mkdir -p ~/Developer/repos/.claude/rules && cat > ~/Developer/repos/.claude/rules/debugging.md.tmp"
+             " && mv -f ~/Developer/repos/.claude/rules/debugging.md.tmp ~/Developer/repos/.claude/rules/debugging.md",
+             "umask 077 && mkdir -p ~/.claude/rules && cat > ~/.claude/rules/performance.md.tmp"
+             " && mv -f ~/.claude/rules/performance.md.tmp ~/.claude/rules/performance.md"]
 
 
 class ProfileCopyTest(SetupCase):
@@ -1079,6 +1157,16 @@ class ProfileCopyTest(SetupCase):
     def write_shop_profile(self, data):
         (self.clone / "scrum").mkdir(exist_ok=True)
         (self.clone / "scrum" / "project.md").write_bytes(data)
+
+    def mac_conventions(self):
+        """Write CONV under this Mac's home; performance.md is a link into a skills clone, as on Trevor's Mac."""
+        target = self.mac / "code" / "trevorhecht-skills" / "rules" / "performance.md"
+        for rel, data in CONV:
+            path = target if rel == ".claude/rules/performance.md" else self.mac / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        (self.mac / ".claude" / "rules").mkdir(parents=True)
+        (self.mac / ".claude" / "rules" / "performance.md").symlink_to(target)
 
     def test_paths_rewritten_to_shop_home(self):
         m, r, l = self.mac, self.real, self.link
@@ -1197,6 +1285,110 @@ class ProfileCopyTest(SetupCase):
                 self.assertEqual(self.shop_profile(), f"- Test: x\n{line}".encode())
         self.assertEqual(sorted(os.listdir(self.clone)), [".git", "scrum"])
 
+    def test_conventions_copied_to_shop_home(self):
+        self.mac_conventions()
+        m = self.mac
+        self.shop(("scrum-work", LOCAL, ""), ("umask 077", LOCAL, ""), *DONE)
+        for sep in (",", ", ", " "):
+            with self.subTest(sep=sep):
+                shop._cache.clear()
+                self.calls.clear()
+                self.argv.clear()
+                for d in ("Developer", ".claude"):
+                    shutil.rmtree(self.sh / d, ignore_errors=True)
+                self.profile(f"- Test: x\n- Conventions to read: {m}/Developer/repos/CLAUDE.md{sep}"
+                             f"{m}/Developer/repos/.claude/rules/debugging.md{sep}{m}/.claude/rules/performance.md{sep}"
+                             f"{m}/Developer/./repos/CLAUDE.md\n")  # the last one is the first again: copied once
+                self.assertEqual(self.copy(), "copied")
+                self.assertEqual(self.calls[0][0], shop.PROBE_CMD)
+                self.assertIn('"$d/scrum/project.md.tmp"', self.calls[1][0])  # the profile call, then the auth-less tail
+                self.assertEqual(self.calls[2:], [(CONV_CMDS[0], 60, b"# repos conventions 1245\n"),
+                                                  (CONV_CMDS[1], 60, b"# debugging rule 1245\n"),
+                                                  (CONV_CMDS[2], 60, b"# performance rule 1245\n")])
+                for rel, data in (("Developer/repos/CLAUDE.md", b"# repos conventions 1245\n"),
+                                  ("Developer/repos/.claude/rules/debugging.md", b"# debugging rule 1245\n"),
+                                  (".claude/rules/performance.md", b"# performance rule 1245\n")):
+                    dest = self.sh / rel
+                    self.assertEqual((dest.read_bytes(), stat.S_IMODE(dest.stat().st_mode), dest.is_symlink()),
+                                     (data, 0o600, False), rel)
+                self.assertEqual(sorted(os.listdir(self.sh / "Developer" / "repos")), [".claude", "CLAUDE.md"])
+                self.assertEqual(os.listdir(self.sh / ".claude" / "rules"), ["performance.md"])
+                for argv in self.argv:
+                    for word in ("repos conventions 1245", "debugging rule 1245", "performance rule 1245"):
+                        self.assertNotIn(word, " ".join(argv))
+        fake = self.sp.side_effect
+
+        def mac_files_gone(argv, **kw):  # every Conventions file was read before the first ssh call
+            for d in ("Developer", ".claude", "code"):
+                shutil.rmtree(m / d, ignore_errors=True)
+            return fake(argv, **kw)
+        self.sp.side_effect = mac_files_gone
+        shop._cache.clear()
+        for d in ("Developer", ".claude"):
+            shutil.rmtree(self.sh / d)
+        self.assertEqual(self.copy(), "copied")
+        self.assertEqual([(self.sh / rel).read_bytes() for rel in ("Developer/repos/CLAUDE.md",
+                                                                   ".claude/rules/performance.md")],
+                         [b"# repos conventions 1245\n", b"# performance rule 1245\n"])
+
+    def test_conventions_skipped(self):
+        m, outside = self.mac, self.sh.parent  # outside: neither this Mac's home nor the shop's
+        real = m / "Developer" / "repos" / "proj"
+        (real / "scrum").mkdir(parents=True)
+        (m / "Developer" / "link-proj").symlink_to(real)
+        (m / "Developer" / "other-link").symlink_to(real)
+        (self.sh / "scrum-work" / "proj" / ".git" / "info").mkdir(parents=True)
+        # A home as long as this Mac's, and Developer/y.md exists here too: only the home rule refuses it.
+        sibling = outside / "mac_home.2" / "Developer" / "y.md"
+        for path in (real / "CLAUDE.md", m / ".claude" / "CLAUDE.md", m / "Developer" / "x.txt", outside / "x.md", sibling,
+                     m / "code" / "x.md", m / ".ssh" / "x.md", m / "Developer" / "a$b.md", m / "Developer" / "y.md"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"# convention 1245\n")  # each exists here, so only the keep rule refuses it
+        self.shop(("scrum-work", LOCAL, ""), ("umask 077", LOCAL, ""), *DONE)
+
+        def copied(line):
+            """(the call count, every shop file but project.md) after one profile_copy through the repo's link."""
+            shop._cache.clear()
+            self.calls.clear()
+            for d in set(os.listdir(self.sh)) - {"scrum-work"}:  # what an earlier subtest wrote never fails this one
+                shutil.rmtree(self.sh / d)
+            (real / "scrum" / "project.md").write_text(f"- Test: x\n{line}")
+            self.assertEqual(self.copy("proj", m / "Developer" / "link-proj"), "copied")
+            return len(self.calls), {k: v for k, v in tree(self.sh).items() if not k.endswith("project.md")}
+        without = copied("")
+        self.assertEqual(without[0], 2)  # the probe and the profile call
+        for name, token in (("in repo, through the link", f"{m}/Developer/link-proj/CLAUDE.md"),
+                            ("in repo, real path", f"{real}/CLAUDE.md"),
+                            ("in repo, through another link", f"{m}/Developer/other-link/CLAUDE.md"),
+                            ("home CLAUDE.md", f"{m}/.claude/CLAUDE.md"), ("not .md", f"{m}/Developer/x.txt"),
+                            ("outside home", f"{outside}/x.md"), ("a sibling home", str(sibling)),
+                            ("off the two folders", f"{m}/code/x.md"),
+                            ("dot-dot out of Developer", f"{m}/Developer/../.ssh/x.md"),
+                            ("odd character", f"{m}/Developer/a$b.md"), ("relative", "~/Developer/y.md"),
+                            ("missing", f"{m}/Developer/missing.md")):
+            with self.subTest(name):
+                self.assertEqual(copied(f"- Conventions to read: {token}\n"), without)
+        self.assertFalse((self.sh / "Developer").exists() or (self.sh / ".claude").exists() or (self.sh / ".ssh").exists())
+
+    def test_conventions_replace_shop_symlink(self):
+        self.mac_conventions()
+        self.profile(f"- Conventions to read: {self.mac}/Developer/repos/CLAUDE.md\n")
+        old = self.sh / "Developer" / "repos" / "trevorhecht-skills" / "CLAUDE.md"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b"# the shop's own file\n")
+        dest = self.sh / "Developer" / "repos" / "CLAUDE.md"
+        dest.symlink_to(old)
+        self.shop(("scrum-work", LOCAL, ""), ("umask 077", LOCAL, ""), *DONE)
+        for n in (1, 2):
+            with self.subTest(copy=n):
+                self.assertEqual(self.copy(), "copied")
+                self.assertFalse(dest.is_symlink())
+                self.assertEqual((dest.read_bytes(), stat.S_IMODE(dest.stat().st_mode)),
+                                 (b"# repos conventions 1245\n", 0o600))
+                self.assertEqual(old.read_bytes(), b"# the shop's own file\n")
+                self.assertEqual(sorted(os.listdir(dest.parent)), ["CLAUDE.md", "trevorhecht-skills"])
+                self.assertEqual(len(self.cmds("CLAUDE.md.tmp")), n)
+
     def test_missing_profile_none(self):
         self.shop(*DONE)
         self.assertEqual(self.copy(), "none")
@@ -1217,16 +1409,21 @@ class ProfileCopyTest(SetupCase):
         self.assertEqual([c[0] for c in self.calls], [shop.PROBE_CMD])
 
     def test_remote_failure_failed(self):
-        self.profile("- Render auth: ../../../a.json\n")
+        self.mac_conventions()
+        self.profile("- Render auth: ../../../a.json\n"
+                     f"- Conventions to read: {self.mac}/Developer/repos/CLAUDE.md {self.mac}/.claude/rules/performance.md\n")
         (self.real / "a.json").write_bytes(AUTH)
-        for fail, ran in (("project.md", 1), ("a.json", 2)):
+        for fail, ran, auth in (("project.md", 1, False), ("a.json", 2, False), ("Developer/repos/CLAUDE.md", 3, True)):
             for rc in (1, 255, subprocess.TimeoutExpired(["ssh"], 60)):
                 with self.subTest(fail=fail, rc=rc):
                     shop._cache.clear()
-                    self.shop((fail, rc, ""), ("scrum-work", LOCAL, ""), *DONE)
+                    self.shop((fail, rc, ""), ("scrum-work", LOCAL, ""), ("umask 077", LOCAL, ""), *DONE)
                     self.assertEqual(self.copy(), "failed")
                     self.assertEqual(len(self.calls), 1 + ran)
-        self.assertFalse((self.clone / "a.json").exists())
+                    self.assertEqual(self.cmds("performance.md"), [])  # no later Conventions call
+                    self.assertEqual((self.clone / "a.json").exists(), auth)
+                    (self.clone / "a.json").unlink(missing_ok=True)
+        self.assertEqual(sorted(os.listdir(self.sh)), ["scrum-work"])
 
 
 class SecretTest(SetupCase):
@@ -1977,6 +2174,13 @@ class StructureTest(unittest.TestCase):
             self.assertIn(phrase, chrome, phrase)
         self.assertIn("a non-blank `SCRUM_CHROME`", text[text.index("## E2E channel"):text.index("## MD sync")])
         self.assertIn("`SCRUM_PW_CHANNEL=chrome`, `SCRUM_CHROME` (setup's **chrome** binary)", text)
+        self.assertIn("an account or `codex login` that is `not ready` never fails it", setup)
+        self.assertLess(setup.index("- **account main, account owa.**"), setup.index("- **codex.**"))
+        self.assertLess(setup.index("- **codex.**"), setup.index("- **ruff.**"))
+        codex = setup[setup.index("- **codex.**"):setup.index("- **ruff.**")]  # job 1245
+        for phrase in ("- **codex login.**", "`CODEX_VERSION`", '`--prefix "$HOME/.local"`', "`~/.codex/access-token`",
+                       "`codex login --with-access-token`", "`OPTIONAL_STEPS`"):
+            self.assertIn(phrase, codex, phrase)
         jev = setup[setup.index("- **jev key.**"):]  # the last step
         for phrase in ("`[ -s ~/.config/typesafe/key ]`", "no Keychain read here", "goes on stdin to",
                        "so the file is mode 600", 'export TYPESAFE_API_KEY="$(cat F)"'):
@@ -1984,8 +2188,15 @@ class StructureTest(unittest.TestCase):
         copy = text[text.index("## Env copy"):text.index("## E2E channel")]
         for phrase in ("`profile_copy(project, repo)`", "`scrum/` and `.claude/worktrees/`", "`- Render auth:`",
                        "`posixpath.normpath(\".claude/worktrees/scrum-x/\" + <path>)`", "is not under `.claude/`",
-                       "It returns `copied` when", "`none` (no `scrum/project.md` here; no ssh)"):
+                       "It returns `copied` when", "`none` (no `scrum/project.md` here; no ssh)",
+                       "one more 60 s call per Conventions file"):
             self.assertIn(phrase, copy, phrase)
+        self.assertLess(copy.index("- **Conventions.**"), copy.index("- **Result.**"))
+        conventions = copy[copy.index("- **Conventions.**"):copy.index("- **Result.**")]  # job 1245
+        for phrase in ("`- Conventions to read:`", "`CONVENTIONS_DIRS`", "`[A-Za-z0-9._/-]+`",
+                       "outside the repo, both as given and as its realpath", "replaced by the file, not written through"):
+            self.assertIn(phrase, conventions, phrase)
+        self.assertIn("every Conventions call", copy[copy.index("- **Result.**"):])
         self.assertIn("`clone(<repo folder>, <origin URL>)`, `env_copy()` (copied or none), `profile_copy()` (copied or "
                       "none) and `start()`", text[text.index("## Dispatch"):])
         self.assertIn("creates `cooldown-<alias>` beside the cool-down flag", text[text.index("## Dispatch"):],
