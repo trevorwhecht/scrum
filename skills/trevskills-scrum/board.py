@@ -1973,7 +1973,7 @@ def _model_family(model):
 def _token_reasons(job, usd, groups, lane_median, top):
     """write_tokens' ## Flagged reasons for one job, in the fixed order: pricier model than the agent's pin, over
     TOKENS_FLAG median_x its lane median, a top-cost job, one of 2 or more agents over agent_share of the job, a
-    reviewer's later round at round_share or more of its round 1."""
+    reviewer's later round at round_share or more of its round 1. (write_tokens adds _two_sessions after them.)"""
     out, by_agent, by_round = [], {}, {}
     for (agent, rnd, model), (_, a) in groups.items():
         by_agent[agent] = by_agent.get(agent, 0) + a
@@ -1995,6 +1995,29 @@ def _token_reasons(job, usd, groups, lane_median, top):
         if agent.startswith("scrum-review-") and isinstance(rnd, int) and rnd >= 2 and base > 0 \
                 and a >= TOKENS_FLAG["round_share"] * base:
             out.append(f"{agent} round {rnd} ${a:.2f} = {100 * a / base:.0f}% of round 1 ${base:.2f}")
+    return out
+
+
+def _two_sessions(rows):
+    """write_tokens' `two sessions` reasons for one job's rows: for each agent type, every pair of its subagent
+    transcripts under different parent sessions (<session>/subagents/agent-*.jsonl -> <session>) whose spans (min to max
+    ts of that transcript's rows) overlap. Each reads `two sessions: <agent> HH:MM-HH:MM and HH:MM-HH:MM, wasted $x`,
+    the USD being the shorter run's (local time)."""
+    runs = {}
+    for r in rows:
+        p = Path(r["transcript"])
+        if p.parent.name != "subagents":
+            continue
+        run = runs.setdefault((r["agent"], str(p)), {"parent": p.parent.parent, "lo": r["ts"], "hi": r["ts"], "usd": 0})
+        run["lo"], run["hi"], run["usd"] = min(run["lo"], r["ts"]), max(run["hi"], r["ts"]), run["usd"] + row_cost(r)
+    out, hm = [], lambda t: datetime.fromtimestamp(t).strftime("%H:%M")
+    items = sorted(runs.items(), key=lambda kv: (kv[0][0], kv[1]["lo"], kv[0][1]))
+    for i, ((agent, _), a) in enumerate(items):
+        for (agent2, _), b in items[i + 1:]:
+            if agent2 == agent and a["parent"] != b["parent"] and a["lo"] < b["hi"] and b["lo"] < a["hi"]:
+                short = min(a, b, key=lambda x: (x["hi"] - x["lo"], x["usd"]))
+                out.append(f"two sessions: {agent} {hm(a['lo'])}-{hm(a['hi'])} and {hm(b['lo'])}-{hm(b['hi'])}, "
+                           f"wasted ${short['usd']:.2f}")
     return out
 
 
@@ -2091,7 +2114,7 @@ def write_tokens(root, digest_id):
         medians[ln] = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
     out += ["", "## Flagged"]
     for j in ranked:
-        reasons = _token_reasons(j, costs[j][1], groups[j], medians[lane[j]], top)
+        reasons = _token_reasons(j, costs[j][1], groups[j], medians[lane[j]], top) + _two_sessions(by_job[j])
         if reasons:
             out.append(f"- {j} · ${costs[j][1]:.2f} · " + "; ".join(reasons))
             out += _costliest_detail(by_job[j])
