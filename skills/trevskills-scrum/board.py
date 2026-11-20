@@ -857,12 +857,12 @@ def cmd_next(root, index=None, shop=None):
     """Claim the highest-priority open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one.
     Cool-down refuses the automatic claim (no index), and so does finish_first; an explicit index is Trevor's Run now
     and still claims. `shop` (serve.py's shop_tick, a claim for the shop Mac) is a predicate the automatic pick must
-    also pass; cool-down never refuses it, finish_first still does, and the job is started_by shop."""
+    also pass; neither cool-down nor finish_first refuses it (the shop runs on its own CPU and e2e.lock), and the job is started_by shop."""
     if index is None and shop is None and cooling_down():
         raise SystemExit(COOLING_CLAIM)
     if index is None and shop is None and (soft := soft_cap_reason()):
         raise SystemExit(f"{soft}: no new backlog claim.")
-    if index is None and (hold := finish_first(root)):
+    if index is None and shop is None and (hold := finish_first(root)):
         raise SystemExit(f"{hold}: no new backlog claim. It claims again once that job moves on.")
     with locked_board(root) as board:
         lines, items = read_backlog(root)

@@ -1158,10 +1158,28 @@ def merges_since(repo, record) -> int:
         return E2E_FULL_MERGES  # a git error counts as due
 
 
+def e2e_job_waiting() -> bool:
+    """True when a job on any registered project's board waits on the E2E queue (board.queue_waiting with reason
+    E2E_QUEUE_WAIT, or stalled on E2E_WAIT_REASON, as board.finish_first reads them). e2e_full_tick and ui_sweep_tick
+    yield to it: a job's E2E goes before a main-checkout run."""
+    for repo in board.projects().values():
+        try:
+            jobs = board.read_board(repo / "scrum")["jobs"]
+        except (SystemExit, OSError, ValueError, KeyError):
+            continue
+        for j in jobs:
+            reason = str(j.get("reason") or "")
+            if board.queue_waiting(j) and reason.startswith(board.E2E_QUEUE_WAIT) or (
+                    board.stalled(j) and j.get("stage") != "needs-human"
+                    and reason.startswith(board.STALL + board.E2E_WAIT_REASON)):
+                return True
+    return False
+
+
 def e2e_full_tick(project, repo, root) -> None:
     """Start one background full E2E run on repo's main checkout when project.md has an E2E command, no full run is in
     flight in this serve (E2E_FULL), this project's UI sweep is not running (its dev server holds the checkout's dev
-    lock), the E2E lock is free, the tracked tree is clean, e2e_full_due holds (watchdog_tick pass 1) and
+    lock), the E2E lock is free, no job waits on the E2E queue (e2e_job_waiting), the tracked tree is clean, e2e_full_due holds (watchdog_tick pass 1) and
     board.machine_ok passes (without claim=True, so cool-down never stops it). During
     cool down, once no job on this project blocks a restart, any new HEAD is due: the merges bundled into one run.
     With no run in flight here, every project's `running` record is an orphan (a serve reload killed its thread; one
@@ -1183,7 +1201,8 @@ def e2e_full_tick(project, repo, root) -> None:
     if sweep and sweep.get("result") == "running" and (now - (sweep.get("at") or 0) < E2E_FULL_STALE or (
             sweep.get("dir") and board.session_alive_fn()({"id": sweep["dir"]}))):
         return
-    if not e2e_queue_free() or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip():
+    if not e2e_queue_free() or e2e_job_waiting() \
+            or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip():
         return
     record = e2e_full_record(root)
     head = board._git(repo, "rev-parse", "HEAD").decode().strip()
@@ -1512,7 +1531,8 @@ def write_ui_sweep(root, rec):
 def ui_sweep_tick(project, repo, root) -> None:
     """Start one headless sweep session (spawn id ui-sweep, at UI_SWEEP_NICE) on repo's main checkout when project.md
     has UI globs and a Dev command, no sweep runs anywhere, no full E2E run is in flight (E2E_FULL; its next dev holds
-    the dev lock), the E2E lock is free (an orphaned full run holds it), the tracked tree is clean,
+    the dev lock), the E2E lock is free (an orphaned full run holds it) and no job waits on the E2E queue
+    (e2e_job_waiting), the tracked tree is clean,
     board.machine_ok(claim=True) passes, check.lock and build.lock have no holder or waiter (a job's Check or Build
     goes first; a last record E2E_FULL_EVERY old, or none, starts anyway, job 1244) and e2e_full_due holds. It sweeps
     since the last record's head (its since after a running or error record, so a dead sweep's range is kept; HEAD~5
@@ -1524,7 +1544,8 @@ def ui_sweep_tick(project, repo, root) -> None:
         rec = ui_sweep_record(other / "scrum")
         if rec and rec.get("result") == "running" and now - (rec.get("at") or 0) < E2E_FULL_STALE:
             return
-    if not e2e_queue_free() or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip() \
+    if not e2e_queue_free() or e2e_job_waiting() \
+            or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip() \
             or board.machine_ok(root, claim=True):
         return
     record = ui_sweep_record(root)
@@ -2047,7 +2068,7 @@ def shop_tick(project, repo, root) -> bool:
     profile_copy and start run on that worker; a failed step puts a claimed child back to waiting, prints one
     `shop: <project>: <id>: <step> failed on <alias>` line and holds that worker for SHOP_RETRY_EVERY. With nothing in
     that pool but main jobs (job 1141), new work goes instead, by auto_continue_tick's rules: a project with an `- Auto continue:`
-    line, its run-all not running, a claimable backlog line and no finish_first hold; board.cmd_next(shop=) claims the
+    line, its run-all not running, a claimable backlog line (finish_first never holds it: this Mac's queue waits are not the shop's, and shop work runs on its own CPU and e2e.lock); board.cmd_next(shop=) claims the
     top item under the board lock (cool-down never refuses it) that is not lilguy (`Lane: lilguy` in its text or its
     pre-written spec's header), names no digest proposals.json and no board.main_only_terms() term (names_main_only of
     its text plus that spec; no Jev under the lock), and whose files (board.text_files of that spec, else
@@ -2066,9 +2087,9 @@ def shop_tick(project, repo, root) -> bool:
                    if (is_child(j) or (j.get("queued_launch") or {}).get("action") == "start") and not j.get("paused")
                    and j.get("setup") != "pending" and not board.shop_excluded(root, j, jobs)),
                   key=lambda j: (board.job_lane(root, j) != "fast", int(j["id"].split("-")[0]), j["id"]))  # fast first, then numeric id: 1000- sorts after 999-
-    # new work, under auto_continue_tick's own rules (opted in, its run-all not running, a claimable line, finish_first)
-    new_ok = lambda: auto_continue(root) is not None and not running(project, "run-all") and claimable(root) \
-        and not board.finish_first(root)
+    # new work, under auto_continue_tick's own rules (opted in, its run-all not running, a claimable line), without finish_first: it holds claims for work starved by this Mac's load,
+    # and the shop has its own CPU and e2e.lock
+    new_ok = lambda: auto_continue(root) is not None and not running(project, "run-all") and claimable(root)
     new = not pool and new_ok()  # nothing held
     if not pool and not new:
         return False
@@ -5115,14 +5136,23 @@ def e2e_wait_info(job, now):
     return {"waitSecs": int(max(waits)), "holder": holder}
 
 
+def main_checkout_orphan(h, now) -> bool:
+    """True when holder h (read_holder) runs in a registered project's main checkout, started over E2E_FULL_STALE ago,
+    and E2E_FULL["running"] is not that project: a full run whose watching thread is gone (backlog #363e)."""
+    cwd = os.path.realpath(h[1])
+    return now - h[2] > E2E_FULL_STALE and any(
+        os.path.realpath(repo) == cwd and E2E_FULL["running"] != name for name, repo in board.projects().items())
+
+
 def e2e_lock_reap(now):
-    """While some e2e.lock waiter has waited over E2E_WAIT_RECORD_SECS, free each slot whose holder file names a dead
+    """An e2e.lock holder in a registered project's main checkout older than E2E_FULL_STALE while E2E_FULL["running"]
+    is not that project (main_checkout_orphan) is freed with or without a waiter: its process group gets SIGTERM, then
+    the holder file goes. Otherwise, while some e2e.lock waiter has waited over E2E_WAIT_RECORD_SECS, free each slot whose holder file names a dead
     wrapper pid (a grandchild kept the inherited fd) or a cwd in a job no longer in `check`: SIGTERM every pid
     `lsof -t` lists for the slot file, then remove the holder file. A live holder in a `check` job, a holder whose
     cwd matches no job, a missing or malformed holder file, an lsof failure, and a holder file that changed since
     it was first read (a new holder took the slot) are left alone. Never raises on a missing lsof."""
-    if not any(age > E2E_WAIT_RECORD_SECS for _, age in e2e_waiters(now)):
-        return
+    old_waiter = any(age > E2E_WAIT_RECORD_SECS for _, age in e2e_waiters(now))
     for slot in buildlock.slot_paths(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock"):
         h = read_holder(slot)
         if not h:
@@ -5134,7 +5164,10 @@ def e2e_lock_reap(now):
             dead = True
         except OSError:
             dead = False  # alive, owned by another user
-        if not dead:
+        orphan = not dead and main_checkout_orphan(h, now)
+        if not old_waiter and not orphan:
+            continue
+        if not dead and not orphan:
             owner = job_for_cwd(h[1])
             if not owner or owner.get("stage") == "check":
                 continue
@@ -5147,6 +5180,12 @@ def e2e_lock_reap(now):
             continue
         if r.returncode not in (0, 1):  # 1: nobody has it open
             continue
+        if orphan:  # the buildlock child outlived its thread: take its whole group (the run's playwright and dev servers)
+            try:
+                if (pgid := os.getpgid(h[0])) != os.getpgrp():
+                    os.killpg(pgid, signal.SIGTERM)
+            except OSError:
+                pass
         for pid in {int(x) for x in r.stdout.split() if x.isdigit()} - {os.getpid()}:
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -5154,7 +5193,7 @@ def e2e_lock_reap(now):
                 pass
         if read_holder(slot) == h:
             buildlock.holder_path(slot).unlink(missing_ok=True)
-        print(f"watchdog: freed {slot.name} from {'dead holder' if dead else 'a job out of check'} {h[0]} ({h[1]})",
+        print(f"watchdog: freed {slot.name} from {'dead holder' if dead else 'an orphaned main-checkout run' if orphan else 'a job out of check'} {h[0]} ({h[1]})",
               file=sys.stderr, flush=True)
         board.log_process("E2E lock reaps", "freed", slot=slot.name, pid=h[0], cwd=h[1], dead=dead)
 

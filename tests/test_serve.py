@@ -12848,6 +12848,19 @@ class E2eFullTest(unittest.TestCase):
         self.assertEqual((rec["result"], rec["head"], rec["lastGreen"]), ("running", self.base, None))
         self.assertEqual(self.tick(), 0, "the in-flight guard holds")
 
+    def test_tick_yields_to_a_job_waiting_on_the_e2e_queue(self):
+        """Job 1310: a job's E2E goes before a main-checkout run; the run starts once no job waits."""
+        other = self.other_project()
+        board_file = other / "scrum" / "board.json"
+        waits = [{"id": "001-w", "stage": "check", "reason": "waiting: E2E queue (held)"},
+                 {"id": "001-w", "stage": "check", "stalled": True, "reason": "stalled: waiting on the E2E queue"}]
+        for job in waits:
+            board_file.write_text(json.dumps({"jobs": [job]}))
+            self.assertEqual(self.tick(), 0, job)
+            self.assertFalse((self.root / "e2e-full.json").exists())
+        board_file.write_text(json.dumps({"jobs": [{"id": "001-w", "stage": "check", "reason": "waiting: Check queue"}]}))
+        self.assertEqual(self.tick(), 1, "a Check queue wait does not hold the run")
+
     def test_tick_skips_when_machine_refuses(self):
         """Job 966: full runs under load filed load failures as bugs; a refused machine starts none."""
         with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2"):
@@ -13307,6 +13320,16 @@ class UiSweepTickTest(unittest.TestCase):
         spawn, targets = self.tick(e2e_free=False)
         self.assertEqual((spawn.call_count, targets.call_count), (0, 0))
         self.assertEqual(self.read(), rec)
+        self.assertEqual(self.tick()[0].call_count, 1)
+
+    def test_skip_while_a_job_waits_on_the_e2e_queue(self):
+        """Job 1310: a sweep yields to a job at `waiting: E2E queue` in any project, and starts once it clears."""
+        self.due_with_targets(86400)
+        board_file = self.other / "scrum" / "board.json"
+        board_file.write_text(json.dumps({"jobs": [{"id": "001-w", "stage": "check", "reason": "waiting: E2E queue (x)"}]}))
+        spawn, targets = self.tick()
+        self.assertEqual((spawn.call_count, targets.call_count), (0, 0))
+        board_file.write_text(json.dumps({"jobs": []}))
         self.assertEqual(self.tick()[0].call_count, 1)
 
     def due_with_targets(self, age):
@@ -14069,6 +14092,26 @@ class E2eWaitRecordTest(unittest.TestCase):
         self.write_holder(child.pid)
         _, lines = processes_logged(self.reap)  # a live holder in a check job stays
         self.assertEqual(lines, [])
+
+    def test_reap_orphaned_main_checkout_run(self):
+        """Job 1310 (#363e): a holder in a project's main checkout past E2E_FULL_STALE is freed with no waiter; a
+        watched run (E2E_FULL running is that project) and a younger one are left alone."""
+        main = self.root.parent
+        child = self.flock_child()
+        self.addCleanup(self.serve.E2E_FULL.update, running=None)
+        self.write_holder(child.pid, start=int(self.now - 7300), cwd=str(main))
+        self.serve.E2E_FULL["running"] = main.name
+        self.reap()
+        self.assertFalse(self.gone(child), "watched run left alone")
+        self.assertTrue(self.holder.exists())
+        self.serve.E2E_FULL["running"] = None
+        self.write_holder(child.pid, start=int(self.now - 600), cwd=str(main))
+        self.reap()
+        self.assertFalse(self.gone(child), "younger than E2E_FULL_STALE")
+        self.write_holder(child.pid, start=int(self.now - 7300), cwd=str(main))
+        self.reap()
+        self.assertTrue(self.gone(child))
+        self.assertFalse(self.holder.exists())
 
     def test_over_two_hours(self):
         self.waiter(7810)
