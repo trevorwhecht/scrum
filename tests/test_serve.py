@@ -1,4 +1,4 @@
-import contextlib, errno, hashlib, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
+import contextlib, errno, fcntl, hashlib, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
@@ -20,6 +20,7 @@ os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; n
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # CPU nearly idle unless a test says so; no test runs top or reads the real CPU log
 os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly nil unless a test says so; no test reads the real load average
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
+os.environ["SCRUM_HEAVY_STEPS_LOG"] = os.path.join(tempfile.mkdtemp(), "heavy-steps.log")  # e2e_full_run's buildlock.py
 os.environ.setdefault("SCRUM_USAGE", os.path.join(os.devnull, "no-usage.json"))  # never Trevor's real usage.json
 
 # A fake `claude`: records its argv, and answers estimate prompts with a fixed estimate.
@@ -5832,6 +5833,17 @@ class DigestTest(unittest.TestCase):
         self.addCleanup(s.RUNS.pop, "reg/digest", None)
         self.assertEqual([c.kwargs["account"] for c in bspawn.call_args_list], ["owa", "main"])
         self.assertEqual((s.RUNS["reg/weekly"]["account"], s.RUNS["reg/digest"]["account"]), ("owa", "main"))
+
+    def test_spawn_passes_nice_only_when_given(self):
+        """Job 1244: spawn(nice=19) reaches board.spawn; every other launch leaves board.spawn's SESSION_NICE."""
+        s = self.serve
+        self.addCleanup(s.RUNS.pop, "reg/ui-sweep", None)
+        self.addCleanup(s.RUNS.pop, "reg/digest", None)
+        with mock.patch.object(self.board, "spawn", return_value=(mock.Mock(), "runs/u.log")) as bspawn, \
+                mock.patch.object(self.board, "pick_account", return_value=("main", None)):
+            s.spawn("reg", self.scrum, "ui-sweep", "ui-sweep", "sweep", nice=19)
+            s.spawn("reg", self.scrum, "digest", "digest", "/trevskills-scrum digest")
+        self.assertEqual([c.kwargs.get("nice") for c in bspawn.call_args_list], [19, None])
 
     def test_digest_now_spawns_and_refuses_when_empty_or_running(self):
         with mock.patch.object(self.serve.subprocess, "Popen") as popen:
@@ -12781,7 +12793,10 @@ class UiSweepTickTest(unittest.TestCase):
             r.mkdir(parents=True)
         self.project("- Dev command: npm run dev")
         (base / "projects.json").write_text(json.dumps([str(self.repo), str(self.other)]))
-        p = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "projects.json")})
+        self.home = base / "home"
+        self.locks = self.home / ".claude" / "trevskills-scrum"
+        self.locks.mkdir(parents=True)
+        p = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "projects.json"), "HOME": str(self.home)})
         p.start()
         self.addCleanup(p.stop)
         self.dirty, self.count, self.short = b"", b"5\n", False
@@ -12859,6 +12874,63 @@ class UiSweepTickTest(unittest.TestCase):
         self.assertEqual((spawn.call_count, targets.call_count), (0, 0))
         self.assertEqual(self.read(), rec)
         self.assertEqual(self.tick()[0].call_count, 1)
+
+    def due_with_targets(self, age):
+        """A due record `age` s old (5 merges since its head) and one changed screen."""
+        self.targets = {"since": "back5", "head": self.HEAD,
+                        "targets": [{"path": "/leads", "jobs": ["013-grid"], "marked": True, "why": "tall"}]}
+        rec = {"at": time.time() - age, "head": "older", "result": "pass"}
+        self.record(**rec)
+        return rec
+
+    def hold_lock(self, name):
+        """Flock `name` (every slot of it) in this process until cleanup, as a job's buildlock.py holds it."""
+        for slot in self.serve.buildlock.slot_paths(self.locks / name):
+            f = open(slot, "a")
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.addCleanup(f.close)
+
+    def test_skip_while_check_lock_held(self):
+        """Job 1244: a sweep yields to a job's Check gate holding check.lock, even with a slot of it free."""
+        rec = self.due_with_targets(3600)
+        f = open(self.locks / "check.lock.0", "a")
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        spawn, targets = self.tick()
+        self.assertEqual((spawn.call_count, targets.call_count), (0, 0))
+        self.assertEqual(self.read(), rec)
+        f.close()
+        self.assertEqual(self.tick()[0].call_count, 1, "starts once check.lock is free")
+
+    def test_skip_while_build_lock_has_a_waiter(self):
+        """Job 1244: a live buildlock.py waiting on build.lock (its waiting marker) holds the sweep too."""
+        rec = self.due_with_targets(3600)
+        waiting = self.locks / "build.lock.waiting"
+        waiting.mkdir()
+        (waiting / str(os.getpid())).write_text("/some/worktree\n0")
+        spawn, targets = self.tick()
+        self.assertEqual((spawn.call_count, targets.call_count), (0, 0))
+        self.assertEqual(self.read(), rec)
+        (waiting / str(os.getpid())).unlink()
+        self.assertEqual(self.tick()[0].call_count, 1)
+
+    def test_starts_when_job_locks_free(self):
+        self.due_with_targets(3600)
+        (self.locks / "build.lock").touch()  # a leftover file with no flock never holds it
+        self.assertEqual(self.tick()[0].call_count, 1)
+
+    def test_starts_past_24h_while_job_locks_busy(self):
+        """Job 1244: a last sweep record over 24 h old starts the sweep however busy the job locks are."""
+        self.due_with_targets(86400 + 60)
+        self.hold_lock("check.lock")
+        self.hold_lock("build.lock")
+        self.assertEqual(self.tick()[0].call_count, 1)
+        self.due_with_targets(86400 - 60)
+        self.assertEqual(self.tick()[0].call_count, 0, "under 24 h it still yields")
+
+    def test_sweep_spawns_at_nice_19(self):
+        self.due_with_targets(3600)
+        spawn, _ = self.tick()
+        self.assertEqual(spawn.call_args.kwargs, {"nice": 19})
 
     def test_skip_while_full_e2e_runs(self):
         """Job 1109: a sweep's dev server beside a full run took the checkout's next dev lock first."""

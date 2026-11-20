@@ -7109,6 +7109,16 @@ print("stub err", file=sys.stderr)
         proc.wait(timeout=10)
         return self.records()[0]["argv"]
 
+    def test_spawn_nice_level(self):
+        """Job 1244: a session runs at SESSION_NICE 10 unless spawn is given another level (the UI sweep's 19)."""
+        with mock.patch.object(board.os, "setpriority") as prio:
+            default, _ = board.spawn(self.root, "999-not-a-job", "approve", "/p", model="sonnet")
+            low, _ = board.spawn(self.root, "999-not-a-job", "ui-sweep", "/p", model="sonnet", nice=19)
+        for p in (default, low):
+            p.wait(timeout=10)
+        self.assertEqual([c.args for c in prio.call_args_list],
+                         [(os.PRIO_PROCESS, default.pid, 10), (os.PRIO_PROCESS, low.pid, 19)])
+
     def test_spawn_log_name_is_utc(self):
         before = datetime.now(timezone.utc).replace(microsecond=0)
         line = json.loads(self.cli("123-some-job", "start").stdout)
