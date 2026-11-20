@@ -3786,6 +3786,22 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("run `B spawn <child> start`", step3)
         self.assertIn("detached from the main checkout with `CLAUDE_NOTIFIER_DISABLE=1`", step3)
 
+    def test_bigboy_start_claims_with_specs_done(self):
+        """Job 1275: plan-apply and runall-start hold every claim until step 3's `ready --specs-done`, and step 3
+        starts only what that call printed; step 5's and step 6's claims stay plain."""
+        bigboy = self.lane("bigboy")
+        step3 = self.section(bigboy, "3. **Start.**", "4. **Spec refresh**")
+        self.assertIn("Run `B ready $ID --specs-done`", step3)
+        self.assertIn("Start only the ids `ready` printed; a child it did not print is running or waiting, so never "
+                      "`B spawn` it.", step3)
+        self.assertIn("   2. Run `B ready $P`. Under the lock", bigboy)
+        step6 = self.section(bigboy, "6. **After a child stops.**", "7. **Final BigBoy review.**")
+        self.assertIn("then `B ready $P`, then `B chain-unlock $P $ID`", step6)
+        self.assertNotIn("--specs-done", step6)
+        gaps = bigboy[bigboy.index("   - `BIGBOY: GAPS` the first time"):]
+        self.assertIn("Run step 2 for it, then `B ready $P --specs-done` and **start** it.", gaps[:gaps.index("\n")],
+                      "plan-apply --fix marks the parent too")
+
     def test_child_start_passes_orchestrator_model(self):
         text = self.rules()
         step3 = self.section(text, "3. **Start.** Run `B ready $ID`", "4. **Spec refresh**")
