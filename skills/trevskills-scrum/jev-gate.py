@@ -106,8 +106,13 @@ def decide(step, job, asked):
         text = f.read_text() if f.exists() else ""
         if not text.strip():
             return "-", "-", "opus"
-        if step == "model" and board.header_value(f, "Complex", ("yes", "no")) == "no":
-            return "-", "Complex: no", "sonnet"  # the header already says not complex: no Jev call
+        if step == "model":  # same order as board.job_complex: feature.md's header first, else spec.md's
+            for name in ("feature.md", "spec.md"):
+                v = board.header_value(job / name, "Complex", ("yes", "no"))
+                if v:
+                    if v == "no":  # the header already says not complex: no Jev call
+                        return "-", f"Complex: no ({name})", "sonnet"
+                    break
         asked.append(q)
         v, raw = jev.score(text, q, LEVELS)
         return q, raw, "sonnet" if v < cut else "opus"
