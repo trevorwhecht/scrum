@@ -3238,6 +3238,7 @@ CARRIED = "VERDICT: PASS\nCarried forward from round {}: no blocking findings.\n
 UI_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n"
 SECURITY_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n"
 DELETION_SKIP = "VERDICT: PASS\nSkipped by orchestrator: diff is at least 90% deletions.\n"
+NOMARKUP_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no UI file's diff touches markup, styling or copy.\n"
 VISUAL_SKIP = "VERDICT: PASS\nSkipped by orchestrator: visual diff found every captured pair identical and the spec says no visual change.\n"
 
 
@@ -3288,8 +3289,36 @@ def _names(wt, *args):
 
 
 ORCH_REVIEW_RE = re.compile(
-    "|".join(re.escape(t) for t in (UI_SKIP, SECURITY_SKIP, DELETION_SKIP, VISUAL_SKIP)) + "|"
+    "|".join(re.escape(t) for t in (UI_SKIP, SECURITY_SKIP, DELETION_SKIP, VISUAL_SKIP, NOMARKUP_SKIP)) + "|"
     + re.escape(CARRIED).replace(r"\{\}", r"\d+"))
+
+
+SCRIPT_EXT_RE = re.compile(r"\.(tsx?|jsx?|mjs|cjs)$")
+_KW = r"(return|const|let|var|if|else|import|export|throw|await|break|continue|case|default|function|type|interface|async|new)\b"
+MARKUP_LINE_RE = re.compile(
+    r"(?<![\w>)\]])</?[A-Za-z>]"  # a JSX tag (not a generic like useState<Foo>)
+    r"|/>|\bclassName\b|\bclass\s*=|\bstyle\b|\bsx\s*=|\b(cn|clsx|cva|twMerge)\("  # markup and styling
+    r"|[\"'`][^\"'`]*[A-Za-z]{2,}\s+[A-Za-z]{2,}[^\"'`]*[\"'`]"  # a quoted string of two or more words (copy)
+    rf"|^\s*(?!{_KW})[A-Za-z][A-Za-z,.'!?:-]*(\s+[A-Za-z][A-Za-z,.'!?:-]*)+\s*$")  # bare JSX text of two or more words
+
+
+def _no_markup_change(wt, base, files):
+    """True when every file of `files` (UI-glob runtime paths) is a script file (ts/tsx/js/jsx) whose added and removed
+    lines in base...HEAD match none of MARKUP_LINE_RE: a logic-only change. Any other extension, an unreadable diff or
+    an empty `files` is False, so the reviewers run."""
+    if not files:
+        return False
+    for f in files:
+        if not SCRIPT_EXT_RE.search(f):
+            return False
+        try:
+            out = _git(wt, "-c", "core.quotePath=false", "diff", "-U0", "--no-color", f"{base}...HEAD", "--", f).decode()
+        except (ValueError, OSError, UnicodeDecodeError, subprocess.SubprocessError):
+            return False
+        for line in out.splitlines():
+            if line[:1] in "+-" and not line.startswith(("+++", "---")) and MARKUP_LINE_RE.search(line[1:]):
+                return False
+    return True
 
 
 def _drop_stale(rd, spawn):
@@ -3788,8 +3817,11 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
     if files is not None:
         skips = {}
         globs = ui_globs(root)
-        if globs and not any(f and not RUNTIME_EXCLUDE_RE.search(f) and glob_match(f, globs) for f in files):
+        ui_files = [f for f in sorted(files) if f and not RUNTIME_EXCLUDE_RE.search(f) and glob_match(f, globs or [])]
+        if globs and not ui_files:
             skips.update(ui=UI_SKIP, ux=UI_SKIP)
+        elif globs and _no_markup_change(wt, base, ui_files):
+            skips.update(ui=NOMARKUP_SKIP, ux=NOMARKUP_SKIP)
         if not any(rx.search(f) for f in files for rx in SECURITY_RES):
             skips["security"] = SECURITY_SKIP
         if skips:
@@ -3840,6 +3872,8 @@ def _lilguy_trigger(rows, names, feature_text: str) -> str | None:
     if binary := next((p for a, _, p in rows if a is None), None):
         return f"binary file {binary}"
     mechanical = re.search(r"^Lane: lilguy — mechanical", feature_text, re.M)  # renames, config, docs: any size
+    if re.search(r"^Lane: lilguy — bug, cause pinned", feature_text, re.M):  # its required repro test is not counted
+        rows = [r for r in rows if not is_test_path(r[2])]
     if not mechanical and (lines := sum(a for a, _, _ in rows)) > LILGUY_MAX_LINES:
         return f"diff over {LILGUY_MAX_LINES} added lines ({lines})"
     if not mechanical and (files := len({p for a, _, p in rows if a})) > LILGUY_MAX_FILES:
@@ -6284,7 +6318,7 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
     order. recommend is an optional (key, why) naming the option the agent advises. Returns the stored option dicts.
     An eligible kind (lanes/unblock.md) leaves the job in its stage and returns {"unblock": True, "n": N} instead.
     title must be a STOP_TITLES key; it is stored as stopTitle on a parked job (not on an unblock, a stall or a queue wait: a check job asking `waiting on the
-    E2E|Check queue` stays in check with reason E2E_QUEUE_WAIT or CHECK_QUEUE_WAIT and returns {"waiting": True})."""
+    E2E|Check|Build queue` stays in check with reason E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT or BUILD_QUEUE_WAIT and returns {"waiting": True})."""
     if title not in STOP_TITLES:
         raise SystemExit(f"ask needs --title, one of: {', '.join(STOP_TITLES)} (got {title!r})")
     question = question.strip()
@@ -6325,7 +6359,7 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
             return {"unblock": True, "n": n}
         was = job["stage"]
         if was == "check" and (m := QUEUE_ASK_RE.match(question)):  # a capacity wait, not a stall: no try spent
-            reason = E2E_QUEUE_WAIT if m[1].upper() == "E2E" else CHECK_QUEUE_WAIT
+            reason = {"E2E": E2E_QUEUE_WAIT, "BUILD": BUILD_QUEUE_WAIT}.get(m[1].upper(), CHECK_QUEUE_WAIT)
             for k in ("question", "options", "recommend", "stopTitle", "outcome", "stalled"):
                 job.pop(k, None)
             job.update(reason=reason, updatedAt=now())
@@ -7070,8 +7104,9 @@ LIVE_IDLE = "(session alive but idle)"  # cmd_watchdog's live-idle stall reason 
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
 STALL = "stalled: "  # new-shape reason prefix: the job keeps its WATCHED stage and has board `stalled` true
 AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not loaded|^waiting on the (?:E2E|Check) queue", re.I)
-QUEUE_ASK_RE = re.compile(r"^waiting on the (E2E|Check) queue", re.I)  # cmd_ask holds a check job on it as waiting, not stalled
+QUEUE_ASK_RE = re.compile(r"^waiting on the (E2E|Check|Build) queue", re.I)  # cmd_ask holds a check job on it as waiting, not stalled
 E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT = "waiting: E2E queue", "waiting: Check queue"  # serve.py auto_resume starts it once the lock frees
+BUILD_QUEUE_WAIT = "waiting: Build queue"  # a second Build 124 (job 1250): auto_resume starts it once build.lock frees
 CI_BILLING_RE = re.compile(r"failed account payments|spending limit|CI refused: GitHub billing", re.I)
 LOAD_BLOCK_RE = re.compile(r"CPU load|machine load|swap|out of memory|low memory|memory pressure|free RAM", re.I)
 LOAD_BLOCK_WAIT = "debug blocked by machine load; retrying on a quiet machine"  # serve.py auto_resume re-runs the debugger once
@@ -7097,10 +7132,10 @@ def stalled(job: dict) -> bool:
 
 
 def queue_waiting(job: dict) -> bool:
-    """A check job cmd_ask holds on the E2E or Check queue (reason E2E_QUEUE_WAIT or CHECK_QUEUE_WAIT): not stalled,
-    not paused; serve.py auto_resume starts it as soon as that lock is free, spending no try."""
+    """A check job cmd_ask holds on the E2E, Check or Build queue (reason E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT or
+    BUILD_QUEUE_WAIT): not stalled, not paused; serve.py auto_resume starts it as soon as that lock is free, spending no try."""
     return job.get("stage") == "check" and not job.get("paused") and not job.get("stalled") \
-        and str(job.get("reason") or "").startswith((E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT))
+        and str(job.get("reason") or "").startswith((E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT, BUILD_QUEUE_WAIT))
 
 
 FINISH_FIRST = "finishing work in flight first"  # finish_first's reason prefix; serve.py held_gate's finish_first token
@@ -7122,7 +7157,7 @@ def resume_waits(job: dict, by_id: dict) -> bool:
 def finish_first(root=None, jobs=None) -> str | None:
     """Why no automatic new claim (backlog next, a Run-all or BigBoy child, auto-continue, wake) may start in any
     project now, or None (job 971: finish the task at hand first). Read across root's board (`jobs` when given: the
-    caller's locked copy) and every registered project's: a job held on the E2E or Check queue (queue_waiting, or
+    caller's locked copy) and every registered project's: a job held on the E2E, Check or Build queue (queue_waiting, or
     stalled on E2E_WAIT_REASON or CHECK_WAIT_REASON), else a stalled job auto_resume restarts (resume_waits) that waits
     on the machine gate: spawn's gate queued its resume (queued_launch), or resume_gate refuses it. Paused and
     needs-human jobs never hold it (job 751); Trevor's clicks (Play, Resume, Run now) never ask it."""
@@ -7138,7 +7173,8 @@ def finish_first(root=None, jobs=None) -> str | None:
             reason = str(j.get("reason") or "")
             if queue_waiting(j) or stalled(j) and j.get("stage") != "needs-human" \
                     and reason.startswith((STALL + E2E_WAIT_REASON, STALL + CHECK_WAIT_REASON)):
-                queue = "E2E" if reason.startswith((E2E_QUEUE_WAIT, STALL + E2E_WAIT_REASON)) else "Check"
+                queue = "E2E" if reason.startswith((E2E_QUEUE_WAIT, STALL + E2E_WAIT_REASON)) \
+                    else "Build" if reason.startswith(BUILD_QUEUE_WAIT) else "Check"
                 return f"{FINISH_FIRST}: {name}/{j.get('id')} waits on the {queue} queue"
             if resume_waits(j, by_id):
                 waiting.append((scrum, name, j))
