@@ -4343,7 +4343,9 @@ def _lilguy_trigger(rows, names, feature_text: str) -> str | None:
     if not mechanical and (files := len({p for a, _, p in rows if a})) > LILGUY_MAX_FILES:
         return f"more than {LILGUY_MAX_FILES} files with added lines ({files})"
     for p in names:
-        if RULES_RE.search(p) and p not in feature_text and f"{p.rpartition('/')[0]}/*.md" not in feature_text:
+        short = p.removeprefix("skills/trevskills-scrum/") if p.startswith("skills/trevskills-scrum/") else ""
+        named = p in feature_text or f"{p.rpartition('/')[0]}/*.md" in feature_text or ("/" in short and short in feature_text)
+        if RULES_RE.search(p) and not named:
             return f"rules file {p} not in feature.md"
     return None
 
