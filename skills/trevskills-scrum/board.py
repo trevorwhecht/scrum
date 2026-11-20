@@ -4080,23 +4080,32 @@ def shop_room(root) -> bool:
 
 
 DIGEST_PROPOSALS_RE = re.compile(r"digests/\d+/proposals\.json")  # cloud.md expands these; shop dispatch does not
+SHOP_LILGUY_HELD_SECS = 7200  # seconds this Mac's gates hold a lilguy job before the shop may take it (job 1246)
 
 
 def shop_excluded(root, job: dict, jobs: list) -> bool:
-    """A job shop dispatch never takes: lilguy as the local lilguy route takes it (board lane, `Lane: lilguy` anywhere
-    in feature.md, or lilguy-fit.json fit true with no parent or a Run-all parent) or a feature.md naming a digest
-    proposals.json. cmd_ready never leaves one of these to the shop."""
+    """A job shop dispatch never takes: a feature.md naming a digest proposals.json, always; or lilguy as the local
+    lilguy route takes it (board lane, `Lane: lilguy` anywhere in feature.md, or lilguy-fit.json fit true with no parent
+    or a Run-all parent) unless this Mac's gates have held it over 2 h: its queue-gates.txt names a gate and
+    play_queued, else updatedAt, is more than SHOP_LILGUY_HELD_SECS old (job 1246; a missing or empty file, or a missing
+    or malformed time, keeps it excluded). cmd_ready never leaves an excluded job to the shop."""
     folder = Path(root) / "jobs" / job["id"]
     try:
         feature = (folder / "feature.md").read_text(errors="replace")
     except OSError:
         feature = ""  # dispatched, then failed as a step: the claim is put back
-    if job_lane(root, job) == "lilguy" or re.search(r"\bLane:\s*lilguy\b", feature, re.I) \
-            or DIGEST_PROPOSALS_RE.search(feature):
+    if DIGEST_PROPOSALS_RE.search(feature):
         return True
-    if job.get("parent") and next((j.get("lane") for j in jobs if j["id"] == job["parent"]), None) != "runall":
+    runall = not job.get("parent") or next((j.get("lane") for j in jobs if j["id"] == job["parent"]), None) == "runall"
+    if not (job_lane(root, job) == "lilguy" or re.search(r"\bLane:\s*lilguy\b", feature, re.I)
+            or runall and _health_file(folder / "lilguy-fit.json", dict).get("fit") is True):
         return False
-    return _health_file(folder / "lilguy-fit.json", dict).get("fit") is True
+    try:
+        gates = (folder / "queue-gates.txt").read_text(encoding="utf-8", errors="replace").split()
+    except OSError:
+        gates = []
+    since = _epoch(job.get("play_queued") or job.get("updatedAt"))
+    return not (gates and since is not None and time.time() - since > SHOP_LILGUY_HELD_SECS)
 
 
 def cmd_lilguy_fit(root, job_id: str) -> dict:
