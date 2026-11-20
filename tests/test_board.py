@@ -7237,6 +7237,23 @@ print("stub err", file=sys.stderr)
         self.assertEqual(shlex.split(hook["command"]), ["python3", str(script)])
         self.assertTrue(script.is_file())
 
+    def test_spawn_records_pid_so_short_id_prompt_reads_alive(self):
+        """Job 1274: a chat hand-off spawns with a short-id prompt; the recorded pid keeps the session alive for the watchdog."""
+        job_id = "1274-short-id-job"
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": job_id, "stage": "build", "lane": "standard"}]}))
+        (self.root / "jobs" / job_id).mkdir(parents=True)
+        proc, _ = board.spawn(self.root, job_id, "start", "/trevskills-scrum start 1274")
+        proc.wait(timeout=10)
+        job = board.find(board.read_board(self.root), job_id)
+        self.assertEqual(job.get("pid"), proc.pid)
+        ps = subprocess.CompletedProcess([], 0, stdout=f"{proc.pid} ?? claude -p /trevskills-scrum start 1274\n", stderr="")
+        with mock.patch.object(board.subprocess, "run", return_value=ps):
+            self.assertTrue(board.session_alive_fn()(job))
+        # a later spawn replaces the pid with the new session's
+        proc2, _ = board.spawn(self.root, job_id, "resume", "/trevskills-scrum resume 1274")
+        proc2.wait(timeout=10)
+        self.assertEqual(board.find(board.read_board(self.root), job_id).get("pid"), proc2.pid)
+
     def test_spawn_lean_start(self):
         """Job 1253: no MCP server, every plugin the account or repo settings name turned off (hookify kept while the
         repo has hookify rules), and CLAUDE.md off for every lane but lilguy."""
