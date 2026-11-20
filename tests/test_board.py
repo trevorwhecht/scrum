@@ -5009,10 +5009,12 @@ class BoardTest(unittest.TestCase):
         self.assertIn("digest-start: escapes: ", err)
         self.assertIsNone(text)
 
-    def pulse_digest(self, lines, since=None, error_since=None, boards=None):
+    def pulse_digest(self, lines, since=None, error_since=None, boards=None, digests=None, own=False):
         """digest-start over a pulse.log of `lines` (dicts or raw strings); `since` and `error_since` (epoch) set the
         jobs.txt mtime of an earlier digest 001, and of a failed digest 002 after it. `boards` ({project: jobs}) writes
-        a registry whose repo <project> has those board jobs. Returns (pulse.md, stderr)."""
+        a registry whose repo <project> has those board jobs; `digests` ({project: [(name, epoch, failed)]}) gives a
+        registered project digests/<name>/jobs.txt at that mtime (and error.md when failed); `own` registers this
+        test's own repo too. Returns (pulse.md, stderr)."""
         self.done_jobs(1)
         for name, at, err in (("001", since, False), ("002", error_since, True)):
             if at is not None:
@@ -5023,8 +5025,17 @@ class BoardTest(unittest.TestCase):
         for name, jobs in (boards or {}).items():
             (reg / name / "scrum").mkdir(parents=True)
             (reg / name / "scrum" / "board.json").write_text(json.dumps({"jobs": jobs}))
-        if boards:
-            (reg / "projects.json").write_text(json.dumps([str(reg / n) for n in boards]))
+        for name, made in (digests or {}).items():
+            for d, at, failed in made:
+                folder = reg / name / "scrum" / "digests" / d
+                folder.mkdir(parents=True)
+                (folder / "jobs.txt").write_text("")
+                if failed:
+                    (folder / "error.md").write_text("failed\n")
+                os.utime(folder / "jobs.txt", (at, at))
+        if boards or own:
+            (reg / "projects.json").write_text(json.dumps([str(reg / n) for n in boards or {}]
+                                                          + ([str(self.root.parent)] if own else [])))
         if lines is not None:
             (reg / "pulse.log").write_text("".join((l if isinstance(l, str) else json.dumps(l)) + "\n" for l in lines))
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg / "projects.json"), "SCRUM_PULSE": str(reg / "pulse.log")}):
@@ -5231,6 +5242,27 @@ class BoardTest(unittest.TestCase):
         text = self.pulse_ticks((0, 0, {}), (600, 1, {}))  # 10 minutes to a busy line
         self.assertIn("Idle with claimable work: 2 min (longest stretch 2 min)\n", text)
 
+    def test_pulse_lists_idle_stretches_over_30_min(self):
+        """Job 1268: each idle stretch over PULSE_STRETCH_MIN rounded minutes is listed with its times, oldest first,
+        right after the Idle line, so a digest can tell whose window the idle time fell in; none over it: no line."""
+        self.assertEqual(board.PULSE_STRETCH_MIN, 30)
+        idle = lambda ks: [(60 * k, 0, {}) for k in ks]
+        text = self.pulse_ticks(*idle(range(41)), (2460, 1, {}), *idle(range(42, 53)))  # 41 min, a session, 11 min
+        self.assertIn("Idle with claimable work: 52 min (longest stretch 41 min)\n"
+                      "Idle stretches over 30 min: 2023-11-14T22:13+00:00 to 2023-11-14T22:54+00:00 (41 min)\n"
+                      "Gated with claimable work: 0 min\n", text)
+        self.tearDown(); self.setUp()
+        # 33 min (its last line counts a capped 120 s, not the 600 s gap to the session), then a longer 35 min
+        text = self.pulse_ticks(*idle(range(32)), (2460, 1, {}), *idle(range(42, 77)))
+        self.assertIn("Idle with claimable work: 68 min (longest stretch 35 min)\n"
+                      "Idle stretches over 30 min: 2023-11-14T22:13+00:00 to 2023-11-14T22:46+00:00 (33 min); "
+                      "2023-11-14T22:55+00:00 to 2023-11-14T23:30+00:00 (35 min)\n"
+                      "Gated with claimable work: 0 min\n", text)
+        self.tearDown(); self.setUp()
+        text = self.pulse_ticks(*idle(range(30)), (1800, 1, {}))  # exactly 30 min
+        self.assertIn("Idle with claimable work: 30 min (longest stretch 30 min)\nGated with claimable work:", text)
+        self.assertNotIn("Idle stretches", text)
+
     def test_pulse_hot_tick_held_by_guard(self):
         text = self.pulse_ticks(
             (0, 0, {"cpu_load": 300, "swap": 25}),  # at the limits: idle
@@ -5394,6 +5426,48 @@ class BoardTest(unittest.TestCase):
         self.assertIn("# Pulse: digest 003\n", text)
         self.assertIn(" · ticks: 2\n", text)
         self.assertIn("Peak sessions: 2 at 1970-01-12T13:55+00:00\n", text)
+
+    def test_pulse_window_starts_at_newest_project_digest(self):
+        """Job 1268: pulse.log is machine-wide, so pulse.md starts at the newest digest of any registered project (that
+        digest already reported what came before it); processes.md keeps this project's own last digest."""
+        s = 1_700_000_000
+        tick = lambda t, top=2, cooldown=False: {"t": t, "sessions": 0, "cooldown": cooldown, "focus": "app", "projects": {
+            "app": {"claimable": 1, "waiting": 0, "busy": False, "top": top, "auto": True}}}
+        lines = [tick(s, top=1), tick(s + 30, cooldown=True)] + [tick(s + 60 * k) for k in range(1, 21)]  # app 2 in cool down
+        text, err = self.pulse_digest(lines, since=s, boards={"app": [{"id": "002-b", "started_by": "serve"}], "lib": []},
+                                      digests={"lib": [("004", s + 600, False)]})
+        self.assertIn("Window: 2023-11-14T22:23+00:00 to 2023-11-14T22:33+00:00 · ticks: 11\n"
+                      "Idle with claimable work: 11 min (longest stretch 11 min)\n", text)
+        self.assertIn("Claims during cool down: 0\n", text)
+        self.assertIn("\nSince: 2023-11-14T22:13+00:00\n", (self.root / "digests" / "002" / "processes.md").read_text())
+
+    def test_pulse_window_skips_failed_later_and_own_digests(self):
+        """Job 1268: _pulse_since_any skips another project's failed digest, one written after this digest's own
+        jobs.txt, a project with no digests folder (app) and this project's own repo."""
+        s = 1_700_000_000
+        app = {"claimable": 1, "waiting": 0, "busy": False, "top": 1, "auto": True}
+        lines = [{"t": s + 60 * k, "sessions": 0, "cooldown": False, "focus": "app", "projects": {"app": app}}
+                 for k in range(21)]
+        idle = lambda text: re.search(r"Idle with claimable work: .*\n", text)[0]
+        alone, _ = self.pulse_digest(lines, since=s, boards={"app": []})  # no other digest, own repo unregistered
+        self.assertIn("Window: 2023-11-14T22:13+00:00 to ", alone)
+        self.tearDown(); self.setUp()
+        text, err = self.pulse_digest(lines, since=s, boards={"app": [], "lib": []}, own=True, digests={
+            "lib": [("004", s + 600, True), ("005", time.time() + 86400, False)]})  # failed; after this digest
+        self.assertNotIn("digest-start: pulse", err)
+        self.assertIn("Window: 2023-11-14T22:13+00:00 to ", text)
+        self.assertEqual(idle(text), idle(alone))
+        self.assertEqual(idle(text), "Idle with claimable work: 21 min (longest stretch 21 min)\n")
+        digests, lib = self.root / "digests", Path(self.tmp.name) / "reg" / "lib" / "scrum" / "digests"
+        mark = lambda path, at: (path.mkdir(parents=True, exist_ok=True), (path / "jobs.txt").write_text(""),
+                                 os.utime(path / "jobs.txt", (at, at)))
+        mark(digests / "003", s + 700)  # own repo: never read through the registry
+        mark(digests / "002", s + 800)  # this digest's own jobs.txt
+        mark(lib / "006", s + 900)  # after it: skipped
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "reg" / "projects.json")}):
+            self.assertEqual(board._pulse_since_any(self.root, "002"), s)
+            (digests / "002" / "jobs.txt").unlink()  # no jobs.txt: now is the cutoff
+            self.assertEqual(board._pulse_since_any(self.root, "002"), s + 900)
 
     def test_timing_build_start_from_run_log(self):
         t0 = 1_700_000_000
@@ -5670,6 +5744,80 @@ class BoardTest(unittest.TestCase):
         for bad in ("", "soon", f"{t0 - 60}"):  # empty, non-numeric, before feature.md (a claim after spec.md starts round 1: see test_timing_build_start_from_run_log)
             claimed.write_text(bad)
             self.assertEqual(board._timing_row(self.root, "j", {}, {})[0][2:4], ["3h10m", "0m"], bad)
+
+    def claim_clock_job(self, t0, job_id="j"):
+        """test_timing_row_claim_clock's last fixture for job_id: feature.md at t0, claimed-at.txt t0+3h, spec.md at
+        t0+3h10m and a start log at t0+3h15m, so Queue is 3h05m (3h claim wait plus 5m to the start)."""
+        for rel, at in (("feature.md", t0), ("spec.md", t0 + 3 * 3600 + 600)):
+            os.utime(self.write(f"{job_id}/{rel}", "x\n"), (at, at))
+        (self.root / "jobs" / job_id / "claimed-at.txt").write_text(f"{t0 + 3 * 3600}\n")
+        (self.root / "runs").mkdir(exist_ok=True)
+        start = datetime.fromtimestamp(t0 + 3 * 3600 + 900, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        (self.root / "runs" / f"{start}-start-{job_id}.log").write_text("")
+
+    def test_write_timing_queue_after_depends_on(self):
+        """Job 1268: write_timing passes its board map, so a claimed job whose blocker is done on the same board gets
+        the `after depends_on` part in its timing.md Queue cell."""
+        t0 = 1_700_000_000
+        blocker, job = board.cmd_new(self.root, "Blocker"), board.cmd_new(self.root, "Waits")
+        with board.locked_board(self.root) as b:
+            board.find(b, blocker).update(stage="done",
+                                          updatedAt=datetime.fromtimestamp(t0 + 9000, timezone.utc).isoformat())
+            board.find(b, job).update(depends_on=[blocker])
+        self.claim_clock_job(t0, job)
+        (self.root / "digests" / "001").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
+            board.write_timing(self.root, "001", [job])
+        row = next(l for l in (self.root / "digests" / "001" / "timing.md").read_text().splitlines()
+                   if l.startswith(f"| {job} |"))
+        self.assertEqual([c.strip() for c in row.strip("|").split("|")][3:5],
+                         ["3h05m (35m after depends_on)", f"depends_on:{blocker}"])
+
+    def test_timing_row_queue_after_depends_on(self):
+        """Job 1268: a depends_on job whose blockers are all done splits out the Queue after the latest blocker's
+        updatedAt, so the reader counts only that part (1470's 28h03m was mostly a planned wait on 1457)."""
+        t0 = 1_700_000_000
+        self.claim_clock_job(t0)
+        done = lambda job_id, at: {"id": job_id, "stage": "done",
+                                   "updatedAt": datetime.fromtimestamp(t0 + at, timezone.utc).isoformat()}
+        queue = lambda job_id, job, by_id: board._timing_row(self.root, job_id, job, {}, by_id=by_id)[0][3]
+        self.assertEqual(queue("j", {"depends_on": ["1-a"]}, {"1-a": done("1-a", 9000)}),
+                         "3h05m (35m after depends_on)")  # 30m of the claim wait after t0+2h30m, plus 5m to the start
+        self.assertEqual(queue("j", {"depends_on": ["1-a", "2-b"]}, {"1-a": done("1-a", 3600), "2-b": done("2-b", 9000)}),
+                         "3h05m (35m after depends_on)")  # the latest blocker counts
+        for rel, at in (("feature.md", 0), ("spec.md", 4 * 3600)):  # a dep-waits.txt wait (cmd_wait_on), no claim
+            os.utime(self.write(f"k/{rel}", "x\n"), (t0 + at, t0 + at))
+        (self.root / "jobs/k/dep-waits.txt").write_text(f"{t0 + 3600} 1-a\n")
+        self.assertEqual(queue("k", {"depends_on": ["1-a"]}, {"1-a": done("1-a", 3 * 3600 + 1800)}),
+                         "3h00m (30m after depends_on)")
+
+    def test_timing_row_queue_depends_on_edges(self):
+        """Job 1268: the Queue cell stays the plain total unless every blocker is on the board, done, with a readable
+        updatedAt; the split part runs from 0m to the whole Queue."""
+        t0 = 1_700_000_000
+        self.claim_clock_job(t0)
+        at = lambda secs: datetime.fromtimestamp(t0 + secs, timezone.utc).isoformat()
+        blocker = lambda **x: {"1-a": {"id": "1-a", "stage": "done", "updatedAt": at(9000), **x}}
+        dep = {"depends_on": ["1-a"]}
+        row = lambda job, by_id, job_id="j": board._timing_row(self.root, job_id, job, {}, by_id=by_id)[0]
+        self.assertEqual(row({}, blocker())[3], "3h05m")  # no depends_on
+        self.assertEqual(row({"depends_on": []}, blocker())[3], "3h05m")
+        self.assertEqual(row(dep, None)[3], "3h05m")  # no board map
+        self.assertEqual(board._timing_row(self.root, "j", dep, {})[0][3], "3h05m")  # by_id left out
+        self.assertEqual(row(dep, {})[3], "3h05m")  # blocker not on the board
+        self.assertEqual(row({"depends_on": ["1-a", "2-b"]}, blocker())[3], "3h05m")  # one of two missing
+        for stage in (s for s in board.STAGES if s != "done"):
+            self.assertEqual(row(dep, blocker(stage=stage))[3], "3h05m", stage)
+        for bad in (None, "", "soon", 5):
+            self.assertEqual(row(dep, blocker(updatedAt=bad))[3], "3h05m", bad)
+        self.assertEqual(row(dep, {"1-a": {"id": "1-a", "stage": "done"}})[3], "3h05m")  # no updatedAt
+        self.assertEqual(row(dep, blocker(updatedAt=at(4 * 3600)))[3], "3h05m (0m after depends_on)")  # after the Queue
+        self.assertEqual(row(dep, blocker(updatedAt=at(-600)))[3], "3h05m (3h05m after depends_on)")  # before feature.md
+        self.assertEqual(row(dep, blocker(), "none")[3], "-")  # no spec.md: no Queue
+        cells = row(dep, blocker())
+        self.assertEqual((cells[4], len(cells)), ("depends_on:1-a", 11))  # one cell more would break the table header
+        self.write("j/queue-gates.txt", "ram_room\n")
+        self.assertEqual(row(dep, blocker())[3:5], ["3h05m (35m after depends_on)", "ram_room"])
 
     def test_bad_window_thresholds(self):
         self.assertEqual((board.BAD_WASTED_PCT, board.BAD_FIRST_PASS, board.BAD_MIN_JOBS, board.EARLY_DIGEST_MIN),

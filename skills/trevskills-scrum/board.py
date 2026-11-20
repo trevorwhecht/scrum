@@ -1678,6 +1678,29 @@ def _pulse_since(root, digest_id):
     return None
 
 
+def _pulse_since_any(root, digest_id):
+    """The newest of _pulse_since(root, digest_id) and every other registered project's (projects(), this repo skipped
+    by resolved path) digest jobs.txt mtime, or None when none counts: pulse.log is machine-wide, so write_pulse never
+    re-reports what another project's digest already did. A digest counts when its name matches DIGEST_RE, it has no
+    error.md and its jobs.txt mtime is before this digest's own digests/<digest_id>/jobs.txt mtime (now when missing).
+    An OSError on a project's digests skips that project."""
+    found = [t] if (t := _pulse_since(root, digest_id)) is not None else []
+    cutoff = _mtime(Path(root) / "digests" / digest_id / "jobs.txt")
+    cutoff = time.time() if cutoff is None else cutoff
+    me = Path(root).resolve().parent
+    for repo in projects().values():
+        try:
+            if repo.resolve() == me:
+                continue
+            for p in (repo / "scrum" / "digests").iterdir():
+                if DIGEST_RE.fullmatch(p.name) and not (p / "error.md").exists():
+                    if (at := _mtime(p / "jobs.txt")) is not None and at < cutoff:
+                        found.append(at)
+        except OSError:
+            continue
+    return max(found, default=None)
+
+
 def _board_job(cache, name, n):
     """Project `name`'s board job numbered n, or None (a project not in projects(), an unreadable board or a missing
     job). cache: {name: board jobs}."""
@@ -1690,16 +1713,20 @@ def _board_job(cache, name, n):
 
 
 PULSE_TICK_CAP_S = 120  # write_pulse: a pulse.log line counts as at most this many seconds (a gap means no ticks)
+PULSE_STRETCH_MIN = 30  # write_pulse: an idle stretch over this many rounded minutes is listed with its times
 PULSE_LAST_S = 60  # write_pulse: the last line counts one tick
 
 
 def write_pulse(root, digest_id):
-    """digests/<NNN>/pulse.md: pulse.log totals since the last digest (_pulse_since). Lines sort by time; a line lasts
+    """digests/<NNN>/pulse.md: pulse.log totals since the newest digest of any registered project (_pulse_since_any:
+    pulse.log is machine-wide, so every figure below uses that one window). Lines sort by time; a line lasts
     the seconds to the next line, capped at PULSE_TICK_CAP_S (the last line PULSE_LAST_S), so no total passes the window plus one
     tick, however many lines a minute holds; totals are rounded whole minutes. Only projects with Auto continue on
     (`auto` True; a line without it is off) count toward idle. Idle with claimable work (no session, no cool-down,
     some auto-on project with claimable or waiting work, and the line's cpu_load and swap within MAX_CPU_LOAD_PCT /
-    MAX_SWAP_PCT), held by machine guard (would be idle but over either limit; ends an idle stretch), gated (would be
+    MAX_SWAP_PCT; then, only when one qualifies, `Idle stretches over PULSE_STRETCH_MIN min:` each stretch whose
+    rounded minutes pass it, oldest first, joined by `; `: its first idle line's t to its last idle line's t plus that
+    line's seconds), held by machine guard (would be idle but over either limit; ends an idle stretch), gated (would be
     idle, within both limits, but the line's top-level `gates` (serve.py pulse_tick) is non-empty, or no auto-on
     project has claimable work and every auto-on project with waiting work has non-empty `gates`; ends an idle
     stretch; minutes per token, overlap:<id> counted as overlap; a missing or null `gates` is ungated), idle held by
@@ -1718,7 +1745,7 @@ def write_pulse(root, digest_id):
     job's `account` (none: the first account; job not on the board: unknown), in accounts() order. A line's per-project
     readings count only for projects in projects() (test fixtures never inflate a total; Other starts still names an
     unregistered one); no filter when it is empty."""
-    since = _pulse_since(root, digest_id)
+    since = _pulse_since_any(root, digest_id)
     lines = sorted((l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and "orphan_killed" not in l
                     and (since is None or l["t"] >= since)),  # serve.py stop_orphans' kill lines are no tick
                    key=lambda l: l["t"])  # in time order, so no total passes the window when two writers interleave
@@ -1735,7 +1762,7 @@ def write_pulse(root, digest_id):
         over = lambda l, key, cap: is_num(l.get(key)) and l[key] > cap
         gates = lambda v: [g for g in v if isinstance(g, str)] if isinstance(v, list) else []
         idle = cooled = paused = guard = streak = longest = nonfocus = gated = guarded = 0
-        by_gate = {}
+        by_gate, stretches = {}, []  # stretches: [first idle t, last idle t + its secs, streak secs] per idle stretch
         for l, nxt in zip(lines, lines[1:] + [None]):
             dt = min(nxt["t"] - l["t"], PULSE_TICK_CAP_S) if nxt else PULSE_LAST_S
             ps = projs(l)
@@ -1756,8 +1783,11 @@ def write_pulse(root, digest_id):
                 elif isinstance(l.get("guard"), str) and l["guard"]:
                     guarded, streak = guarded + dt, 0
                 else:
+                    if not streak:  # this line starts a stretch
+                        stretches.append([l["t"], 0, 0])
                     idle, streak = idle + dt, streak + dt
                     longest = max(longest, streak)
+                    stretches[-1][1:] = [l["t"] + dt, streak]
             else:
                 streak = 0
                 if l.get("sessions") == 0 and any(work(p) for p in ps.values()):
@@ -1770,6 +1800,7 @@ def write_pulse(root, digest_id):
                 nonfocus += dt
         idle, cooled, paused, guard, longest, nonfocus, gated, guarded = (
             round(x / 60) for x in (idle, cooled, paused, guard, longest, nonfocus, gated, guarded))
+        long_idle = [(a, b, m) for a, b, secs in stretches if (m := round(secs / 60)) > PULSE_STRETCH_MIN]
         num = lambda j: str(int(m[1])) if (m := re.match(r"(\d+)-", j)) else j
         hot, started = {}, set()
         for l in lines:
@@ -1820,6 +1851,8 @@ def write_pulse(root, digest_id):
         focus = next((l["focus"] for l in reversed(lines) if isinstance(l.get("focus"), str)), "none")
         out += [f"Window: {iso(lines[0]['t'])} to {iso(lines[-1]['t'])} · ticks: {len(lines)}",
                 f"Idle with claimable work: {idle} min (longest stretch {longest} min)",
+                *([f"Idle stretches over {PULSE_STRETCH_MIN} min: " + "; ".join(
+                    f"{iso(a)} to {iso(b)} ({m} min)" for a, b, m in long_idle)] if long_idle else []),
                 f"Gated with claimable work: {gated} min"
                 + (" (" + ", ".join(f"{g} {round(v / 60)}" for g, v in by_gate.items()) + ")" if gated else ""),
                 f"Held by machine guard: {guard} min",
@@ -2796,7 +2829,23 @@ def _waited(prev, end, starts, mtimes, human=()):
     return total
 
 
-def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
+def _deps_done_at(job, by_id):
+    """The latest board updatedAt (epoch secs) of job's depends_on blockers when every one is in by_id ({id: board
+    job}) at stage done with an updatedAt _epoch reads; None otherwise (no depends_on, no by_id, a blocker missing, not
+    done or undated)."""
+    deps = job.get("depends_on")
+    if by_id is None or not isinstance(deps, list) or not deps:
+        return None
+    ends = []
+    for d in deps:
+        b = by_id.get(d) if isinstance(d, str) else None
+        if not isinstance(b, dict) or b.get("stage") != "done" or (at := _epoch(b.get("updatedAt"))) is None:
+            return None
+        ends.append(at)
+    return max(ends)
+
+
+def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=None):
     """(row cells, wall secs, rounds, no-change rounds, E2E lock waits, stall secs to resume) for one claimed job. The no-change cell is the count and the later round of each
     equal pair, e.g. `2 (rounds 2,3)`. Created is feature.md's
     mtime (else spec.md's), Spec starts at claimed-at.txt (cmd_ready) when sane, the wait before it counting as Queue; done is the board updatedAt; each round's time runs from the previous round's last file
@@ -2807,7 +2856,10 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
     then ` (held: <tokens>)` from stall-holds.txt (serve.py note_stall_hold: what auto_resume passed it over for).
     Each `queued` epoch (a questions.log queue-wait line) runs to the job's next run log, else the round's end, is
     subtracted like `waits` and adds one to E2E lock waits. An autoPlayed job's Round times start `paused `, and a job
-    whose board entry lists depends_on gets `depends_on:<id>` as its Queue gate when queue-gates.txt gives none."""
+    whose board entry lists depends_on gets `depends_on:<id>` as its Queue gate when queue-gates.txt gives none.
+    by_id (write_timing's {id: board job}): when every depends_on blocker is on it at stage done (_deps_done_at), the
+    Queue cell is `<total> (<after> after depends_on)`, <after> being the part of each Queue piece (feature.md to the
+    claim, each dep-waits.txt span, spec.md to round 1's start) after the latest blocker's updatedAt."""
     folder = Path(root) / "jobs" / job_id
     created = _mtime(folder / "feature.md") or _mtime(folder / "spec.md")
     done, spec_at = _epoch(job.get("updatedAt")), _mtime(folder / "spec.md")
@@ -2824,6 +2876,7 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
             claim = None
         first = None if start or not spec_at else claim if claim and claim > spec_at else next((r for r in runs if r > spec_at), None)
         start, queue = (first, first - spec_at) if first else (spec_at, 0 if spec_at else None)
+    pieces = [(spec_at, spec_at + queue)] if queue else []  # each (from, to) the Queue adds up, for `after depends_on`
     times, hwaits, heads, prev = [], [], [], start or created
     mtimes = sorted(t for q in folder.rglob("*") if (t := _mtime(q))) if waits else []
     runs = _run_starts(root, job_id)
@@ -2851,6 +2904,7 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
     spec_from = created
     if claim and spec_at and created and created <= claim <= spec_at:
         spec, queue, spec_from = spec_at - claim, queue + claim - created, claim
+        pieces.append((created, claim))
     try:  # cmd_wait_on: a parentless job's dependency wait counts as Queue, not Spec
         dep = [float(l.split()[0]) for l in (folder / "dep-waits.txt").read_text(encoding="utf-8").splitlines()
                if re.fullmatch(r"\d+(\.\d+)? \S+", l.strip())]
@@ -2863,6 +2917,7 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
             a = max(a, upto)
             if b > a:
                 total, upto = total + b - a, b
+                pieces.append((a, b))
         total = min(total, spec)
         spec, queue = spec - total, queue + total
     try:  # serve.py note_queue_gate: the launch gates that queued it
@@ -2877,7 +2932,11 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
         stall_cell.append("?" if at is None else "open" if nxt is None else _mins(nxt - at))
         resume += nxt - at if nxt else 0
     paused = "paused " if job.get("autoPlayed") and times else ""  # sat paused until serve.py auto_play played it
-    cells = [job_id, _mins(wall), _mins(spec), _mins(queue), gates, str(len(rounds)), paused + ", ".join(times) or "-",
+    queue_cell = _mins(queue)
+    if queue is not None and (blocked := _deps_done_at(job, by_id)) is not None:  # the part after the planned wait
+        after = min(sum(max(b - max(a, blocked), 0) for a, b in pieces), queue)
+        queue_cell += f" ({_mins(after)} after depends_on)"
+    cells = [job_id, _mins(wall), _mins(spec), queue_cell, gates, str(len(rounds)), paused + ", ".join(times) or "-",
              ", ".join(hwaits) or "-", f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0"]
     try:  # serve.py note_stall_hold: what held its stalls
         held = (folder / "stall-holds.txt").read_text(encoding="utf-8", errors="replace").split()
@@ -2892,7 +2951,8 @@ RAM_HOLD_RE = re.compile(r"^\S+ free=(?:(\d+)%|unknown) sessions=(\d+)$", re.M) 
 
 
 def write_timing(root, digest_id, jobs):
-    """digests/<NNN>/timing.md: one row per claimed job (wall, spec, queue, queue gate = queue-gates.txt, rounds, round times, no-change rounds = a
+    """digests/<NNN>/timing.md: one row per claimed job (wall, spec, queue (with the part after a done depends_on
+    blocker's updatedAt: _timing_row's by_id is this board), queue gate = queue-gates.txt, rounds, round times, no-change rounds = a
     head.txt equal to the previous round's, E2E lock waits = `exit 124` in check.md plus queue-wait lines, questions.log stall lines, each as
     its minutes to the next run log),
     totals, every job on every registered board (and this one) now stalled or held (queue_waiting) on the E2E queue, and per claimed
@@ -2919,7 +2979,8 @@ def write_timing(root, digest_id, jobs):
             stalls.setdefault(q["job"], []).append(at)
         if q.get("kind") == "queue-wait" and at and isinstance(q.get("job"), str):
             queue.setdefault(q["job"], []).append(at)
-    rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ()), human.get(j, ()), queue.get(j, ())) for j in jobs]
+    rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ()), human.get(j, ()), queue.get(j, ()), board)
+            for j in jobs]
     lines = [f"# Timing: digest {digest_id}", "",
              "| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls |",
              "|---|---|---|---|---|---|---|---|---|---|---|"]
