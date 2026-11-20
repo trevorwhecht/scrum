@@ -2414,7 +2414,7 @@ if (store.get("scrum.volume") || store.get("scrum.muted")) sendVolume();
   if (!btn || !menu) return;
   const set = open => { menu.classList.toggle("open", open); btn.setAttribute("aria-expanded", String(open)); };
   btn.addEventListener("click", () => set(btn.getAttribute("aria-expanded") !== "true"));
-  menu.addEventListener("click", e => { if (e.target.closest("button")) set(false); });
+  menu.addEventListener("click", e => { if (e.target.closest("button") && !e.target.closest(".volwrap")) set(false); });
   document.addEventListener("keydown", e => { if (e.key === "Escape" && menu.classList.contains("open")) { set(false); btn.focus(); } });
 })();
 </script>
