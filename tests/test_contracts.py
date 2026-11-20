@@ -783,6 +783,13 @@ class ContractTest(unittest.TestCase):
         self.assertIn("never step 5's builder", new_job)
         self.assertIn("respawn once without it", new_job)
 
+    def test_bigboy_step2_runs_spec_models(self):
+        step = self.section(self.lane("bigboy"), "\n2. **Child specs", "\n3. ")
+        self.assertIn("`B spec-models <child>...`, run once over the children being spawned before that message", step)
+        self.assertIn("pass each non-null value as that child's Agent `model`", step)
+        self.assertNotIn("jev-gate.py spec-model", step)
+        self.assertNotIn("B fable-ok <child> spec-writer", step)
+
     def test_skill_jev_promote_step(self):
         text = skill_text()
         resume = self.section(text, "## Resuming the builder", "## Digest")

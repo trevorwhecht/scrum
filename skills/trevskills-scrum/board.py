@@ -166,6 +166,9 @@
                                    the spec-writer on lane standard (or unset), of a complex job (header `Complex: yes`
                                    in feature.md, else spec.md) gets Fable only while fable_state is ok; each such call
                                    appends a line to jobs/<id>/fable.log
+  board.py spec-models <id>...     run-all: print {"<id>": "<model>"|null} per child, the spec-writer Agent override: fable-ok's
+                                   model when not none, else the jev-gate.py spec-model decision (the last one in the
+                                   child's jev.log, else a fresh run, 90 s each in parallel) when sonnet or opus, else null
   board.py prod-ok <id> '<bullet>'  gate one decision.md `## Prod runs` bullet: print dev or ok, else exit non-zero
                                    (schema/deploy/fixture scripts always; a :prod run without a passing dev dry run
                                    and apply recorded in jobs/<id>/prod.md)
@@ -8174,6 +8177,8 @@ def main(argv=None):
     sub.add_parser("hook")
     sub.add_parser("git-guard")
     sub.add_parser("statusline")
+    sm = sub.add_parser("spec-models")
+    sm.add_argument("ids", nargs="+")
     fo = sub.add_parser("fable-ok")
     fo.add_argument("id")
     fo.add_argument("role")
@@ -8363,6 +8368,8 @@ def main(argv=None):
         print(json.dumps(cmd_ui_sweep_record(a.dir, a.review)))
     elif a.cmd == "fable-ok":
         print(cmd_fable_ok(a.dir, a.id, a.role))
+    elif a.cmd == "spec-models":
+        print(json.dumps(cmd_spec_models(a.dir, a.ids)))
     elif a.cmd == "prod-ok":
         print(cmd_prod_ok(a.dir, a.id, a.bullet))
     elif a.cmd == "spawn":
@@ -8442,6 +8449,45 @@ def cmd_fable_ok(root: Path, job_id: str, role: str) -> str:
             fh.write(f"{datetime.now().isoformat(timespec='seconds')}\t{role}\t{'opus' if model == 'none' else 'fable'}"
                      f"\t5h {pct['5h']}\t7d {pct['7d']}\t{state}\n")
     return model
+
+
+SPEC_MODEL_TIMEOUT = 90  # seconds per child for one jev-gate.py spec-model run
+JEV_GATE_PY = Path(__file__).resolve().with_name("jev-gate.py")
+
+
+def _spec_model_decision(root: Path, job_id: str) -> str | None:
+    """The jev-gate.py spec-model decision for one child ("sonnet" or "opus"), else None: the last spec-model line of
+    its jev.log when there is one, else a fresh gate run (which logs its own line). A timeout, a non-zero exit or any
+    other output gives None."""
+    folder = Path(root) / "jobs" / job_id
+    try:
+        lines = (folder / "jev.log").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+    for line in reversed(lines):
+        f = line.split("\t")
+        if len(f) > 4 and f[1] == "spec-model":
+            return f[4] if f[4] in ("sonnet", "opus") else None
+    try:
+        r = subprocess.run([sys.executable, str(JEV_GATE_PY), "spec-model", str(folder)], capture_output=True, text=True,
+                           timeout=SPEC_MODEL_TIMEOUT)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    out = r.stdout.strip()
+    return out if r.returncode == 0 and out in ("sonnet", "opus") else None
+
+
+def cmd_spec_models(root: Path, ids: list[str]) -> dict:
+    """spec-models: {child: model or None} for the run-all spec-writer spawn. fable-ok's model wins when it is not
+    "none"; else the jev decision when sonnet or opus; else None (no override, frontmatter Opus)."""
+    ids = [check_id(i) for i in ids]
+    with ThreadPoolExecutor(max_workers=max(1, len(ids))) as pool:
+        decisions = list(pool.map(lambda i: _spec_model_decision(root, i), ids))
+    out = {}
+    for job_id, decision in zip(ids, decisions):
+        fable = cmd_fable_ok(root, job_id, "spec-writer")
+        out[job_id] = fable if fable != "none" else decision
+    return out
 
 
 PROD_TOKEN_RE = re.compile(r"[A-Za-z0-9=_.:/-]+")

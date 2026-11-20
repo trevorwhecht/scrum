@@ -12756,6 +12756,67 @@ class ReadyHighUsageTest(unittest.TestCase):
         self.assertEqual((p["stage"], p.get("reason")), ("running", None))
 
 
+class SpecModelsTest(unittest.TestCase):
+    """board.py spec-models: one JSON object of per-child spec-writer overrides."""
+    STUB = (
+        "import sys, time, pathlib\n"
+        "job = pathlib.Path(sys.argv[2])\n"
+        "pathlib.Path(sys.argv[0]).with_name('calls.txt').open('a').write(job.name + '\\n')\n"
+        "n = job.name\n"
+        "if '-slow' in n: time.sleep(5)\n"
+        "if '-fail' in n: sys.exit(1)\n"
+        "print('maybe' if '-junk' in n else 'sonnet' if '-son' in n else 'opus')\n")
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / "scrum"
+        self.stub = self.tmp / "stub-gate.py"
+        self.stub.write_text(self.STUB)
+        for name in ("001-son", "002-opus", "003-slow", "004-fail", "005-junk"):
+            (self.root / "jobs" / name).mkdir(parents=True)
+        for patch in (mock.patch.object(board, "JEV_GATE_PY", self.stub),
+                      mock.patch.object(board, "cmd_fable_ok", return_value="none")):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def calls(self):
+        f = self.tmp / "calls.txt"
+        return f.read_text().split() if f.exists() else []
+
+    def test_spec_models_prints_decision_per_child(self):
+        out = board.cmd_spec_models(self.root, ["001-son", "002-opus"])
+        self.assertEqual(out, {"001-son": "sonnet", "002-opus": "opus"})
+
+    def test_spec_models_reuses_jev_log(self):
+        (self.root / "jobs" / "002-opus" / "jev.log").write_text(
+            "t\tspec-model\tq\t{}\tsonnet\t0.1\nt\tmodel\tq\t{}\topus\t0.1\n")
+        out = board.cmd_spec_models(self.root, ["001-son", "002-opus"])
+        self.assertEqual(out, {"001-son": "sonnet", "002-opus": "sonnet"})
+        self.assertEqual(self.calls(), ["001-son"])
+
+    def test_spec_models_timeout_and_bad_output_give_null(self):
+        with mock.patch.object(board, "SPEC_MODEL_TIMEOUT", 1):
+            out = board.cmd_spec_models(self.root, ["001-son", "003-slow", "004-fail", "005-junk"])
+        self.assertEqual(out, {"001-son": "sonnet", "003-slow": None, "004-fail": None, "005-junk": None})
+
+    def test_spec_models_fable_replaces_decision(self):
+        with mock.patch.object(board, "cmd_fable_ok", side_effect=lambda r, j, role: "claude-fable-5-1" if j == "001-son" else "none") as m:
+            out = board.cmd_spec_models(self.root, ["001-son", "002-opus"])
+        self.assertEqual(out, {"001-son": "claude-fable-5-1", "002-opus": "opus"})
+        self.assertEqual([c.args[2] for c in m.call_args_list], ["spec-writer", "spec-writer"])
+
+    def test_spec_models_rejects_bad_ids(self):
+        with self.assertRaises(SystemExit):
+            board.cmd_spec_models(self.root, ["001-son", "../x"])
+        self.assertEqual(self.calls(), [])
+        out = run_board("--dir", str(self.root), "spec-models")
+        self.assertEqual(out.returncode, 2)
+        out = run_board("--dir", str(self.root), "spec-models", "../x")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertEqual(out.stdout, "")
+
+
 class FableTest(unittest.TestCase):
     """board.fable_state / fable_ok / fable-ok: Fable for the planner and standard spec-writers of complex jobs, ok band only."""
     def setUp(self):
