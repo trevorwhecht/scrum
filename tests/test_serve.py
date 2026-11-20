@@ -12678,7 +12678,7 @@ class E2eFullTest(unittest.TestCase):
         with mock.patch.object(self.serve.board, "listeners", return_value=[]) as listening, \
                 mock.patch.object(self.serve.os, "kill") as kill:
             rec = self.run_suite(E2E_LIST_OUTPUT, 1)
-        self.assertEqual((listening.call_count, kill.call_count, rec["result"]), (2, 0, "fail"))
+        self.assertEqual((listening.call_count, kill.call_count, rec["result"]), (4, 0, "fail"))  # the full run and the re-run each read before and after
 
     def git(self, *args):
         return subprocess.run(["git", "-C", str(self.repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
