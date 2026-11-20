@@ -8248,13 +8248,32 @@ def orchestrator_model(root: Path, job_id: str | None = None) -> str | None:
     return value if MODEL_RE.fullmatch(value) else "sonnet"
 
 
+def spawn_settings(config_dir: Path, repo: Path) -> str:
+    """The --settings JSON for a headless run: NO_CACHE_TAX plus every plugin named in the account's settings.json or the
+    repo's .claude/settings(.local).json turned off (job 1253: ~10k tokens a session start), read at spawn time so a newly
+    installed plugin is covered too. hookify stays on while the repo has .claude/hookify.*.md rule files."""
+    settings = json.loads(NO_CACHE_TAX)
+    hookify = any((repo / ".claude").glob("hookify.*.md"))
+    for f in (config_dir / "settings.json", repo / ".claude" / "settings.json", repo / ".claude" / "settings.local.json"):
+        try:
+            plugins = json.loads(f.read_text()).get("enabledPlugins")
+        except (OSError, ValueError, AttributeError):  # missing, unreadable or not a JSON object
+            continue
+        for name in plugins if isinstance(plugins, dict) else ():
+            if not (hookify and name.startswith("hookify@")):
+                settings["enabledPlugins"][name] = False
+    return json.dumps(settings)
+
+
 def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags=("--permission-mode", "acceptEdits"),
           model: str | None = None, account: str | None = None) -> tuple[subprocess.Popen, str]:
     """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/, and set the job's runlog and account.
     start/resume get `--model <Orchestrator model>` (or `<Big ticket model>`, see orchestrator_model) unless `model` is given.
     `account` None: pick_account, preferring the job's recorded account; with none free, the one whose limit ends soonest
     (the recorded account on a tie), else the first (Trevor's Play and Resume are never refused on usage). Any account but the first runs with
-    CLAUDE_CONFIG_DIR=<its dir>; the first runs with CLAUDE_CONFIG_DIR removed. Returns (proc, log path relative to root)."""
+    CLAUDE_CONFIG_DIR=<its dir>; the first runs with CLAUDE_CONFIG_DIR removed. `flags` without their own get
+    --strict-mcp-config and --settings spawn_settings(...); a job whose job_lane is not lilguy runs with
+    CLAUDE_CODE_DISABLE_CLAUDE_MDS=1. Returns (proc, log path relative to root)."""
     root = Path(root)  # a chat hand-off passes a str
     if not SPAWN_ID_RE.fullmatch(job_id):
         raise SystemExit(f"bad spawn id {job_id!r}")
@@ -8266,14 +8285,14 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         model = orchestrator_model(root, job_id)
     prompt = prompt if prompt is not None else f"/trevskills-scrum {action} {job_id}"
     accs = accounts()
+    try:
+        job = find(read_board(root), job_id)
+    except (SystemExit, OSError):  # not on the board (run-all, digest, weekly), or no board yet
+        job = {}
     if account is None:
-        try:
-            job = find(read_board(root), job_id)
-            recorded = job.get("account")
-            if recorded and str(job.get("reset") or "").isdigit() and time.time() >= int(job["reset"]):
-                recorded = None  # its seven_day window reset since: fallback_account no longer favours it
-        except (SystemExit, OSError):  # not on the board (run-all, digest, weekly), or no board yet
-            recorded = None
+        recorded = job.get("account")
+        if recorded and str(job.get("reset") or "").isdigit() and time.time() >= int(job["reset"]):
+            recorded = None  # its seven_day window reset since: fallback_account no longer favours it
         # job 1184: never prefer the recorded account, so a restart takes the primary whenever it has room
         account = pick_account(time.time())[0] or fallback_account(time.time(), recorded)
     acc = next((a for a in accs if a.name == account), accs[0])  # an unlisted account (its dir gone) runs on the first
@@ -8282,10 +8301,16 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     env.pop("CLAUDE_CONFIG_DIR", None)
     if acc != accs[0]:
         env["CLAUDE_CONFIG_DIR"] = str(acc.dir)
+    if job_lane(root, job) == "lilguy":  # its orchestrator writes the code, so it keeps CLAUDE.md and the rules
+        env.pop("CLAUDE_CODE_DISABLE_CLAUDE_MDS", None)  # a Run-all parent's own setting is inherited otherwise
+    else:  # job 1253: every other orchestrator writes no code; CLAUDE.md, rules and AGENTS.md cost ~30k tokens a start
+        env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
     logs = root / "runs"
     logs.mkdir(exist_ok=True)
     log = logs / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{action}-{job_id}.log"
-    argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags, *(() if "--settings" in flags else ("--settings", NO_CACHE_TAX))]
+    argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags,
+            *(() if "--strict-mcp-config" in flags else ("--strict-mcp-config",)),  # job 1253: no MCP server loads
+            *(() if "--settings" in flags else ("--settings", spawn_settings(acc.dir, root.parent)))]
     try:
         with open(log, "w") as fh:
             proc = subprocess.Popen(argv, cwd=root.parent,
