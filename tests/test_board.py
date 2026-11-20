@@ -9988,6 +9988,12 @@ class RouteCheckTest(unittest.TestCase):
         self.assertEqual(self.route()["promote"], "rules file agents/scrum-builder.md not in feature.md")
         (self.jd / "feature.md").write_text("Edit every agents/*.md file\n")
         self.assertIsNone(self.route()["promote"])
+        self.git("reset", "-q", "--hard", "main")
+        self.commit({"skills/trevskills-scrum/lanes/merge.md": "x\n"})
+        (self.jd / "feature.md").write_text("Edit lanes/merge.md wording\n")
+        self.assertIsNone(self.route()["promote"])
+        (self.jd / "feature.md").write_text("Edit merge.md wording\n")
+        self.assertEqual(self.route()["promote"], "rules file skills/trevskills-scrum/lanes/merge.md not in feature.md")
 
     def test_route_check_lilguy_check_fails_3(self):
         self.round(1, check="FAIL")
