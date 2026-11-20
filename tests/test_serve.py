@@ -2117,7 +2117,8 @@ class ServeTest(unittest.TestCase):
     def test_api_machine(self):
         keys = ["cooldown", "cpu_busy_pct", "cpu_cores", "cpu_load_pct", "free_disk_gb", "free_ram_pct", "history",
                 "hogs", "max_cpu_busy_pct", "max_cpu_load_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct",
-                "restart_waiting", "sessions", "shop", "swap_pct", "usage", "verdict"]
+                "restart_waiting", "sessions", "shop", "soft_cap", "soft_cooldown", "soft_sessions", "swap_pct", "usage",
+                "verdict"]
         cores = mock.patch.object(self.serve.os, "cpu_count", return_value=8)
         cores.start()
         self.addCleanup(cores.stop)
@@ -2127,17 +2128,18 @@ class ServeTest(unittest.TestCase):
         out.pop("restart_waiting")  # the fixture board's jobs; RestartBlockersTest pins the value
         out.pop("shop")  # a background read; test_shop_stats_poll_never_runs_ssh pins it
         out.pop("history")  # earlier tests' samples; test_api_machine_sends_history_for_this_mac_and_each_shop pins it
+        out.pop("soft_sessions")  # live sessions plus the registry's shop jobs; BoardTest.test_shop_jobs_by_worker pins the count
         self.assertEqual(out, {"free_ram_pct": 14.0, "swap_pct": 3.0, "free_disk_gb": 50.0, "min_free_ram_pct": 20,
                                "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)",
-                               "usage": "unknown", "cooldown": False, "sessions": 0,
+                               "usage": "unknown", "cooldown": False, "sessions": 0, "soft_cooldown": False, "soft_cap": 4,
                                "cpu_busy_pct": 1.0, "max_cpu_busy_pct": 90,
                                "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 300, "hogs": []})
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25",
                              SCRUM_CPU_BUSY_PCT="42.56"):
-            self.assertEqual({k: v for k, v in self.req("GET", "/api/machine")[1].items() if k not in ("restart_waiting", "shop", "history")},
+            self.assertEqual({k: v for k, v in self.req("GET", "/api/machine")[1].items() if k not in ("restart_waiting", "shop", "history", "soft_sessions")},
                              {"free_ram_pct": 34.6, "swap_pct": 30.0, "free_disk_gb": 120.2, "min_free_ram_pct": 20,
                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)",
-                              "usage": "unknown", "cooldown": False, "sessions": 0,
+                              "usage": "unknown", "cooldown": False, "sessions": 0, "soft_cooldown": False, "soft_cap": 4,
                               "cpu_busy_pct": 42.6, "max_cpu_busy_pct": 90,
                               "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 300, "hogs": []})
         with mock.patch.dict(os.environ, SCRUM_CPU_BUSY_PCT="95.04"):
@@ -2157,9 +2159,11 @@ class ServeTest(unittest.TestCase):
         out.pop("restart_waiting")
         out.pop("shop")
         out.pop("history")
+        out.pop("soft_sessions")
         self.assertEqual((code, out), (200, {"free_ram_pct": None, "swap_pct": None, "free_disk_gb": None,
                                              "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
                                              "verdict": None, "usage": "unknown", "cooldown": False, "sessions": 0,
+                                             "soft_cooldown": False, "soft_cap": 4,
                                              "cpu_busy_pct": None, "max_cpu_busy_pct": 90,
                                              "cpu_load_pct": None, "cpu_cores": 8, "max_cpu_load_pct": 300, "hogs": []}))
         self.assertEqual(set(disk), {ROOT / "skills" / "trevskills-scrum"}, "disk is read on serve.py's own volume")
@@ -2458,6 +2462,22 @@ class ServeTest(unittest.TestCase):
         flag = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "cooldown"
         flag.write_text("")
         return mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag))
+
+    def test_soft_cooldown_api(self):
+        """Job 1308: POST /api/cooldown {"soft": bool} creates or removes soft-cooldown beside the cool-down flag; a
+        non-bool is a 400 that touches nothing; held_gate gives a soft refusal its own token."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, SCRUM_COOLDOWN=os.path.join(tmp, "cooldown")):
+                flag = Path(tmp) / "soft-cooldown"
+                self.assertEqual(self.serve.set_soft_cooldown(True), (200, {"soft": True}))
+                self.assertTrue(flag.exists())
+                self.assertFalse((Path(tmp) / "cooldown").exists())
+                self.assertEqual(self.serve.set_soft_cooldown("yes"), (400, {"error": "soft must be true or false"}))
+                self.assertTrue(flag.exists())
+                self.assertEqual(self.serve.set_soft_cooldown(False), (200, {"soft": False}))
+                self.assertFalse(flag.exists())
+        why = "soft cool down: 4 of 4 sessions running (this Mac + shop)"
+        self.assertEqual(self.serve.held_gate(why), "soft_cap(4/4)")
 
     def test_cooldown_allows_automatic_resume_post(self):
         """Job 421: continue.py POSTs {} to Resume; cool-down holds only new work, so a stalled or paused job resumes."""

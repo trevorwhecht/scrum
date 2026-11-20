@@ -194,6 +194,17 @@ class ShopTickTest(unittest.TestCase):
             self.assertEqual([w.alias for w, _ in self.serve.shop_worker()], ["shopmac"])
             self.assertEqual(self.tick(), (True, "shop: mm: 044-b: started on shopmac (pid 4242, account owa)\n", ""))
 
+    def test_soft_cooldown_cap_gives_shop_no_worker(self):
+        """Job 1308: while soft cool down is at its cap (live sessions plus shop jobs = 4) shop_worker yields nothing;
+        under it the worker is back."""
+        flag = self.base / "cooldown"
+        (self.base / "soft-cooldown").write_text("")
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
+            with mock.patch.object(self.board, "live_sessions", return_value=4):
+                self.assertEqual(list(self.serve.shop_worker()), [])
+            with mock.patch.object(self.board, "live_sessions", return_value=3):
+                self.assertEqual([w.alias for w, _ in self.serve.shop_worker()], ["shopmac"])
+
     def test_cooldown_api_per_worker(self):
         """Job 1185: set_cooldown(on, worker=<alias>) sets only that worker's flag, explicitly on or off; a worker that is
         not a current shop.workers() alias is a 400 that touches nothing; no worker is this Mac's flag, as before.

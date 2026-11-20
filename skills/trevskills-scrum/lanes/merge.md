@@ -65,7 +65,7 @@
 
 ## Cool-down park
 
-**Cool-down park** (New job steps 4 and 6). Outside a Cloud lane session, run `B cooldown-park $ID`. When it prints `"parked": true` (cool down is on and the job has not reached its first Check gate), stop with the **Final report**: serve.py resumes the job once cool down ends. Otherwise carry on. Trevor's own Play, Resume or Setup done is a cool-down bypass whatever the prompt says: cooldown-park prints "parked": false for a job his click launched, so carry on.
+**Cool-down park** (New job steps 4 and 6). Outside a Cloud lane session, run `B cooldown-park $ID`. When it prints `"parked": true` (cool down is on and the job has not reached its first Check gate), stop with the **Final report**: serve.py resumes the job once cool down ends. Otherwise carry on. Trevor's own Play, Resume or Setup done is a cool-down bypass whatever the prompt says: cooldown-park prints "parked": false for a job his click launched, so carry on. Soft cool down (the dashboard's Soft cool down button, `soft-cooldown` beside the cool-down flag) parks nothing: it only holds new work at 4 sessions, this Mac plus the shop Macs (`board.SOFT_COOLDOWN_SESSIONS`), so a started job carries on.
 
 ## Migrate (Merge's schema guard)
 

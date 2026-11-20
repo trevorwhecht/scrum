@@ -462,6 +462,8 @@ def held_gate(why):
         return "finish_first"
     if why == board.COOLING:
         return "cool_down"
+    if why.startswith(board.SOFT_COOLING) and (m := re.search(r"(\d+) of (\d+) sessions", why)):
+        return f"soft_cap({m[1]}/{m[2]})"
     if m := re.search(r"(\d+) sessions running \(ceiling (\d+)\)", why):
         return f"session_cap({m[1]}/{m[2]})"
     if "sessions running" in why:
@@ -536,7 +538,7 @@ def wake_waiting(project, root):
     if not any(map(board.parked_waiting, board.read_board(root)["jobs"])):
         return
     why = board.machine_ok(root, claim=True) or board.finish_first(root)
-    cooling = why == board.COOLING or bool(why and why.startswith(board.FINISH_FIRST))
+    cooling = why == board.COOLING or bool(why and why.startswith((board.FINISH_FIRST, board.SOFT_COOLING)))
     if cooling:  # only a parked wake job passes; plain waiting jobs stay held (hold below)
         why = board.machine_ok(root) or (None if any(j.get("wake") for j in filter(board.parked_waiting, board.read_board(root)["jobs"])) else why)
     if why:
@@ -1980,14 +1982,15 @@ def shop_worker():
     stage-cloud `shop` jobs on every board (no `worker` field: shopmac), is shop.ready(alias)
     and has an account: pick_account's own order (soonest seven-day reset), then prefer= each of the worker's accounts
     in its listed order, until one is on the worker's line and ready there. Lazy, so shop_tick, which takes the first,
-    never probes a later worker; write_shop_room lists them all."""
+    never probes a later worker; write_shop_room lists them all. While soft cool down is at its cap
+    (board.soft_cap_reason) it yields nothing: the shop Macs take no new work, their started jobs finish."""
     now = time.time()
+    if board.soft_cap_reason():
+        return
     workers = [w for w in shop.workers() if now >= SHOP_RETRY_AT.get(w.alias, 0) and not board.cooling_down(w.alias)]
     if not workers:
         return
-    on = collections.Counter(j.get("worker") or shop.ALIAS for r in board.projects().values()
-                             for j in board.read_board(r / "scrum")["jobs"]
-                             if j.get("stage") == "cloud" and j.get("shop"))  # each worker's shop jobs, every board
+    on = board.shop_jobs_by_worker()  # each worker's shop jobs, every board
     for w in workers:
         if on[w.alias] >= w.max or not (ready := shop.ready(alias=w.alias))["ready"]:
             continue
@@ -3809,7 +3812,8 @@ def window_tick():
             board.cmd_window_report(root)
             note_run_limits(project, root)
             now = time.time()
-            if not board.cooling_down() and str(board.cmd_digest_due(root)["reason"]).startswith("bad window") \
+            if not board.cooling_down() and not board.soft_cap_reason() \
+                    and str(board.cmd_digest_due(root)["reason"]).startswith("bad window") \
                     and board.pick_account(now)[0] is not None:
                 digest_now(project, root)
         except (Exception, SystemExit) as e:
@@ -3873,7 +3877,7 @@ def weekly_tick():
         board.log_process("Weekly digest", "started", digest=out["id"])
 
 
-PULSE_GATES = (("free RAM", "ram"), ("memory pressure", "vm_pressure"), ("swap used", "swap"), ("free disk", "disk"),
+PULSE_GATES = (("soft cool down", "soft_cap"), ("free RAM", "ram"), ("memory pressure", "vm_pressure"), ("swap used", "swap"), ("free disk", "disk"),
                ("CPU busy", "cpu_busy"), ("CPU load", "cpu_load"),
                ("sessions running", "sessions"))  # pulse_tick: machine_ok reason -> gate token
 PULSE_STARTS: list[dict] = []  # spawn's non-manual board starts since the last pulse_tick: {project, job, cpu}
@@ -3999,6 +4003,22 @@ def set_cooldown(on, worker=None):
     with MACHINE_LOCK:
         MACHINE_CACHE.clear()  # after the write, so the meter's next read shows the new cool-down
     return 200, {"cooldown": on} if worker is None else {"cooldown": on, "worker": worker}
+
+
+def set_soft_cooldown(on):
+    """POST /api/cooldown {"soft": bool}: create or remove the soft cool-down flag (board.soft_cooldown_path). An explicit
+    set, like set_cooldown's "on"; a non-bool is a 400."""
+    if type(on) is not bool:
+        return 400, {"error": "soft must be true or false"}
+    flag = board.soft_cooldown_path()
+    if on:
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.touch()
+    else:
+        flag.unlink(missing_ok=True)
+    with MACHINE_LOCK:
+        MACHINE_CACHE.clear()
+    return 200, {"soft": on}
 
 
 def set_volume(level, muted) -> tuple[int, dict]:
@@ -4287,7 +4307,8 @@ def machine_status():
             "free_disk_gb": r(board.free_disk_gb(HERE)), "min_free_ram_pct": board.MIN_FREE_RAM_PCT,
             "max_swap_pct": board.MAX_SWAP_PCT, "min_free_disk_gb": board.MIN_FREE_DISK_GB,
             "verdict": board.machine_ok(HERE, claim=True), "usage": machine_usage(now), "cooldown": board.cooling_down(),
-            "sessions": board.live_sessions(), "cpu_busy_pct": r(board.cpu_busy_pct()),
+            "soft_cooldown": board.soft_cooling_down(), "soft_sessions": board.soft_sessions(),
+            "soft_cap": board.SOFT_COOLDOWN_SESSIONS, "sessions": board.live_sessions(), "cpu_busy_pct": r(board.cpu_busy_pct()),
             "max_cpu_busy_pct": board.MAX_CPU_BUSY_PCT, "cpu_load_pct": cpu,
             "cpu_cores": os.cpu_count(), "max_cpu_load_pct": board.MAX_CPU_LOAD_PCT,
             "restart_waiting": restart_blockers(), "history": machine_history("mac", ram, cpu, now),
@@ -7069,6 +7090,8 @@ class Handler(BaseHTTPRequestHandler):
                 code, obj = ai_toggle(body.get("id"), path.endswith("/enable"))
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
+            elif path == "/api/cooldown" and "soft" in body:
+                code, obj = set_soft_cooldown(body.get("soft"))
             elif path == "/api/cooldown":
                 code, obj = set_cooldown(body.get("on"), body.get("worker"))
             elif path == "/api/volume":
