@@ -1,5 +1,6 @@
 import hashlib, io, json, os, re, subprocess, sys, tempfile, unittest
 from contextlib import redirect_stderr
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -353,18 +354,133 @@ class BacklogTest(unittest.TestCase):
         lines, parsed = board.read_backlog(self.root)
         self.assertEqual(board.format_item(parsed[0]), lines[1])
         self.assertIsNone(board.cmd_next(self.root)["id"])
-        self._registry([{"id": "1600-thing", "stage": "done"}])
-        self.assertIsNotNone(board.cmd_next(self.root)["id"])
-
-    def test_requeue_loop_guard_blocks_after_three_requeues(self):
-        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Looping item\n")
-        stamp = board.now()
-        jobs = [{"id": f"00{n}-x", "title": "Looping item", "stage": "aborted", "reason": "requeue: boom", "updatedAt": stamp} for n in range(3)]
-        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
-        self.assertEqual(board.backlog_items(self.root)[0]["waits"], ["requeue loop"])
+        self._registry([{"id": "1600-thing", "stage": "aborted"}])  # aborted is not done: what it waits on never landed
         self.assertIsNone(board.cmd_next(self.root)["id"])
-        board.backlog_op(self.root, "edit", index=0, text="Looping item, reworded")  # Trevor edits it: claimable again
-        self.assertEqual(board.backlog_items(self.root)[0]["waits"], [])
+        self._registry([{"id": "1600-thing", "stage": "done"}])
+        self.assertEqual(board.cmd_next(self.root)["feature"], "Wait for it")
+
+    def test_after_marker_any_order_repeated_and_prose_stays_text(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] Ship it {after otherrepo:12 OneWithArts:1600-fix-x} {p:4} {#abcd}\n"
+            "- [ ] Eat {after lunch}\n- [ ] Two {after otherrepo:1} {after otherrepo:2}\n")
+        self.assertEqual([(i["text"], i["after"], i["priority"], i["id"]) for i in board.read_backlog(self.root)[1]], [
+            ("Ship it", ["otherrepo:12", "OneWithArts:1600-fix-x"], 4, "abcd"),
+            ("Eat {after lunch}", [], None, None),
+            ("Two", ["otherrepo:1", "otherrepo:2"], None, None)])
+
+    def test_after_marker_unknown_repo_job_or_board_blocks(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] A {after nosuchrepo:5}\n- [ ] B {after otherrepo:7}\n- [ ] C {after otherrepo:1600}\n")
+        self._registry([{"id": "1600-thing", "stage": "done"}])
+        self.assertEqual([i["waits"] for i in board.backlog_items(self.root)], [["nosuchrepo:5"], ["otherrepo:7"], []])
+        (Path(self.tmp.name) / "otherrepo" / "scrum" / "board.json").write_text("{not json")
+        self.assertEqual(board.backlog_items(self.root)[2]["waits"], ["otherrepo:1600"])
+
+    def test_after_marker_matches_job_number_full_id_and_name_case(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] A {after otherrepo:42}\n- [ ] B {after OtherRepo:1600-thing}\n"
+                                              "- [ ] C {after otherrepo:1600-other}\n")
+        self._registry([{"id": "042-x", "stage": "done"}, {"id": "1600-thing", "stage": "done"}])
+        self.assertEqual([i["waits"] for i in board.backlog_items(self.root)], [[], [], ["otherrepo:1600-other"]])
+
+    def test_after_marker_held_by_runall_start_and_cloud_claim(self):
+        backlog = "# Backlog\n- [ ] Later {#late} {after otherrepo:1600}\n- [ ] Needs later {needs #late}\n- [ ] Free\n"
+        (self.root / "backlog.md").write_text(backlog)
+        self._registry([{"id": "1600-thing", "stage": "build"}])
+        self.assertEqual(board.cmd_runall_start(self.root), {"id": "001-run-all", "children": ["002-free"]})
+        self.assertEqual(self.text(), backlog.replace("- [ ] Free", "- [x] Free → 002-free"))
+        (self.root / "backlog.md").write_text(backlog)
+        for text, file in (("Later", "l.py"), ("Needs later", "n.py"), ("Free", "f.py")):
+            self.put_spec(text, f"## Likely files\n- `{file}`\n")
+        self.assertEqual([c["feature"] for c in board.cmd_cloud_claim(self.root, 3)["claimed"]], ["Free"])
+
+    def test_after_marker_triage_merge_keeps_it(self):
+        line = self.merged_line("# Backlog\n- [ ] Aa {after otherrepo:1600}\n- [ ] Bb {after otherrepo:1600 otherrepo:7}\n",
+                                ["Aa", "Bb"])
+        self.assertEqual(line, "- [ ] Merged thing {after otherrepo:1600 otherrepo:7}")
+
+    def test_run_now_names_what_an_item_waits_on(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Base {#base}\n- [ ] Top {needs #base} {after otherrepo:1600}\n")
+        self._registry([{"id": "1600-thing", "stage": "build"}])
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_next(self.root, 1)
+        self.assertEqual(str(e.exception), "backlog item 1 waits on #base, otherrepo job 1600")
+
+    # the requeue loop guard: the shop claimed one item and auto-aborted it with a requeue 21 times in an hour
+    SHOP_ENDED = "requeue: shop session ended without a PR"
+
+    def requeue_claims(self, n, reason=SHOP_ENDED, feature=True):
+        """Claim the top item n times as serve.py shop_tick does (feature.md is the item's text) and abort each with a requeue."""
+        for _ in range(n):
+            out = board.cmd_next(self.root)
+            if feature:
+                (self.root / "jobs" / out["id"] / "feature.md").write_text(board.feature_text(out["feature"]))
+            board.cmd_abort(self.root, out["id"], True, reason)
+
+    def test_requeue_loop_holds_item_from_every_claim_path(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Looping item\n")
+        self.requeue_claims(2)
+        self.assertEqual(board.backlog_items(self.root)[-1]["waits"], [])  # two requeues: still claimable
+        self.requeue_claims(1)
+        self.assertEqual(board.backlog_items(self.root)[-1]["waits"], ["requeue loop"])
+        self.assertEqual(board.cmd_next(self.root), {"id": None, "feature": None})
+        self.put_spec("Looping item", "## Likely files\n- `x.py`\n")
+        self.assertEqual(board.cmd_cloud_claim(self.root, 1), {"claimed": []})
+        self.assertEqual(board.cmd_runall_start(self.root), {"id": None, "children": []})
+        index = board.backlog_items(self.root)[-1]["index"]
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_next(self.root, index)
+        self.assertEqual(str(e.exception), f"backlog item {index} waits on an edit: its last 3 claims were requeue aborts within 24 h")
+
+    def test_requeue_loop_reopened_in_place_counts_too(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] [3] Looping item {#loop} {p:4}\n")
+        self.requeue_claims(3, feature=False)  # no feature.md: the claimed line is reopened in place
+        self.assertEqual(board.backlog_items(self.root)[0]["waits"], ["requeue loop"])
+
+    def test_requeue_loop_stays_until_an_edit_past_the_title(self):
+        text = "Looping item that has a long description so the job title is cut well before this end"
+        (self.root / "backlog.md").write_text(f"# Backlog\n- [ ] {text}\n")
+        self.requeue_claims(3)
+        state = json.loads((self.root / "board.json").read_text())
+        for job in state["jobs"]:  # the three aborts are days old: still held, with no expiry
+            job["updatedAt"] = job["updatedAt"].replace("2026", "2025", 1)
+        (self.root / "board.json").write_text(json.dumps(state))
+        self.assertEqual(board.backlog_items(self.root)[-1]["waits"], ["requeue loop"])
+        board.backlog_op(self.root, "edit", index=board.backlog_items(self.root)[-1]["index"], text=text + ", reworded")
+        self.assertEqual(board.backlog_items(self.root)[-1]["waits"], [])
+        self.assertEqual(board.cmd_next(self.root)["feature"], text + ", reworded")
+
+    def test_requeue_loop_freed_by_a_new_after_marker(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Looping item\n")
+        self.requeue_claims(3)
+        self._registry([{"id": "1600-thing", "stage": "build"}])
+        lines = self.text().splitlines()
+        (self.root / "backlog.md").write_text("\n".join(lines[:-1] + [lines[-1] + " {after otherrepo:1600}"]) + "\n")
+        self.assertEqual(board.backlog_items(self.root)[-1]["waits"], ["otherrepo:1600"])  # the loop is gone, the marker waits
+        self._registry([{"id": "1600-thing", "stage": "done"}])
+        self.assertEqual(board.cmd_next(self.root)["feature"], "Looping item")
+
+    def loop_board(self, hours, reasons=None, key="Looping item"):
+        """Board jobs for claims of "Looping item", aborted `hours` after 2026-11-01, oldest first; the newest put back the
+        line whose text is `key` (its sha1, as the test's spec_file computes it)."""
+        reasons = reasons or [self.SHOP_ENDED] * len(hours)
+        start = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        jobs = [{"id": f"{100 + k}-looping-item", "title": "Looping item", "stage": "aborted", "reason": r,
+                 "updatedAt": (start + timedelta(hours=h)).isoformat(timespec="seconds")}
+                for k, (h, r) in enumerate(zip(hours, reasons))]
+        if key is not None:
+            jobs[-1]["requeued"] = hashlib.sha1(key.encode()).hexdigest()[:12]
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Looping item\n")
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        return board.backlog_items(self.root)[0]["waits"]
+
+    def test_requeue_loop_needs_three_requeue_aborts_within_24h(self):
+        self.assertEqual(self.loop_board([0, 12, 24]), ["requeue loop"])
+        self.assertEqual(self.loop_board([0, 12, 25]), [])  # spread over more than a day
+        self.assertEqual(self.loop_board([0, 1]), [])
+        self.assertEqual(self.loop_board([0, 1, 2], [self.SHOP_ENDED, "Aborted by Trevor 2026-11-01", self.SHOP_ENDED]), [])
+        self.assertEqual(self.loop_board([0, 1, 2], [self.SHOP_ENDED] * 2 + ["outside run-all match"]), [])
+        self.assertEqual(self.loop_board([0, 1, 2], key="Looping item before an edit"), [])
+        self.assertEqual(self.loop_board([0, 1, 2], key=None), [])  # a job from before the guard recorded nothing
 
     # --- dependencies: {#id} and {needs #id ...} markers ---
     def test_id_and_needs_markers_round_trip(self):
