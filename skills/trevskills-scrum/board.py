@@ -2354,6 +2354,7 @@ TREVOR_MAX_BYTES = 40000
 TREVOR_JEV_QUESTION = ("Trevor is correcting or complaining about how the dev pipeline behaved, or stating a rule it "
                        "should follow from now on")
 TREVOR_CHAT_MAX = 1500  # per message sent to Jev; jev-rank.py's own MAX_CHARS
+TREVOR_CONTEXT_MAX = 300  # chars of the assistant message a chat quote replied to
 TREVOR_QUOTE_MAX = 400
 TREVOR_SKIP_PREFIXES = ("<command-", "<local-command", "Caveat:")
 
@@ -2387,7 +2388,7 @@ def _trevor_text(content):
 
 
 def _trevor_messages(root, since):
-    """[(date, one-line text)] Trevor typed in interactive sessions since `since` (epoch), about this repo or scrum."""
+    """[(date, one-line text, context)] Trevor typed in interactive sessions since `since` (epoch), about this repo or scrum."""
     repo = Path(root).resolve().parent
     out = []
     for proj in sorted(transcripts_dir().iterdir()):  # OSError here (no transcripts dir) fails the whole section
@@ -2398,7 +2399,22 @@ def _trevor_messages(root, since):
             except OSError:
                 continue
             first = True
+            context = ""  # latest assistant text in this file, cut to TREVOR_CONTEXT_MAX
             for d in _json_lines(f):
+                if d.get("type") == "assistant":
+                    am = d.get("message")
+                    ac = am.get("content") if isinstance(am, dict) else None
+                    if isinstance(ac, str):
+                        atext = ac
+                    elif isinstance(ac, list):
+                        atext = " ".join(b["text"] for b in ac if isinstance(b, dict) and b.get("type") == "text"
+                                         and isinstance(b.get("text"), str))
+                    else:
+                        atext = ""
+                    atext = re.sub(r"\s+", " ", atext).strip()
+                    if atext:
+                        context = atext[:TREVOR_CONTEXT_MAX]
+                    continue
                 if d.get("type") != "user":
                     continue
                 if first and d.get("entrypoint") == "sdk-cli":
@@ -2415,7 +2431,7 @@ def _trevor_messages(root, since):
                 cwd = d.get("cwd")
                 here = isinstance(cwd, str) and Path(cwd).resolve().is_relative_to(repo)
                 if here or "scrum" in text.lower():
-                    out.append((_iso(at), re.sub(r"\s+", " ", text)[:TREVOR_CHAT_MAX]))
+                    out.append((_iso(at), re.sub(r"\s+", " ", text)[:TREVOR_CHAT_MAX], context))
     return out
 
 
@@ -2428,8 +2444,8 @@ def _trevor_chat(root, since):
     if not msgs:
         return []
     dates = {}
-    for at, text in msgs:
-        dates.setdefault(text, at)
+    for at, text, context in msgs:
+        dates.setdefault(text, (at, context))
     script = jev_rank_path()
     if not script.is_file():
         return [f"- Jev failed: no script at {script}"]
@@ -2447,7 +2463,10 @@ def _trevor_chat(root, since):
     for line in r.stdout.splitlines():
         score, sep, text = line.partition("\t")
         if sep and text.strip():
-            out.append(f'- {dates.get(text, "?")} {score}: "{text[:TREVOR_QUOTE_MAX]}"')
+            at, context = dates.get(text, ("?", ""))
+            out.append(f'- {at} {score}: "{text[:TREVOR_QUOTE_MAX]}"')
+            if context:
+                out.append(f"  context: {context}")
     return out
 
 
@@ -2535,7 +2554,8 @@ def cmd_digest_trevor(root, digest_id) -> dict:
             items = [f"- {heading[3:]} failed: {e}"]
         failed = len(items) == 1 and items[0].startswith(("- Jev failed:", "- Transcripts failed:",
                                                           f"- {heading[3:]} failed:"))
-        sections[heading], counts[key] = items or ["None"], 0 if failed else len(items)
+        quotes = [i for i in items if not i.startswith("  context: ")]
+        sections[heading], counts[key] = items or ["None"], 0 if failed else len(quotes)
     body = [f"# Trevor: digest {digest_id}", f"Since: {_iso(since)}"]
     for heading, items in sections.items():
         body += [heading, *items]
