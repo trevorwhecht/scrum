@@ -1744,6 +1744,18 @@ class ContractTest(unittest.TestCase):
         rule = rule[:rule.index("\n")]
         self.assertIn("after depends_on)`, count only `<after>` as its Queue", rule)  # job 1268
 
+    def test_digest_reader_reports_two_agents(self):
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        bullet = reader[reader.index("- `DIGEST_DIR/tokens.md`, read once per digest"):]
+        bullet = bullet[:bullet.index("\n")]
+        self.assertIn("`two sessions`: the same agent ran twice at once under different parent sessions, "
+                      "`two agents`: one parent session ran the same agent twice at once for one job", bullet)
+        rule = reader[reader.index("For `## Token sinks`, use `DIGEST_DIR/tokens.md`:"):]
+        rule = rule[:rule.index("\n\n")]
+        self.assertIn("- Any `two sessions` or `two agents` flag is always written under `## Token sinks`, even for "
+                      "one job, as a scheduling bug (`not needed`), never as normal cost.", rule)
+        self.assertEqual(reader.count("flag is always written under `## Token sinks`"), 1)
+
     def test_digest_reader_reads_pulse(self):
         reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
         for phrase in ("`DIGEST_DIR/pulse.md`", "For `## Pulse`, use `DIGEST_DIR/pulse.md`", "says `No pulse lines`",
