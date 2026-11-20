@@ -860,6 +860,8 @@ def cmd_next(root, index=None, shop=None):
     also pass; cool-down never refuses it, finish_first still does, and the job is started_by shop."""
     if index is None and shop is None and cooling_down():
         raise SystemExit(COOLING_CLAIM)
+    if index is None and shop is None and (soft := soft_cap_reason()):
+        raise SystemExit(f"{soft}: no new backlog claim.")
     if index is None and (hold := finish_first(root)):
         raise SystemExit(f"{hold}: no new backlog claim. It claims again once that job moves on.")
     with locked_board(root) as board:
@@ -899,7 +901,7 @@ def cmd_cloud_claim(root, n) -> dict:
     anything, so it blocks every item."""
     if n < 1:
         raise SystemExit("N must be at least 1")
-    if cooling_down():  # cool-down: no new backlog claim
+    if cooling_down() or soft_cap_reason():  # cool-down (and soft cool down at its cap): no new backlog claim
         return {"claimed": []}
     with locked_board(root) as board:
         lines, items = read_backlog(root)
@@ -5797,6 +5799,8 @@ def cmd_runall_start(root, match=None):
     childSpecs mark, as in cmd_plan_apply."""
     if cooling_down():
         raise SystemExit(COOLING_CLAIM)
+    if soft := soft_cap_reason():
+        raise SystemExit(f"{soft}: no new backlog claim.")
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         waits = {i["index"]: waiting_on(i, items, board) for i in items if not i["done"]}  # once: after refs read other boards
@@ -6010,6 +6014,47 @@ def cooling_down(worker=None):
     return cooldown_path(worker).exists()
 
 
+SOFT_COOLING = "soft cool down"  # prefix of machine_ok's reason (claim=True) while soft cool down holds new work at its cap
+SOFT_COOLDOWN_SESSIONS = 4  # soft cool down (job 1308): while it is on, new work waits at this many sessions, this Mac plus the shop Macs; tune here
+
+
+def soft_cooldown_path():
+    """The soft cool-down flag (the dashboard's Soft cool down button), beside the cool-down flag so SCRUM_COOLDOWN moves it."""
+    return cooldown_path().with_name("soft-cooldown")
+
+
+def soft_cooling_down():
+    return soft_cooldown_path().exists()
+
+
+def shop_jobs_by_worker():
+    """Counter of the jobs in flight on the shop Macs per worker alias: every registered board's jobs in stage cloud
+    with a `shop` field (no `worker` field: shopmac, the alias jobs ran under before workers.txt)."""
+    return Counter(j.get("worker") or "shopmac" for r in projects().values()
+                               for j in read_board(r / "scrum")["jobs"] if j.get("stage") == "cloud" and j.get("shop"))
+
+
+def shop_jobs_running():
+    """How many jobs run on the shop Macs, all workers together."""
+    return sum(shop_jobs_by_worker().values())
+
+
+def soft_sessions():
+    """The count soft cool down compares with SOFT_COOLDOWN_SESSIONS: this Mac's live sessions plus the shop Macs' jobs."""
+    return live_sessions() + shop_jobs_running()
+
+
+def soft_cap_reason():
+    """None, or why soft cool down holds new work: it is on and soft_sessions() has reached SOFT_COOLDOWN_SESSIONS.
+    Started work is never held by it; manual clicks skip it."""
+    if not soft_cooling_down():
+        return None
+    n = soft_sessions()
+    if n < SOFT_COOLDOWN_SESSIONS:
+        return None
+    return f"{SOFT_COOLING}: {n} of {SOFT_COOLDOWN_SESSIONS} sessions running (this Mac + shop)"
+
+
 def swap_grew(swap):
     """True when swap is more than 1 point of RAM above the oldest reading of the last SWAP_GROWTH_SECS, or more than
     5 points above the lowest reading in that window (a large rebound after a fall). Records swap
@@ -6045,6 +6090,8 @@ def machine_ok(path, manual=False, claim=False, own_load=False):
     An unknown reading passes."""
     if claim and not manual and cooling_down():
         return COOLING
+    if claim and not manual and (soft := soft_cap_reason()):
+        return soft
     ram = free_ram_pct()
     if ram is not None and ram < MIN_FREE_RAM_PCT:
         return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
@@ -8137,7 +8184,7 @@ def cmd_roadmap_link(root, p, s, job_id):
 def cmd_roadmap_next(root, job_id):
     """Mark job_id's step done and return the next todo step. A job in no step (or no roadmap.md) changes nothing.
     Cool-down holds the next step: the step stays running and None is returned; Roadmap resume marks it done later."""
-    if cooling_down() or not (Path(root) / "roadmap.md").is_file():
+    if cooling_down() or soft_cap_reason() or not (Path(root) / "roadmap.md").is_file():
         return None
     with locked_board(root):
         lines, rm = roadmap_locked(root)

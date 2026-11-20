@@ -1,4 +1,4 @@
-import hashlib, io, json, os, re, shlex, shutil, subprocess, sys, tempfile, time, unittest
+import contextlib, hashlib, io, json, os, re, shlex, shutil, subprocess, sys, tempfile, time, unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -3135,6 +3135,58 @@ class BoardTest(unittest.TestCase):
             self.assertIsNone(board.machine_ok(self.tmp.name, claim=True))
             with self.machine("14", "1000"):
                 self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "free RAM 14% (< 20%)")
+
+    def soft(self, live, shop):
+        """Soft cool down on (soft-cooldown beside the cool-down flag), `live` headless sessions here, `shop` shop jobs."""
+        flag = Path(self.tmp.name) / "cooldown"
+        (Path(self.tmp.name) / "soft-cooldown").write_text("")
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)))
+        stack.enter_context(mock.patch.object(board, "live_sessions", return_value=live))
+        stack.enter_context(mock.patch.object(board, "shop_jobs_running", return_value=shop))
+        return stack
+
+    def test_machine_ok_soft_cooldown(self):
+        """Job 1308: soft cool down refuses new claims once this Mac's sessions plus the shop jobs reach 4; 3 passes;
+        manual clicks and claim=False skip it; the real cool down's reason wins when both are on."""
+        self.assertEqual(board.SOFT_COOLDOWN_SESSIONS, 4)
+        with self.soft(2, 2):
+            self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "soft cool down: 4 of 4 sessions running (this Mac + shop)")
+            self.assertIsNone(board.machine_ok(self.tmp.name, manual=True, claim=True))
+            self.assertIsNone(board.machine_ok(self.tmp.name, claim=False))
+            (Path(self.tmp.name) / "cooldown").write_text("")
+            self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "cooling down")
+            (Path(self.tmp.name) / "cooldown").unlink()
+        with self.soft(3, 0):
+            self.assertIsNone(board.machine_ok(self.tmp.name, claim=True))
+        with self.soft(1, 2):
+            self.assertIsNone(board.machine_ok(self.tmp.name, claim=True))
+        with self.soft(6, 0):
+            (Path(self.tmp.name) / "soft-cooldown").unlink()
+            self.assertIsNone(board.machine_ok(self.tmp.name, claim=True), "flag off: no cap")
+
+    def test_soft_cooldown_holds_only_new_claims(self):
+        """Job 1308: at the cap cmd_next (no index) and cmd_cloud_claim claim nothing, a hand-picked index still claims,
+        and soft cool down never parks a job."""
+        with self.soft(4, 0):
+            with self.assertRaises(SystemExit) as e:
+                board.cmd_next(self.tmp.name)
+            self.assertIn("soft cool down: 4 of 4", str(e.exception))
+            self.assertEqual(board.cmd_cloud_claim(self.tmp.name, 2), {"claimed": []})
+            self.assertEqual(board.cmd_roadmap_next(self.tmp.name, "1-a"), None)
+            self.assertFalse(board.cooling_down(), "the real flag stays off")
+            self.assertTrue(board.soft_cooling_down())
+
+    def test_shop_jobs_by_worker(self):
+        """Job 1308: shop_jobs_by_worker counts stage-cloud jobs with a shop field, per worker (none named: shopmac)."""
+        root = Path(self.tmp.name) / "repo"
+        (root / "scrum").mkdir(parents=True)
+        (root / "scrum" / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "1-a", "stage": "cloud", "shop": 1}, {"id": "2-b", "stage": "cloud", "shop": 2, "worker": "newmac"},
+            {"id": "3-c", "stage": "cloud"}, {"id": "4-d", "stage": "build", "shop": 4}]}))
+        with mock.patch.object(board, "projects", return_value={"p": root}):
+            self.assertEqual(dict(board.shop_jobs_by_worker()), {"shopmac": 1, "newmac": 1})
+            self.assertEqual(board.shop_jobs_running(), 2)
 
     def test_cooldown_path_default(self):
         with mock.patch.dict(os.environ, SCRUM_COOLDOWN=""):

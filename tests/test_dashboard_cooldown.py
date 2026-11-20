@@ -65,6 +65,36 @@ class CooldownButton(unittest.TestCase):
                                True])
 
 
+class SoftCooldownButton(unittest.TestCase):
+    """Job 1308: a Soft cool down button beside Cool down in #menu, with its own state text."""
+
+    def test_markup_and_post(self):
+        text = DASHBOARD.read_text()
+        header = text[text.index("<header>"):text.index("</header>")]
+        menu = header[header.index('<div id="menu">'):]
+        self.assertRegex(menu, r'id="cooldown"(?s:.*?)</button><button class="btn" id="softCooldown" type="button" hidden data-agent-hint="[^"]*holds new work[^"]*">Soft cool down</button>')
+        self.assertIn("post(\"api/cooldown\", {soft: !btn.dataset.on})", text)
+        self.assertIn("#cooldown,#softCooldown,#machine .btn{min-height:44px;min-width:44px}", text)
+
+    def test_render_states(self):
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        esc = text[text.index("const esc = "):text.index("\n", text.index("const esc = "))]
+        script = (f"const els = {{cooldown: {{dataset: {{}}}}, cooldownState: {{}}, softCooldown: {{dataset: {{}}}}}};\nconst $ = id => els[id];\n{esc}\n"
+                  f"{fn_body(text, 'renderCooldown')}\n"
+                  "const out = [{cooldown: false, sessions: 0, soft_cooldown: true, soft_sessions: 3, soft_cap: 4},\n"
+                  "  {cooldown: false, sessions: 0, soft_cooldown: false, soft_sessions: 3, soft_cap: 4},\n"
+                  "  {cooldown: true, sessions: 2, soft_cooldown: true, soft_sessions: 3, soft_cap: 4}].map(m => { renderCooldown(m);\n"
+                  "  return [els.softCooldown.textContent, els.softCooldown.hidden, els.cooldownState.innerHTML]; });\n"
+                  "console.log(JSON.stringify(out));")
+        out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
+        self.assertEqual(out, [["End soft cool down", False, "soft cool down: 3 of 4 sessions"],
+                               ["Soft cool down", False, ""],
+                               ["End soft cool down", False, "Cooling down · 2 sessions finishing"]])
+
+
 def button(worker, on=False, disabled=False):
     """A shop Mac's own Cool down / Resume work button, as renderMachine draws it."""
     return (f'<button class="btn" type="button" data-worker="{worker}"{' data-on="1"' if on else ""}'
