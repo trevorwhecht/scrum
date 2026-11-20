@@ -6800,6 +6800,84 @@ class DigestTest(unittest.TestCase):
         self.assertEqual([b.read_bytes() for b in self.backups()], [b"keep A\nnew line\nkeep B\n"])
         self.assertEqual(self.statuses(), ["reverted"])
 
+    def test_digest_auto_writes_ignored_scrum_file_in_place(self):
+        """Job 1272: a git-ignored scrum/*.md file (project.md) is written in place after a backup, with no job or commit."""
+        self.git_repo()
+        runs = self.contract_tests()
+        project = self.scrum / "project.md"
+        project.parent.mkdir(parents=True, exist_ok=True)
+        project.write_text("- Stack: x\n- Test: python3 -m unittest discover -s tests -v\n")
+        twice = self.scrum / "notes.md"
+        twice.write_text("old line\nold line\n")
+        self.digest([self.prop("p1", project, old="- Test: python3 -m unittest discover -s tests -v",
+                               new="- Test: python3 tests/run_parallel.py"), self.prop("p2", twice)])
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(out, {"applied": [{"id": "p1", "target": str(project), "why": "Seen in 001-a and 002-b (p1)."}],
+                               "queued": [],
+                               "skipped": [{"id": "p2", "target": str(twice), "reason": "old text found 2 times"}],
+                               "job": None})
+        self.assertEqual(project.read_text(), "- Stack: x\n- Test: python3 tests/run_parallel.py\n")
+        self.assertEqual(twice.read_bytes(), b"old line\nold line\n")
+        self.assertEqual([b.read_bytes() for b in self.backups()],
+                         [b"- Stack: x\n- Test: python3 -m unittest discover -s tests -v\n"])
+        self.assertEqual(self.jobs(), [])
+        self.assertEqual(self.head_count(), 1)
+        self.assertEqual(runs(), [])
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+        self.assertEqual(self.statuses(), ["applied", "skipped"])
+
+    def test_digest_auto_scrum_in_place_needs_ignored_md(self):
+        """Job 1272: only an ignored .md file under scrum/ (not hooks) is written in place; the rest keep their old paths."""
+        self.git_repo()
+        runs = self.contract_tests()
+        tracked = self.scrum / "tracked.md"
+        tracked.parent.mkdir(parents=True, exist_ok=True)
+        tracked.write_text("keep A\nold line\nkeep B\n")
+        self.git("add", "-f", "scrum/tracked.md")
+        self.git("commit", "-q", "-m", "tracked")
+        self.git("push", "-q")
+        with open(self.reg / ".git" / "info" / "exclude", "a") as f:
+            f.write("notes/\n")
+        notes = self.reg / "notes" / "x.md"
+        notes.parent.mkdir()
+        state = self.scrum / "state.json"
+        hooks = self.scrum / "hooks" / "x.md"
+        hooks.parent.mkdir()
+        for f in (notes, state, hooks):
+            f.write_text("keep A\nold line\nkeep B\n")
+        self.digest([self.prop("p1", notes), self.prop("p2", state), self.prop("p3", hooks), self.prop("p4", tracked)])
+        out = self.serve.digest_auto(self.scrum, "001")
+        [job] = self.jobs()
+        self.assertEqual((out["job"], job["lane"]), (job["id"], "lilguy"))
+        self.assertEqual(out["applied"], [])
+        self.assertEqual(sorted((s["id"], s["reason"]) for s in out["skipped"]),
+                         [("p1", "old text found 0 times"), ("p2", "old text found 0 times"), ("p3", "settings or hooks file")])
+        # the tracked file reaches digest_apply, whose plain `git add` refuses a path under the excluded scrum/
+        [queued] = out["queued"]
+        self.assertEqual(queued["id"], "p4")
+        self.assertTrue(queued["reason"].startswith("commit failed: "), queued["reason"])
+        for f in (notes, state, hooks, tracked):
+            self.assertEqual(f.read_bytes(), b"keep A\nold line\nkeep B\n")
+        self.assertEqual(self.head_count(), 2)
+        self.assertEqual(len(runs()), 1)
+        self.assertEqual(self.backups(), [])
+        self.assertEqual(self.statuses(), ["skipped", "skipped", "skipped", "queued"])
+
+    def test_digest_revert_ignored_scrum_file_in_place(self):
+        """Job 1272: reverting an applied ignored scrum/*.md edit swaps it back in place after a backup, with no job or commit."""
+        self.git_repo()
+        project = self.scrum / "project.md"
+        project.parent.mkdir(parents=True, exist_ok=True)
+        project.write_text("- Stack: x\n- Test: python3 tests/run_parallel.py\n")
+        self.digest([self.prop("p1", project, old="- Test: python3 -m unittest discover -s tests -v",
+                               new="- Test: python3 tests/run_parallel.py", status="applied")])
+        self.assertEqual(self.serve.digest_revert(self.scrum, "001", "p1")[0], 200)
+        self.assertEqual(project.read_text(), "- Stack: x\n- Test: python3 -m unittest discover -s tests -v\n")
+        self.assertEqual([b.read_bytes() for b in self.backups()], [b"- Stack: x\n- Test: python3 tests/run_parallel.py\n"])
+        self.assertEqual(self.jobs(), [])
+        self.assertEqual(self.head_count(), 1)
+        self.assertEqual(self.statuses(), ["reverted"])
+
     def test_digest_revert_changed_text_returns_409_and_changes_nothing(self):
         self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"), text="keep A\nnew line\nkeep B\n")
         twice = self.reg / "agents" / "scrum-y.md"
