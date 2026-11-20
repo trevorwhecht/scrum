@@ -3888,14 +3888,16 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for p in sorted((SKILL_DIR / "lanes").glob("*.md")) + [SKILL_DIR / "SKILL.md"]:
             self.assertNotRegex(p.read_text(), r"scrum-[a-z-]+[^\n]{0,80}in the background", p.name)
         merge = self.lane("merge")
-        self.assertIn("timeout 590", merge)
-        self.assertIn("exits 124, run the same command again", merge)
+        self.assertIn("alarm 590; exec @ARGV", merge)
+        self.assertNotIn("timeout 590", merge)
+        self.assertIn("exit=142", merge)
         self.assertIn("for i in 1 2 3 4 5 6; do", merge)
         self.assertNotIn("Run this in the **background**", merge)
         self.assertNotIn("re-run it in the background", merge)
         rule = "never starts a scrum agent in the background"
         self.assertIn(rule, skill_text())
-        self.assertIn("timeout 590 sh -c 'until grep -q \"^exit=\"", skill_text())
+        self.assertIn("for i in $(seq 1 59); do grep -q \"^exit=\"", skill_text())
+        self.assertNotIn("timeout 590", skill_text())
         self.assertEqual(self.lane("newjob").count("(wait for " + "it to exit)"), 0)
 
     def test_skill_md_within_body_budget(self):
