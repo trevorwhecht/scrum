@@ -11,7 +11,7 @@ def status(job):
     text = DASHBOARD.read_text()
     pick = lambda *starts: "\n".join(l for l in text.splitlines() if l.startswith(starts))
     src = pick("const paused = ", "const setupWait = ", "const playQueued = ", "const WATCHED = ", "const isStalled = ",
-               "const limitHeld = ")
+               "const limitHeld = ", "const clock = ")
     src += "\n" + text[text.index("const noPaths = "):text.index("// A needs-human job's closed question")]
     script = f"const runs = {{}};\n{src}\nconsole.log(JSON.stringify(statusLine({json.dumps(job)})));"
     return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
@@ -23,7 +23,7 @@ class BuildLockWait(unittest.TestCase):
                          "Waiting for the build lock")
 
     def test_without_flag_unchanged(self):
-        self.assertRegex(status({"stage": "check", "updatedAt": "2026-01-01T00:00:00Z"}), r"^Checking, \d+ min$")
+        self.assertRegex(status({"stage": "check", "updatedAt": "2026-01-01T00:00:00Z"}), r"^Checking, started \d{1,2}:\d{2} [AP]M$")
 
     def test_other_cases_keep_their_line(self):
         base = {"stage": "check", "buildLockWait": True, "updatedAt": "2026-01-01T00:00:00Z"}
