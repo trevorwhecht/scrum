@@ -305,9 +305,9 @@ class WriteTokensTest(unittest.TestCase):
 
     def test_two_sessions_flag(self):
         hm = lambda t: datetime.fromtimestamp(self.t + t).strftime("%H:%M")
-        got = self.two_sessions(("s1", 0, 600, 3), ("s2", 300, 1200, 1))  # overlap; the shorter run is the $1 one
+        got = self.two_sessions(("s1", 0, 600, 3), ("s2", 300, 1200, 1))  # overlap; the shorter (10 min) run cost $3
         self.assertEqual(len(got), 1)
-        self.assertIn(f"two sessions: scrum-builder {hm(0)}-{hm(600)} and {hm(300)}-{hm(1200)}, wasted $1.00", got[0])
+        self.assertIn(f"two sessions: scrum-builder {hm(0)}-{hm(600)} and {hm(300)}-{hm(1200)}, wasted $3.00", got[0])
 
     def test_two_sessions_not_flagged_without_overlap_or_with_one_parent(self):
         self.assertEqual(self.two_sessions(("s1", 0, 600, 3), ("s2", 900, 1200, 1)), [])  # no overlap
