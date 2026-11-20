@@ -58,6 +58,8 @@ class FinishFirst(unittest.TestCase):
     def runall(self, n=2):
         (self.root / "backlog.md").write_text("".join(f"- [ ] item {chr(97 + i)}\n" for i in range(n)))
         out = board.cmd_runall_start(self.root)
+        with board.locked_board(self.root) as b:  # past BigBoy step 2, as `ready --specs-done` leaves it (job 1275)
+            board.find(b, out["id"]).pop("childSpecs", None)
         for i, k in enumerate(out["children"]):
             (self.root / "jobs" / k).mkdir(parents=True, exist_ok=True)
             (self.root / "jobs" / k / "spec.md").write_text(f"# x\n## Likely files\n- `src/f{i}.py`: why\n")

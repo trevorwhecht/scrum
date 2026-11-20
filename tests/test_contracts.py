@@ -1899,10 +1899,19 @@ class ContractTest(unittest.TestCase):
         self.assertLess(digester.index("**Waste.**"), digester.index("**Token sinks.**"))
         self.assertLess(digester.index("**Token sinks.**"), digester.index("**Backlog fallback.**"))
         sinks = digester[digester.index("**Token sinks.**"):digester.index("**Backlog fallback.**")]
-        for phrase in ("`not needed` cause seen in 2 or more jobs", "the agent or lane that caused it",
-                       "over 3x its lane median", '`"kind": "backlog"`', "A `None` section gets no proposal",
-                       "at-most-8 cap"):
+        for phrase in ("Every `not needed` line becomes a proposal whose `why` starts `Token sinks:`",
+                       "Lines that share a cause share one proposal", "A `needed` line gets none",
+                       "the agent or lane that caused it", '`"kind": "backlog"`',
+                       "A `None` section gets no proposal", "at-most-8 cap"):
             self.assertIn(phrase, sinks, phrase)
+        for phrase in ("2 or more jobs", "over 3x its lane median"):
+            self.assertNotIn(phrase, sinks, phrase)
+        land = digester[digester.index("How they land, so you can judge"):]
+        land = land[:land.index("\n")]
+        self.assertIn("a git-ignored `scrum/*.md` file such as `scrum/project.md`, which lets you propose "
+                      "the project.md Test line fix", land)
+        step4 = next(l for l in self.lane("digest").splitlines() if l.startswith("4. If the `proposals` list"))
+        self.assertIn("git-ignored `scrum/*.md` files written in place after a backup", step4)
         self.assertIn("**Time sinks**, **Token sinks**, **Process health**", digester)
         self.assertLess(digester.index("**Token sinks**, "), digester.index("**Escapes**, **Backlog fallback**"))
         self.assertIn("**Escapes**, **Backlog fallback**, **New skill**, **Processes** and **Waste** read `notes.md`",
@@ -3804,13 +3813,29 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_child_start_silences_notifier(self):
         text = self.rules()
-        step3 = self.section(text, "3. **Start.** Run `B ready $ID`", "4. **Spec refresh**")
+        step3 = self.section(text, "3. **Start.** Run `B ready $ID --specs-done`", "4. **Spec refresh**")
         self.assertIn("run `B spawn <child> start`", step3)
         self.assertIn("detached from the main checkout with `CLAUDE_NOTIFIER_DISABLE=1`", step3)
 
+    def test_bigboy_start_claims_with_specs_done(self):
+        """Job 1275: plan-apply and runall-start hold every claim until step 3's `ready --specs-done`, and step 3
+        starts only what that call printed; step 5's and step 6's claims stay plain."""
+        bigboy = self.lane("bigboy")
+        step3 = self.section(bigboy, "3. **Start.**", "4. **Spec refresh**")
+        self.assertIn("Run `B ready $ID --specs-done`", step3)
+        self.assertIn("Start only the ids `ready` printed; a child it did not print is running or waiting, so never "
+                      "`B spawn` it.", step3)
+        self.assertIn("   2. Run `B ready $P`. Under the lock", bigboy)
+        step6 = self.section(bigboy, "6. **After a child stops.**", "7. **Final BigBoy review.**")
+        self.assertIn("then `B ready $P`, then `B chain-unlock $P $ID`", step6)
+        self.assertNotIn("--specs-done", step6)
+        gaps = bigboy[bigboy.index("   - `BIGBOY: GAPS` the first time"):]
+        self.assertIn("Run step 2 for it, then `B ready $P --specs-done` and **start** it.", gaps[:gaps.index("\n")],
+                      "plan-apply --fix marks the parent too")
+
     def test_child_start_passes_orchestrator_model(self):
         text = self.rules()
-        step3 = self.section(text, "3. **Start.** Run `B ready $ID`", "4. **Spec refresh**")
+        step3 = self.section(text, "3. **Start.** Run `B ready $ID --specs-done`", "4. **Spec refresh**")
         for phrase in ("run `B spawn <child> start`", "adds `--model` from the `- Orchestrator model:` line",
                        "blank, missing or malformed gives `sonnet`", "`inherit` drops it",
                        '`claude -p "/trevskills-scrum start <child>" --permission-mode acceptEdits`'):

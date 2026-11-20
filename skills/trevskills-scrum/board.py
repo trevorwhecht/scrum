@@ -131,9 +131,11 @@
                                    items move to manual-checks.md; depends adds {#id} and {needs #id} markers), write report.md
   board.py plan-apply <id> [--fix] turn a bigboy parent's plan.md into waiting child jobs, print {"children"};
                                    --fix adds the one FIX child from bigboy-review.md's ## Fix ticket
-  board.py ready <id>              claim the bigboy parent's startable children (stage -> spec; gated by machine_ok, free RAM
-                                   per batch and the file-overlap rules), print
-                                   {"ready","merged","total","in_progress","all_merged","held"}
+  board.py ready <id> [--specs-done]  claim the bigboy parent's startable children (stage -> spec; gated by machine_ok,
+                                   free RAM per batch and the file-overlap rules), print
+                                   {"ready","merged","total","in_progress","all_merged","held"}; nothing while the
+                                   childSpecs mark from plan-apply/runall-start is under an hour old, unless --specs-done
+                                   (BigBoy step 3) drops it first
   board.py runall-start           make a Run-all parent with every open backlog item as a waiting child (needs become
                                    depends_on; items waiting on an outside job, an {after repo:job} job, the requeue loop
                                    guard or Human setup stay open), print {"id","children"}
@@ -157,7 +159,8 @@
   board.py spawn <id> <action> ["<prompt>"] [--model M]  start a detached headless `claude -p <prompt>` (default
                                    "/trevskills-scrum <action> <id>") from the repo, logging to runs/; start/resume get the
                                    Orchestrator model unless --model; set the job's runlog (ignored when <id> is not on the
-                                   board), print {"log","pid"}
+                                   board), print {"log","pid"}; a board job whose session is alive (not this caller's)
+                                   starts nothing and exits 1: "job <id> already has a live session (pid N)"
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
   board.py fable-ok <id> <planner|spec-writer>  print the Agent model override (claude-fable-5-1) or none: the planner, or
                                    the spec-writer on lane standard (or unset), of a complex job (header `Complex: yes`
@@ -1970,7 +1973,7 @@ def _model_family(model):
 def _token_reasons(job, usd, groups, lane_median, top):
     """write_tokens' ## Flagged reasons for one job, in the fixed order: pricier model than the agent's pin, over
     TOKENS_FLAG median_x its lane median, a top-cost job, one of 2 or more agents over agent_share of the job, a
-    reviewer's later round at round_share or more of its round 1."""
+    reviewer's later round at round_share or more of its round 1. (write_tokens adds _two_sessions after them.)"""
     out, by_agent, by_round = [], {}, {}
     for (agent, rnd, model), (_, a) in groups.items():
         by_agent[agent] = by_agent.get(agent, 0) + a
@@ -1992,6 +1995,29 @@ def _token_reasons(job, usd, groups, lane_median, top):
         if agent.startswith("scrum-review-") and isinstance(rnd, int) and rnd >= 2 and base > 0 \
                 and a >= TOKENS_FLAG["round_share"] * base:
             out.append(f"{agent} round {rnd} ${a:.2f} = {100 * a / base:.0f}% of round 1 ${base:.2f}")
+    return out
+
+
+def _two_sessions(rows):
+    """write_tokens' `two sessions` reasons for one job's rows: for each agent type, every pair of its subagent
+    transcripts under different parent sessions (<session>/subagents/agent-*.jsonl -> <session>) whose spans (min to max
+    ts of that transcript's rows) overlap. Each reads `two sessions: <agent> HH:MM-HH:MM and HH:MM-HH:MM, wasted $x`,
+    the USD being the shorter run's (local time)."""
+    runs = {}
+    for r in rows:
+        p = Path(r["transcript"])
+        if p.parent.name != "subagents":
+            continue
+        run = runs.setdefault((r["agent"], str(p)), {"parent": p.parent.parent, "lo": r["ts"], "hi": r["ts"], "usd": 0})
+        run["lo"], run["hi"], run["usd"] = min(run["lo"], r["ts"]), max(run["hi"], r["ts"]), run["usd"] + row_cost(r)
+    out, hm = [], lambda t: datetime.fromtimestamp(t).strftime("%H:%M")
+    items = sorted(runs.items(), key=lambda kv: (kv[0][0], kv[1]["lo"], kv[0][1]))
+    for i, ((agent, _), a) in enumerate(items):
+        for (agent2, _), b in items[i + 1:]:
+            if agent2 == agent and a["parent"] != b["parent"] and a["lo"] < b["hi"] and b["lo"] < a["hi"]:
+                short = min(a, b, key=lambda x: (x["hi"] - x["lo"], x["usd"]))
+                out.append(f"two sessions: {agent} {hm(a['lo'])}-{hm(a['hi'])} and {hm(b['lo'])}-{hm(b['hi'])}, "
+                           f"wasted ${short['usd']:.2f}")
     return out
 
 
@@ -2088,7 +2114,7 @@ def write_tokens(root, digest_id):
         medians[ln] = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
     out += ["", "## Flagged"]
     for j in ranked:
-        reasons = _token_reasons(j, costs[j][1], groups[j], medians[lane[j]], top)
+        reasons = _token_reasons(j, costs[j][1], groups[j], medians[lane[j]], top) + _two_sessions(by_job[j])
         if reasons:
             out.append(f"- {j} · ${costs[j][1]:.2f} · " + "; ".join(reasons))
             out += _costliest_detail(by_job[j])
@@ -5424,7 +5450,8 @@ def add_child(root, board, parent, t, depends_on, goal, plain=False):
 
 def cmd_plan_apply(root, parent_id, fix=False):
     """Create the children from plan.md (or, with fix, the one FIX child from bigboy-review.md) under the lock.
-    Every check runs before the first job is created, so a refused plan creates nothing."""
+    Every check runs before the first job is created, so a refused plan creates nothing. The parent gets a childSpecs
+    mark (child_specs_pending) until BigBoy step 3's `ready --specs-done`."""
     d = Path(root) / "jobs" / check_id(parent_id)
     read = lambda name: (d / name).read_text(encoding="utf-8", errors="replace") if (d / name).is_file() else ""
     with locked_board(root) as board:
@@ -5450,7 +5477,8 @@ def cmd_plan_apply(root, parent_id, fix=False):
             for t in tickets:
                 find(board, ids[t["ticket"]])["depends_on"] = [ids[x] for x in t["depends"]]
             new = list(ids.values())
-        parent.update(children=kids + new, stage="running", reason=None, updatedAt=now())
+        # childSpecs: no claim until BigBoy step 3's `ready --specs-done` (child_specs_pending)
+        parent.update(children=kids + new, stage="running", reason=None, updatedAt=now(), childSpecs=now())
         parent["files"], parent["diverged"] = job_files(d), diverged(d)
         return {"children": new}
 
@@ -5467,7 +5495,8 @@ def cmd_runall_start(root, match=None):
     one held by an {after repo:job} marker or the requeue loop guard (waiting_on), with every item that needs it. A child
     whose item needs another item claimed here depends_on that sibling's child. An item waiting on Human setup stays
     open, and so does every item that needs it. With match only items match_words accepts are claimed: the rest are held,
-    so a matching item that needs one stays open too. Cool-down refuses it (COOLING_CLAIM)."""
+    so a matching item that needs one stays open too. Cool-down refuses it (COOLING_CLAIM). The parent gets a
+    childSpecs mark, as in cmd_plan_apply."""
     if cooling_down():
         raise SystemExit(COOLING_CLAIM)
     with locked_board(root) as board:
@@ -5500,7 +5529,7 @@ def cmd_runall_start(root, match=None):
             find(board, kid)["depends_on"] = list(dict.fromkeys(k for n in item["needs"] for k in by_id.get(n, [])
                                                                 if k != kid))
         write_backlog(root, lines)
-        parent.update(lane="runall", stage="running", children=kids, updatedAt=now())
+        parent.update(lane="runall", stage="running", children=kids, updatedAt=now(), childSpecs=now())  # as plan-apply
         return {"id": parent_id, "children": kids}
 
 
@@ -5905,6 +5934,16 @@ def big_shared(root):
         return set(BIG_SHARED_FILES)
     return BIG_SHARED_FILES | set(_project_list(text, "Shared files") or [])
 OVERLAP_HOLD_MAX_S = 2 * 3600  # a waiting child held on an overlap longer than this is claimed anyway
+CHILD_SPECS_MAX_S = 3600  # a parent's childSpecs mark older than this holds nothing: it died in BigBoy step 2
+
+
+def child_specs_pending(parent) -> bool:
+    """True while a parent's childSpecs mark (plan-apply, runall-start: BigBoy step 2 is writing the child specs) is
+    at most CHILD_SPECS_MAX_S old; cmd_ready claims none of its children then (job 1275). A malformed mark holds nothing."""
+    try:
+        return time.time() - datetime.fromisoformat(parent["childSpecs"]).timestamp() <= CHILD_SPECS_MAX_S
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def is_test_path(p):
@@ -6055,8 +6094,11 @@ def note_queue_gate(root, job_id, gate):
         pass
 
 
-def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, shop: str | None = None):
+def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, shop: str | None = None,
+              specs_done=False):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
+    While child_specs_pending(parent) (BigBoy step 2 writing the child specs, job 1275) it claims nothing and leaves
+    the parent, as for a paused one; `specs_done` (step 3's `ready --specs-done`, never serve.py) first drops the mark.
     `live` ids count as in progress whatever their stage (see resume_blocker). A sibling or outside job in POST_BUILD
     holds no slot (it still counts in in_progress), and a `Lane: fast` kid (spec.md header, else feature.md) passes
     slot_conflict's `fast`, with every kid's and holder's spec_funcs as its `funcs`. Paused and stalled siblings with readable Likely files keep their
@@ -6108,7 +6150,10 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
         # A legacy needs-human parent (blocked before WAITING_ON existed, or parked on the chain lock) is
         # re-evaluated so existing boards recover.
         legacy = parent["stage"] == "needs-human" and reason.startswith((BLOCKED, RUNALL_BLOCKED, CHAIN_LOCKED))
-        held = bool(parent.get("paused"))  # a paused parent claims nothing and keeps its stage and reason
+        if specs_done:
+            parent.pop("childSpecs", None)
+        # a paused parent, or one still writing its child specs, claims nothing and keeps its stage and reason
+        held = bool(parent.get("paused")) or child_specs_pending(parent)
         blocked = not held and (legacy or (parent["stage"] == "running"
                                            and reason.startswith((WAITING_ON, MACHINE_WAIT))))
         go = not held and (parent["stage"] == "running" or legacy)
@@ -7542,10 +7587,11 @@ def _is_claude(command):
     return bool(toks) and (os.path.basename(toks[0]) == "claude" or "claude" in toks or "claude-code" in command)
 
 
-def session_alive_fn():
+def session_alive_fn(skip: int | None = None):
     """One `ps` scan; a job is alive when a claude process line has its id, or when its recorded claude pid is live
     (a job with no pid: when a claude process runs on its recorded tty). When ps can't be read, every job counts as
-    alive, so the watchdog never flags on a guess."""
+    alive, so the watchdog never flags on a guess. `skip` (spawn's caller, job 1275) is a claude pid whose line is left
+    out: the calling session never counts as the job's live session."""
     try:
         r = subprocess.run(["ps", "-axo", "pid=,tty=,command="], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
@@ -7553,7 +7599,8 @@ def session_alive_fn():
     out = r.stdout or ""
     if r.returncode != 0 or not out.strip():  # denied (a sandboxed call) or empty: unknown, never "all dead"
         return lambda job: True
-    lines = [l.strip() for l in out.splitlines() if _is_claude((l.split(None, 2) + ["", ""])[2])]  # drop pid and tty
+    lines = [l.strip() for l in out.splitlines() if _is_claude((l.split(None, 2) + ["", ""])[2])  # drop pid and tty
+             and not (skip and l.split()[0] == str(skip))]
     pids = {int(l.split()[0]) for l in lines if l.split()[0].isdigit()}
     ttys = {l.split()[1] for l in lines if len(l.split()) > 1}
     # ponytail: a reused tty (pid-less jobs only), a recycled claude pid, or an id inside another command reads as
@@ -8130,7 +8177,9 @@ def main(argv=None):
     pa = sub.add_parser("plan-apply")
     pa.add_argument("id")
     pa.add_argument("--fix", action="store_true")
-    sub.add_parser("ready").add_argument("id")
+    rd = sub.add_parser("ready")
+    rd.add_argument("id")
+    rd.add_argument("--specs-done", action="store_true")
     sub.add_parser("runall-start").add_argument("--match")
     sub.add_parser("watchdog")
     sub.add_parser("cloud-sync")
@@ -8278,7 +8327,7 @@ def main(argv=None):
     elif a.cmd == "plan-apply":
         print(json.dumps(cmd_plan_apply(a.dir, a.id, a.fix)))
     elif a.cmd == "ready":
-        print(json.dumps(cmd_ready(a.dir, a.id)))
+        print(json.dumps(cmd_ready(a.dir, a.id, specs_done=a.specs_done)))
     elif a.cmd == "runall-start":
         print(json.dumps(cmd_runall_start(a.dir, a.match)))
     elif a.cmd == "watchdog":
@@ -8311,7 +8360,7 @@ def main(argv=None):
     elif a.cmd == "prod-ok":
         print(cmd_prod_ok(a.dir, a.id, a.bullet))
     elif a.cmd == "spawn":
-        proc, log = spawn(a.dir, a.id, a.action, a.prompt, model=a.model)
+        proc, log = spawn(a.dir, a.id, a.action, a.prompt, model=a.model, caller=caller_claude_pid())
         print(json.dumps({"log": log, "pid": proc.pid}))
     elif a.cmd == "backlog-spec":
         out = cmd_backlog_spec(a.dir, a.id)
@@ -8501,9 +8550,17 @@ def spawn_settings(config_dir: Path, repo: Path) -> str:
     return json.dumps(settings)
 
 
+class LiveSession(SystemExit):
+    """spawn's refusal (job 1275): the job already has a live session, so a second one would fight it."""
+
+
 def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags=("--permission-mode", "acceptEdits"),
-          model: str | None = None, account: str | None = None, nice: int = SESSION_NICE) -> tuple[subprocess.Popen, str]:
+          model: str | None = None, account: str | None = None, nice: int = SESSION_NICE,
+          caller: int | None = None) -> tuple[subprocess.Popen, str]:
     """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/, and set the job's runlog and account.
+    A job on the board whose session reads alive (session_alive_fn, ps unreadable counting as alive) launches nothing:
+    LiveSession (a SystemExit) names it. `caller` (`B spawn`'s caller_claude_pid) is left out of that scan, so the job's
+    own session may hand it off (a lilguy hand-off, a cloud-home auto-migrate). A job not on the board is never checked.
     start/resume/run-all/cloud-home get `--model <Orchestrator model>` (or `<Big ticket model>`, see orchestrator_model) unless `model` is given.
     `account` None: pick_account, preferring the job's recorded account; with none free, the one whose limit ends soonest
     (the recorded account on a tie), else the first (Trevor's Play and Resume are never refused on usage). Any account but the first runs with
@@ -8525,6 +8582,9 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         job = find(read_board(root), job_id)
     except (SystemExit, OSError):  # not on the board (run-all, digest, weekly), or no board yet
         job = {}
+    if job and session_alive_fn(skip=caller)(job):  # job 1275: two sessions on one job fight over its worktree
+        pid = job.get("pid") if job.get("pid") != caller else None  # the caller's own pid is not the live one
+        raise LiveSession(f"job {job_id} already has a live session (pid {pid or 'unknown'})")
     if account is None:
         recorded = job.get("account")
         if recorded and str(job.get("reset") or "").isdigit() and time.time() >= int(job["reset"]):
