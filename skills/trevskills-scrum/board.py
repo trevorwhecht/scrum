@@ -3840,6 +3840,8 @@ def _lilguy_trigger(rows, names, feature_text: str) -> str | None:
     if binary := next((p for a, _, p in rows if a is None), None):
         return f"binary file {binary}"
     mechanical = re.search(r"^Lane: lilguy — mechanical", feature_text, re.M)  # renames, config, docs: any size
+    if re.search(r"^Lane: lilguy — bug, cause pinned", feature_text, re.M):  # its required repro test is not counted
+        rows = [r for r in rows if not is_test_path(r[2])]
     if not mechanical and (lines := sum(a for a, _, _ in rows)) > LILGUY_MAX_LINES:
         return f"diff over {LILGUY_MAX_LINES} added lines ({lines})"
     if not mechanical and (files := len({p for a, _, p in rows if a})) > LILGUY_MAX_FILES:
