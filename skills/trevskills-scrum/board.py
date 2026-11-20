@@ -1563,7 +1563,7 @@ PROCESSES = (
                         "start_ready", "wake_waiting", "sweep_parents", "main_ff_tick", "terminal_batch_tick"), ()),
     ("Stalls and exits", ("cmd_watchdog", "respawn_exited", "record_outcomes", "cmd_migrate_paused", "claude_migrate"),
      ("questions.log",)),
-    ("Full E2E on main", ("e2e_full_tick", "e2e_full_run"), ("e2e-full.json", "e2e-full.log")),
+    ("Full E2E on main", ("e2e_full_tick", "e2e_full_run"), ("e2e-full.json", "e2e-full.log", "e2e-full-rerun.log")),
     ("UI sweep", ("ui_sweep_tick", "cmd_ui_sweep_record"), ("ui-sweep.json", "ui-sweep/*/review.md")),
     ("Prod error sweep", ("prod_errors_tick",), ("prod-errors.json",)),
     ("Actions alerts", ("actions_alert",), ()),
