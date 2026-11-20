@@ -3881,6 +3881,23 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, head)
         self.assertNotIn("It never writes code", head)
 
+    def test_headless_orchestrators_wait_without_polling(self):
+        # job 1284: foreground agents and one wait rule, no sleep-poll turns
+        self.assertIn("**in ONE message**, in the foreground", self.lane("review").split("\n3. Spawn", 1)[1].split("\n4.", 1)[0])
+        self.assertIn("in ONE message, in the foreground", self.lane("bigboy").split("**Child specs, startable children only.**", 1)[1].split("\n3.", 1)[0])
+        for p in sorted((SKILL_DIR / "lanes").glob("*.md")) + [SKILL_DIR / "SKILL.md"]:
+            self.assertNotRegex(p.read_text(), r"scrum-[a-z-]+[^\n]{0,80}in the background", p.name)
+        merge = self.lane("merge")
+        self.assertIn("timeout 590", merge)
+        self.assertIn("exits 124, run the same command again", merge)
+        self.assertIn("for i in 1 2 3 4 5 6; do", merge)
+        self.assertNotIn("Run this in the **background**", merge)
+        self.assertNotIn("re-run it in the background", merge)
+        rule = "never starts a scrum agent in the background"
+        self.assertIn(rule, skill_text())
+        self.assertIn("timeout 590 sh -c 'until grep -q \"^exit=\"", skill_text())
+        self.assertEqual(self.lane("newjob").count("(wait for " + "it to exit)"), 0)
+
     def test_skill_md_within_body_budget(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         self.assertLessEqual(text.count("\n"), 500)  # skill best practices: under 500 lines
@@ -3944,7 +3961,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn('Build runs as `python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" --project "$F/project.md"`', check)
         self.assertNotIn("'<Build>'", check)
         # job 1227: a held Build can outlast the 600 s Bash timeout, and its 124 parks on the Check queue
-        for phrase in ('--project "$F/project.md"` with the Bash tool\'s `run_in_background` (wait for it to exit)',
+        for phrase in ('--project "$F/project.md"` with the Bash tool\'s `run_in_background` (wait: SKILL.md rule)',
                        "A Test, Typecheck, Lint, Build or E2E run that exits 124 timed out on the lock: re-run it once",
                        "for Build, `'waiting on the Build queue'`"):
             self.assertIn(phrase, check, phrase)
@@ -4084,7 +4101,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "only the spec files the diff adds or changes under the E2E folder",
                        "plus the E2E spec files named in `spec.md` acceptance criteria",
                        "the `e2e.lock` `buildlock.py` wrapper as `npx playwright test --workers=1 <spec files>`",
-                       "with the same `E2E_PORT`, with the Bash tool's `run_in_background` (wait for it to exit)",
+                       "with the same `E2E_PORT`, with the Bash tool's `run_in_background` (wait: SKILL.md rule)",
                        "a non-zero exit is `CHECK: FAIL`", "with neither, step 3 writes `E2E: skipped, debug lane`"):
             self.assertIn(phrase, rule, phrase)
         self.assertNotIn("`E2E: skipped, fast lane`", rule)
