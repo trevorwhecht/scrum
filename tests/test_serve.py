@@ -14592,3 +14592,152 @@ class AsyncBacklogAddTest(_OwnServer, unittest.TestCase):
             self.assertEqual(code, 200)
             self.assertEqual(items[-1]["text"], f"Sync {flag}")
         self.assertFalse(self.spool.exists())
+
+
+class AgentLinksTest(unittest.TestCase):
+    """Job 1290: agent_links_tick re-runs install.sh when a ~/.claude/agents/scrum-*.md link is dangling, points outside the checkout or is missing."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.checkout = self.base / "checkout"
+        self.src = self.checkout / "agents"
+        self.src.mkdir(parents=True)
+        (self.checkout / "install.sh").write_text("#!/bin/bash\n")
+        self.home = self.base / "home"
+        self.links = self.home / "agents"
+        self.links.mkdir(parents=True)
+        p = mock.patch.dict(os.environ, SCRUM_AGENTS_DIR=str(self.src), CLAUDE_HOME=str(self.home))
+        p.start()
+        self.addCleanup(p.stop)
+        self.serve.AGENT_LINKS_LAST = None
+        self.addCleanup(setattr, self.serve, "AGENT_LINKS_LAST", None)
+        self.src.mkdir(exist_ok=True)
+
+    def agent(self, name, link=True):
+        (self.src / name).write_text("x")
+        if link:
+            (self.links / name).symlink_to((self.src / name).resolve())
+
+    def tick(self, run, now=None):
+        return processes_logged(lambda: self.serve.agent_links_tick(run=run, now=now))
+
+    def fake_run(self, code=0, fix=None):
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append((cmd, kw))
+            if fix:
+                fix()
+            return subprocess.CompletedProcess(cmd, code, "", "")
+        run.calls = calls
+        return run
+
+    def test_agent_links_dangling_link_reruns_install_once(self):
+        self.agent("scrum-a.md")
+        (self.links / "scrum-a.md").unlink()
+        (self.links / "scrum-a.md").symlink_to(self.base / "gone.md")
+        run = self.fake_run(fix=lambda: ((self.links / "scrum-a.md").unlink(), (self.links / "scrum-a.md").symlink_to((self.src / "scrum-a.md").resolve())))
+        (out, lines) = self.tick(run)
+        self.assertTrue(out)
+        self.assertEqual(len(run.calls), 1)
+        self.assertEqual(run.calls[0][0], ["bash", str(self.checkout / "install.sh")])
+        self.assertEqual(run.calls[0][1], {"capture_output": True, "text": True, "timeout": 300, "stdin": subprocess.DEVNULL})
+        self.assertEqual(lines, [{"process": "Agent links", "result": "relinked", "repo": os.path.realpath(self.checkout),
+                                  "links": [f"scrum-a.md -> {self.base / 'gone.md'}"], "exit": 0}])
+        # a failing install.sh, and an install.sh that leaves the link bad, are both failed
+        (self.links / "scrum-a.md").unlink()
+        (self.links / "scrum-a.md").symlink_to(self.base / "gone.md")
+        self.serve.AGENT_LINKS_LAST = None
+        _, lines = self.tick(self.fake_run(code=1, fix=None))
+        self.assertEqual((lines[0]["result"], lines[0]["exit"]), ("failed", 1))
+        self.serve.AGENT_LINKS_LAST = None
+        _, lines = self.tick(self.fake_run(code=0))
+        self.assertEqual((lines[0]["result"], lines[0]["exit"]), ("failed", 0))
+        self.serve.AGENT_LINKS_LAST = None
+
+        def boom(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, 300)
+        _, lines = self.tick(boom)
+        self.assertEqual((lines[0]["result"], lines[0]["exit"]), ("failed", None))
+
+    def test_agent_links_link_outside_checkout_is_bad(self):
+        self.agent("scrum-a.md", link=False)
+        other = self.base / "other" / "agents"
+        other.mkdir(parents=True)
+        (other / "scrum-a.md").write_text("x")
+        (self.links / "scrum-a.md").symlink_to(other / "scrum-a.md")
+        run = self.fake_run()
+        out, lines = self.tick(run)
+        self.assertTrue(out)
+        self.assertEqual(lines[0]["links"], [f"scrum-a.md -> {other / 'scrum-a.md'}"])
+        self.assertEqual(lines[0]["result"], "failed")
+
+    def test_agent_links_missing_link_is_bad(self):
+        self.agent("scrum-a.md", link=False)
+        run = self.fake_run()
+        out, lines = self.tick(run)
+        self.assertTrue(out)
+        self.assertEqual(lines[0]["links"], ["scrum-a.md -> missing"])
+        self.assertEqual(len(run.calls), 1)
+
+    def test_agent_links_ignores_real_files_and_other_agents(self):
+        self.agent("scrum-a.md")
+        (self.links / "scrum-real.md").write_text("a real file")
+        (self.links / "jev-filter.md").symlink_to(self.base / "gone.md")
+        (self.src / "jev-other.md").write_text("x")
+        self.assertEqual(self.serve.bad_agent_links(self.links, self.src), [])
+        run = self.fake_run()
+        out, lines = self.tick(run)
+        self.assertEqual((out, lines, run.calls), (False, [], []))
+
+    def test_agent_links_good_links_run_nothing(self):
+        self.agent("scrum-a.md")
+        self.agent("scrum-b.md")
+        run = self.fake_run()
+        out, lines = self.tick(run)
+        self.assertEqual((out, lines, run.calls), (False, [], []))
+
+    def test_agent_links_no_checkout_agents_does_nothing(self):
+        (self.links / "scrum-a.md").symlink_to(self.base / "gone.md")
+        run = self.fake_run()
+        self.assertEqual(self.tick(run), (False, []))
+        self.assertEqual(run.calls, [])
+        self.agent("scrum-b.md", link=False)
+        (self.checkout / "install.sh").unlink()
+        self.assertEqual(self.tick(run), (False, []))
+        self.assertEqual(run.calls, [])
+
+    def test_agent_links_unittest_without_run_does_nothing(self):
+        self.agent("scrum-a.md", link=False)
+        with mock.patch.object(self.serve.subprocess, "run") as sp:
+            self.assertEqual(processes_logged(lambda: self.serve.agent_links_tick()), (False, []))
+        sp.assert_not_called()
+
+    def test_agent_links_same_bad_set_retried_hourly(self):
+        self.agent("scrum-a.md", link=False)
+        run = self.fake_run()
+        self.assertTrue(self.tick(run, now=1000.0)[0])
+        self.assertEqual(self.tick(run, now=1000.0 + 3599), (False, []))
+        self.assertEqual(len(run.calls), 1)
+        out, lines = self.tick(run, now=1000.0 + 3600)
+        self.assertTrue(out)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(len(run.calls), 2)
+        self.agent("scrum-b.md", link=False)  # a different bad list runs at once
+        self.assertTrue(self.tick(run, now=1000.0 + 3601)[0])
+        self.assertEqual(len(run.calls), 3)
+
+    def test_agent_links_watchdog_tick_guarded(self):
+        err = io.StringIO()
+        with mock.patch.object(self.serve, "agent_links_tick", side_effect=RuntimeError("boom")) as tick, \
+                mock.patch.object(self.serve.board, "projects", return_value={}), \
+                mock.patch.object(self.serve.board, "record_cpu_sample"), mock.patch.object(self.serve.board, "ram_room", return_value=0), \
+                mock.patch.object(self.serve, "e2e_lock_reap"), mock.patch.object(self.serve, "write_shop_room"), \
+                contextlib.redirect_stderr(err):
+            self.serve.watchdog_tick()
+        self.assertEqual(tick.call_count, 1)
+        self.assertIn("watchdog: agent links: boom", err.getvalue())

@@ -3635,7 +3635,8 @@ def watchdog_tick():
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard.
     Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard, then runs e2e_lock_reap,
-    then write_shop_room (shop-room.json, which cmd_ready reads), written again after a shop_tick that dispatched."""
+    then write_shop_room (shop-room.json, which cmd_ready reads), written again after a shop_tick that dispatched,
+    then agent_links_tick (re-runs install.sh when a scrum agent link is bad, in its own guard)."""
     global RESUME_ROOM, E2E_RESUMED
     try:
         board.record_cpu_sample()  # cpu_busy_pct's reading; first, so this tick's machine_ok sees it
@@ -3649,6 +3650,10 @@ def watchdog_tick():
         write_shop_room()  # before any cmd_ready reads it this tick
     except (Exception, SystemExit) as e:
         print(f"watchdog: shop room: {e}", file=sys.stderr, flush=True)
+    try:
+        agent_links_tick()  # relinks ~/.claude/agents/scrum-*.md when one dangles, points outside the checkout or is missing
+    except Exception as e:
+        print(f"watchdog: agent links: {e}", file=sys.stderr, flush=True)
     busy, alive, seen, candidates, idle = {}, once(lambda: board.session_alive_fn()), [], [], []
     pending = disk_short = False
     RESUME_ROOM, E2E_RESUMED = board.ram_room(), False
@@ -5131,6 +5136,57 @@ def e2e_lock_reap(now):
         print(f"watchdog: freed {slot.name} from {'dead holder' if dead else 'a job out of check'} {h[0]} ({h[1]})",
               file=sys.stderr, flush=True)
         board.log_process("E2E lock reaps", "freed", slot=slot.name, pid=h[0], cwd=h[1], dead=dead)
+
+
+AGENT_LINKS_RETRY_S = 3600  # the same bad link set re-runs install.sh at most this often
+AGENT_LINKS_LAST: tuple[tuple[str, ...], float] | None = None  # (bad entries, time) of agent_links_tick's last re-run
+
+
+def bad_agent_links(links: Path, src: Path) -> list[str]:
+    """Sorted `<name> -> <target>` entries for the scrum-*.md symlinks in `links` that dangle or resolve to a file whose
+    parent is not src.resolve(), and `<name> -> missing` for each scrum-*.md in `src` with no entry in `links`.
+    Real files and other names are ignored."""
+    bad, want = [], src.resolve()
+    for f in sorted(links.glob("scrum-*.md")):
+        if not f.is_symlink():
+            continue
+        if not f.exists() or f.resolve().parent != want:
+            bad.append(f"{f.name} -> {os.readlink(f)}")
+    for f in sorted(src.glob("scrum-*.md")):
+        if not os.path.lexists(links / f.name):
+            bad.append(f"{f.name} -> missing")
+    return sorted(bad)
+
+
+def agent_links_tick(run=None, now=None) -> bool:
+    """Re-run the checkout's install.sh once when a claude_home()/agents scrum-*.md link is bad (bad_agent_links), and write one
+    `Agent links` processes.log line (relinked, or failed). The same bad set re-runs at most every AGENT_LINKS_RETRY_S
+    (AGENT_LINKS_LAST). False, with nothing run or logged, when every link is good, agents_dir() has no scrum-*.md,
+    install.sh is missing, or this runs under unittest with no `run`."""
+    global AGENT_LINKS_LAST
+    if run is None and "unittest" in sys.modules:
+        return False
+    src = agents_dir()
+    install = src.parent / "install.sh"
+    if not any(src.glob("scrum-*.md")) or not install.is_file():
+        return False
+    links = claude_home() / "agents"
+    bad = bad_agent_links(links, src)
+    if not bad:
+        return False
+    now = time.time() if now is None else now
+    if AGENT_LINKS_LAST and AGENT_LINKS_LAST[0] == tuple(bad) and now - AGENT_LINKS_LAST[1] < AGENT_LINKS_RETRY_S:
+        return False
+    AGENT_LINKS_LAST = (tuple(bad), now)
+    code = None
+    try:
+        r = (run or subprocess.run)(["bash", str(install)], capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
+        code = r.returncode
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    ok = code == 0 and not bad_agent_links(links, src)
+    board.log_process("Agent links", "relinked" if ok else "failed", repo=str(src.parent), links=bad, exit=code)
+    return True
 
 
 BOARD_CACHE = {}  # str(scrum root) -> ((st_ino, st_mtime_ns, st_size), parsed board.json); final jobs carry `routed`

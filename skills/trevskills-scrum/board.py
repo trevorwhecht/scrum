@@ -231,6 +231,7 @@ STOP_TITLES = {
     "MD_CONTRADICTION": "a knowledge-save job found a fact that contradicts the target .md or the code",
     "DIGEST": "a weekly digest proposal, a digest edit that failed to apply, or a pipeline-health finding",
     "TWO_SESSIONS": "two sessions were working the same job at once and the watchdog could not tell which one owns it",
+    "AGENT_MISSING": "a scrum agent could not be loaded (Agent type not found), so the job stopped instead of running a stand-in agent",
 }
 
 # The scrum commands a needs-human question's option may run (shape only: the id need not be the asked job's).
@@ -1580,6 +1581,7 @@ PROCESSES = (
     ("Same tests", ("stop_same_tests",), ()),
     ("CPU hogs", ("report_hogs",), ()),
     ("E2E lock reaps", ("e2e_lock_reap",), ()),
+    ("Agent links", ("agent_links_tick",), ()),
     ("Digest retry", ("digest_retry_tick",), ()),
     ("Weekly digest", ("weekly_tick",), ()),
     ("Cloud jobs", ("cloud_tick", "cmd_cloud_sync", "cmd_cloud_claim", "shop_tick", "write_shop_room"), ()),

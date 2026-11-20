@@ -170,9 +170,9 @@ Read `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md` when this section ru
 
 ## Routing
 
-`scrum-spec-writer`, `scrum-builder` and `scrum-digest-reader` always spawn on cloud with the Agent tool exactly as the step says. Take `START=$(date +%s)` just before each spawn, and after it log the spawn with `python3 "$HOME/.claude/skills/trevskills-scrum/../../local/route.py" record <dir> <role> cloud - $(( $(date +%s) - START )) ok`. `<dir>` is `$F/jobs/$ID` (for a BigBoy child, `$ID` is that child's id), or `$F` for the digest reader. `<role>` is the agent name.
+An Agent call for a `scrum-*` agent that fails with `Agent type '<name>' not found` never falls back to `general-purpose`, another agent or doing the step yourself: stop with the `AGENT_MISSING` ask in the file below.
 
-Ignore a failed `record` call. Logging never blocks the pipeline.
+Read `$HOME/.claude/skills/trevskills-scrum/lanes/routing.md` when this section runs.
 
 ## Resuming the builder
 

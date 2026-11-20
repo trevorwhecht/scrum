@@ -1,0 +1,7 @@
+# Routing
+
+`scrum-spec-writer`, `scrum-builder` and `scrum-digest-reader` always spawn on cloud with the Agent tool exactly as the step says. Take `START=$(date +%s)` just before each spawn, and after it log the spawn with `python3 "$HOME/.claude/skills/trevskills-scrum/../../local/route.py" record <dir> <role> cloud - $(( $(date +%s) - START )) ok`. `<dir>` is `$F/jobs/$ID` (for a BigBoy child, `$ID` is that child's id), or `$F` for the digest reader. `<role>` is the agent name.
+
+Ignore a failed `record` call. Logging never blocks the pipeline.
+
+**Missing agent.** When an Agent call for a `scrum-*` agent fails with `Agent type '<name>' not found`, in any step or lane, spawn no `general-purpose` or other agent in its place and do not do that step's work yourself. Run `B ask $ID 'agent missing: the <name> helper could not be loaded, so the job stopped rather than run a stand-in on the wrong model. The dashboard server relinks the helpers within a minute.' --a "Try again=resume $ID" --b 'Relink the helpers now=shell: <scrum checkout>/install.sh' --c "Remove this job=abort $ID --cascade" --title AGENT_MISSING --recommend <key> '<why>'` and stop. `<scrum checkout>` is the folder two levels above `readlink "$HOME/.claude/skills/trevskills-scrum"`. The digest reader, which has no job, instead ends its run with the error line in the final report.

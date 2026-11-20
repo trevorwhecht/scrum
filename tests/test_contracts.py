@@ -23,7 +23,7 @@ FIRST_LINE = {
 }
 
 SKILL_DIR = Path(__file__).resolve().parents[1] / "skills" / "trevskills-scrum"
-MOVED = ("setup", "commands", "newjob", "review", "merge")  # lanes/ files holding sections moved out of SKILL.md
+MOVED = ("setup", "commands", "newjob", "review", "merge", "routing")  # lanes/ files holding sections moved out of SKILL.md
 POINTER = re.compile(r"^Read `\$HOME/\.claude/skills/trevskills-scrum/lanes/(\w+)\.md` when this section runs\.$", re.M)
 
 
@@ -168,6 +168,25 @@ class ContractTest(unittest.TestCase):
                 if pattern.search(line) or pattern_exact.search(line):
                     hits.append(f"{path.relative_to(ROOT)}:{n}: {line[:120]}")
         self.assertEqual(hits, [])
+
+    def test_routing_missing_agent_stops(self):
+        skill = (SKILL_DIR / "SKILL.md").read_text()
+        routing = skill[skill.index("## Routing\n\n"):skill.index("## Resuming the builder")]
+        self.assertEqual(routing, "## Routing\n\nAn Agent call for a `scrum-*` agent that fails with `Agent type '<name>' not found` never falls back to "
+                         "`general-purpose`, another agent or doing the step yourself: stop with the `AGENT_MISSING` ask in the file below.\n\n"
+                         "Read `$HOME/.claude/skills/trevskills-scrum/lanes/routing.md` when this section runs.\n\n")
+        lane = (SKILL_DIR / "lanes" / "routing.md").read_text()
+        self.assertTrue(lane.startswith("# Routing\n\n`scrum-spec-writer`, `scrum-builder`"))
+        para = lane[lane.index("**Missing agent.**"):]
+        for phrase in ("spawn no `general-purpose` or other agent in its place", "do not do that step's work yourself",
+                       "B ask $ID 'agent missing: the <name> helper could not be loaded, so the job stopped rather than run a stand-in on the wrong model. "
+                       "The dashboard server relinks the helpers within a minute.' --a \"Try again=resume $ID\" "
+                       "--b 'Relink the helpers now=shell: <scrum checkout>/install.sh' --c \"Remove this job=abort $ID --cascade\" "
+                       "--title AGENT_MISSING --recommend <key> '<why>'` and stop.",
+                       "the folder two levels above `readlink \"$HOME/.claude/skills/trevskills-scrum\"`",
+                       "ends its run with the error line in the final report"):
+            self.assertIn(phrase, para, phrase)
+        self.assertNotIn("fallback", routing.lower() + lane.lower())
 
     def test_skill_routes_steps_through_router(self):
         text = self.rules()
@@ -3065,7 +3084,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(key, board.STOP_TITLES, span)
             self.assertEqual(words[words.index("--title") + 2], "--recommend", span)
             self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot'|a 'it is not a code failure; the board resumes it when CI runs again')$")
-        self.assertEqual(len(board.STOP_TITLES), 17)
+        self.assertEqual(len(board.STOP_TITLES), 18)
         stops = self.lane("stops")
         for key, meaning in board.STOP_TITLES.items():
             self.assertRegex(key, r"^[A-Z]+(_[A-Z]+)*$")
