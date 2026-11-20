@@ -173,7 +173,7 @@ class ProcessesDigestTest(unittest.TestCase):
                          "- 2023-11-14T22:15+00:00 freed slot=e2e.lock.0 pid=42 dead=true\nFiles: none\n\n")
         self.assertEqual(self.section(text, "Held items"),
                          "## Held items\nCode: none\nRuns: none logged since the last digest\nFiles:\n- held.md: missing\n\n")
-        self.assertEqual(text.count("\n## "), 23)
+        self.assertEqual(text.count("\n## "), 24)
         names = [l[3:] for l in text.splitlines() if l.startswith("## ")]
         self.assertEqual(names[0], "Session starts")
         self.assertEqual(names[-1], "Manual checks")
@@ -252,13 +252,13 @@ class ProcessesDigestTest(unittest.TestCase):
 
     def test_malformed_and_missing_log(self):
         text = self.processes()  # no processes.log at all
-        self.assertEqual(text.count("Runs: none logged since the last digest\n"), 23)
+        self.assertEqual(text.count("Runs: none logged since the last digest\n"), 24)
         self.write_log("junk", "[1, 2]", {"t": "x", "process": "Disk reclaim", "result": "freed"},
                        {"t": True, "process": "Disk reclaim", "result": "freed"},
                        {"t": S, "process": 5, "result": "freed"}, {"t": S, "process": "Disk reclaim", "result": None},
                        {"t": S, "process": "Disk reclaim"})
         text = self.processes()
-        self.assertEqual(text.count("Runs: none logged since the last digest\n"), 23)
+        self.assertEqual(text.count("Runs: none logged since the last digest\n"), 24)
 
     def test_since_the_start(self):
         self.write_log({"t": 5, "process": "Disk reclaim", "result": "freed", "removed": 1})
@@ -400,7 +400,7 @@ class ProcessCoverageTest(unittest.TestCase):
             self.assertIn(c, codes)
         self.assertEqual([p[0] for p in procs], [
             "Session starts", "Stalls and exits", "Full E2E on main", "UI sweep", "Prod error sweep", "Actions alerts",
-            "Disk reclaim", "Idle cleanup", "Leftover sessions", "Two sessions", "Same tests", "CPU hogs", "E2E lock reaps", "Digest retry",
+            "Disk reclaim", "Idle cleanup", "Leftover sessions", "Two sessions", "Same tests", "CPU hogs", "E2E lock reaps", "Agent links", "Digest retry",
             "Weekly digest", "Cloud jobs", "Usage windows", "Pulse", "Run all and triage", "Roadmap and BigBoy", "Backlog ranking", "Held items",
             "Manual checks"])
 
