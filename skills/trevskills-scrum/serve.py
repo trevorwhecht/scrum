@@ -313,6 +313,23 @@ def cpu_first():
     return best and best[1:]
 
 
+LIVE_IDLE_STOP_S = 10  # stop_live_idle: a live-idle session still there this long after its SIGTERM gets SIGKILL
+
+
+def stop_live_idle(project, job) -> bool:
+    """Job 1275: end the session cmd_watchdog flagged live-idle (the job's reason holds board.LIVE_IDLE) before spawn
+    resumes the job, so the two never run at once. Only when the recorded pid is a live claude process in process_scan
+    (board._is_claude; a reused pid is never signalled): one stderr line, then e2e_full_term_kill sends SIGTERM and,
+    LIVE_IDLE_STOP_S later, SIGKILL if it is still there. Returns True when the pid was signalled."""
+    pid = job.get("pid")
+    if not isinstance(pid, int) or board.LIVE_IDLE not in str(job.get("reason") or ""):
+        return False
+    if not any(p == pid and board._is_claude(cmd) for p, _, _, cmd in process_scan()):
+        return False
+    print(f"live-idle: stopping {project}/{job['id']} pid {pid} before its resume", file=sys.stderr, flush=True)
+    return bool(e2e_full_term_kill([pid], LIVE_IDLE_STOP_S))
+
+
 def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits"), manual=False, idle=False,
           account=None, nice=None):
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
@@ -333,7 +350,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     (the longest-held CPU launch) is queued too, noted cpu_queue, so that job starts ahead of new claims and other projects.
     `nice` (the UI sweep's UI_SWEEP_NICE) goes to board.spawn only when given; every other session keeps SESSION_NICE.
     A board job whose session is still alive (board.spawn's LiveSession, job 1275) starts nothing: one stderr line, its
-    queued launch dropped (unqueue), None."""
+    queued launch dropped (unqueue), None. A `resume` past the gates first stops a live-idle session (stop_live_idle)."""
     reason, on_board, queued_at, hold, refused_live = None, False, None, None, None
     niced = {} if nice is None else {"nice": nice}
     if action in GATED:
@@ -366,6 +383,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 if ram_short and held_over(queued_at):
                     hold = ram_hold_text()
             else:
+                if action == "resume":  # a live-idle session ends first, once the gates let its replacement start
+                    stop_live_idle(project, job)
                 try:
                     proc, log = board.spawn(root, job_id, action, prompt, flags, **niced)
                 except board.LiveSession as e:  # job 1275: a second session would fight the live one
