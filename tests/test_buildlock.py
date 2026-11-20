@@ -27,7 +27,8 @@ class BuildLockTest(unittest.TestCase):
         self.env = {**os.environ, "SCRUM_BUILD_LOCK": str(self.lock),
                     "SCRUM_REGISTRY": str(self.dir / "none.json"),  # never Trevor's real boards
                     "SCRUM_COOLDOWN": str(self.dir / "no-cooldown"),  # never Trevor's real cool-down flag
-                    "SCRUM_CPU_LOAD_PCT": "0", "SCRUM_SWAP_PCT": "0"}  # calm: no test holds on this machine's readings
+                    "SCRUM_CPU_LOAD_PCT": "0", "SCRUM_SWAP_PCT": "0",  # calm: no test holds on this machine's readings
+                    "SCRUM_HEAVY_STEPS_LOG": str(self.dir / "heavy-steps.log")}  # never the real heavy-steps.log
         self.env.pop("SCRUM_BUILD_LOCK_TIMEOUT", None)
         self.procs = []
 
@@ -545,6 +546,57 @@ class HeavyHoldTest(unittest.TestCase):
                 board = self.board(boom)
                 self.assertIsNone(load().machine_hold(board))
                 self.assertEqual(self.main_inproc(board, code=6), (6, "", True))
+
+
+class HeavyStepsLogTest(unittest.TestCase):
+    """Job 1244: buildlock.py appends one line per run to heavy-steps.log (SCRUM_HEAVY_STEPS_LOG overrides it) and
+    never changes the exit code over it."""
+    setUp, tearDown, run_wrap = BuildLockTest.setUp, BuildLockTest.tearDown, BuildLockTest.run_wrap
+    LINE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ check work wait=\d+\.\ds run=\d+\.\ds load5=\d+\.\d\d "
+                      r"cores=\d+$")
+
+    def wrap_in(self, *args, **env):
+        work = self.dir / "work"
+        work.mkdir(exist_ok=True)
+        return subprocess.run([sys.executable, str(SCRIPT), *args], env={**self.env, **env}, cwd=work,
+                              capture_output=True, text=True, timeout=30)
+
+    def test_one_line_per_run_and_exit_code_kept(self):
+        lock = str(self.dir / "sub" / "check.lock")
+        self.assertEqual(self.wrap_in("exit 3", SCRUM_BUILD_LOCK=lock).returncode, 3)
+        self.assertEqual(self.wrap_in("exit 0", SCRUM_BUILD_LOCK=lock).returncode, 0)
+        lines = (self.dir / "heavy-steps.log").read_text().splitlines()
+        self.assertEqual(len(lines), 2, lines)
+        for line in lines:
+            self.assertRegex(line, self.LINE)
+
+    def test_run_seconds_measured(self):
+        self.wrap_in(sys.executable, "-c", "import time; time.sleep(1.2)", SCRUM_BUILD_LOCK=str(self.dir / "sub" / "check.lock"))
+        run = float(re.search(r" run=(\d+\.\d)s ", (self.dir / "heavy-steps.log").read_text()).group(1))
+        self.assertGreaterEqual(run, 1.2)
+
+    def test_unwritable_log_keeps_exit_code(self):
+        bad = self.dir / "is-a-dir"
+        bad.mkdir()
+        r = self.wrap_in("exit 5", SCRUM_HEAVY_STEPS_LOG=str(bad))
+        self.assertEqual((r.returncode, r.stderr), (5, ""))
+        r = self.wrap_in("exit 0", SCRUM_HEAVY_STEPS_LOG=str(self.dir / "missing" / "deeper" / "x.log"))
+        self.assertEqual(r.returncode, 0)
+
+    def test_trims_to_5000_past_10000(self):
+        log = self.dir / "heavy-steps.log"
+        log.write_text("".join(f"old {i}\n" for i in range(10000)))
+        self.wrap_in("exit 0", SCRUM_BUILD_LOCK=str(self.dir / "sub" / "check.lock"))
+        lines = log.read_text().splitlines()
+        self.assertEqual(len(lines), 5000)
+        self.assertEqual(lines[0], "old 5001")
+        self.assertRegex(lines[-1], self.LINE)
+
+    def test_no_trim_at_10000(self):
+        log = self.dir / "heavy-steps.log"
+        log.write_text("".join(f"old {i}\n" for i in range(9999)))
+        self.wrap_in("exit 0", SCRUM_BUILD_LOCK=str(self.dir / "sub" / "check.lock"))
+        self.assertEqual(len(log.read_text().splitlines()), 10000)
 
 
 if __name__ == "__main__":

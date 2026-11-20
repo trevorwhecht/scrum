@@ -314,7 +314,7 @@ def cpu_first():
 
 
 def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits"), manual=False, idle=False,
-          account=None):
+          account=None, nice=None):
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
     shows as running; it covers a job that isn't on the board. Returns the log path relative to root. A GATED action
     on a board job starts only while board.ram_room(floor=0, light=board.light_job(...)) >= 1 (every session ps sees,
@@ -330,8 +330,10 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     the ram_room check. A RAM hold notes board.ram_room_reason (the readings), then ram_room:<id> per live run of the
     project (live_ids). A launched non-manual `start` of a board job appends {project, job, cpu} (the gate's reading)
     to PULSE_STARTS for pulse_tick. While the CPU gate is open, a non-manual `start` of any job other than cpu_first()
-    (the longest-held CPU launch) is queued too, noted cpu_queue, so that job starts ahead of new claims and other projects."""
+    (the longest-held CPU launch) is queued too, noted cpu_queue, so that job starts ahead of new claims and other projects.
+    `nice` (the UI sweep's UI_SWEEP_NICE) goes to board.spawn only when given; every other session keeps SESSION_NICE."""
     reason, on_board, queued_at, hold = None, False, None, None
+    niced = {} if nice is None else {"nice": nice}
     if action in GATED:
         try:
             job = board.find(board.read_board(root), job_id)
@@ -362,7 +364,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 if ram_short and held_over(queued_at):
                     hold = ram_hold_text()
             else:
-                proc, log = board.spawn(root, job_id, action, prompt, flags)
+                proc, log = board.spawn(root, job_id, action, prompt, flags, **niced)
         with board.locked_board(root) as b:  # the live job, re-read under the lock
             live = next((j for j in b["jobs"] if j["id"] == job_id), {})  # {}: removed meanwhile, nothing to mark
             if proc is None:  # setdefault: a second click keeps the first time and launch
@@ -396,7 +398,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             board.find(board.read_board(root), job_id)
         except (SystemExit, OSError):
             account = off_board or board.pick_account(time.time())[0]
-        proc, log = board.spawn(root, job_id, action, prompt, flags, account=account)
+        proc, log = board.spawn(root, job_id, action, prompt, flags, account=account, **niced)
         if action == "run-all" and not manual:  # a run-all launch (not a board job) is a start too, for pulse_tick
             with PULSE_STARTS_LOCK:
                 PULSE_STARTS.append({"project": project, "job": job_id, "cpu": board.cpu_load_pct()})
@@ -1002,14 +1004,16 @@ CHECK_WAIT = "waiting on the Check queue"  # the same park for a Test/Typecheck/
 
 
 # TODO[4]: per-slot dev DBs (parallel E2E slots) if the E2E queue is still long
-def queue_free(name="e2e.lock"):
-    """True when a slot of this lock is free and no live buildlock.py waits on it."""
+def queue_free(name="e2e.lock", idle=False):
+    """True when a slot of this lock is free (every slot, when `idle`: no holder at all) and no live buildlock.py
+    waits on it."""
     lock = Path.home() / ".claude" / "trevskills-scrum" / name
     try:
-        f = buildlock.take(buildlock.slot_paths(lock))
-        if f is None:
-            return False
-        f.close()
+        for slots in ([[p] for p in buildlock.slot_paths(lock)] if idle else [buildlock.slot_paths(lock)]):
+            f = buildlock.take(slots)
+            if f is None:
+                return False
+            f.close()
         for m in buildlock.waiting_dir(lock).iterdir():
             try:
                 os.kill(int(m.name), 0)
@@ -1261,6 +1265,9 @@ def e2e_full_backlog(repo, root, failed, last_green, head, timeouts_only=False):
         board.cmd_backlog_add(root, [text])
 
 
+UI_SWEEP_NICE = 19  # ui_sweep_tick's session runs below every job session (board.SESSION_NICE 10), job 1244
+
+
 # --- ui_sweep_tick: a later visual re-check of the screens merged on main (lanes/uisweep.md), on e2e_full_due's
 # schedule. One sweep in flight across projects: a `running` scrum/ui-sweep.json younger than E2E_FULL_STALE.
 def ui_sweep_record(root):
@@ -1278,11 +1285,13 @@ def write_ui_sweep(root, rec):
 
 
 def ui_sweep_tick(project, repo, root) -> None:
-    """Start one headless sweep session (spawn id ui-sweep) on repo's main checkout when project.md has UI globs and a
-    Dev command, no sweep runs anywhere, no full E2E run is in flight (E2E_FULL; its next dev holds the dev lock), the
-    E2E lock is free (an orphaned full run holds it), the tracked tree is clean, board.machine_ok(claim=True) passes
-    and e2e_full_due holds. It sweeps since the last record's head (its since after a running or error record, so a dead sweep's range is
-    kept; HEAD~5 or the root commit with no record). No changed screen records a pass and starts nothing."""
+    """Start one headless sweep session (spawn id ui-sweep, at UI_SWEEP_NICE) on repo's main checkout when project.md
+    has UI globs and a Dev command, no sweep runs anywhere, no full E2E run is in flight (E2E_FULL; its next dev holds
+    the dev lock), the E2E lock is free (an orphaned full run holds it), the tracked tree is clean,
+    board.machine_ok(claim=True) passes, check.lock and build.lock have no holder or waiter (a job's Check or Build
+    goes first; a last record E2E_FULL_EVERY old, or none, starts anyway, job 1244) and e2e_full_due holds. It sweeps
+    since the last record's head (its since after a running or error record, so a dead sweep's range is kept; HEAD~5
+    or the root commit with no record). No changed screen records a pass and starts nothing."""
     if E2E_FULL["running"] or not board.ui_globs(root) or e2e_command(root, "Dev command").lower() in ("", "none"):
         return
     now = time.time()
@@ -1294,6 +1303,9 @@ def ui_sweep_tick(project, repo, root) -> None:
             or board.machine_ok(root, claim=True):
         return
     record = ui_sweep_record(root)
+    if now - ((record or {}).get("at") or 0) < E2E_FULL_EVERY and not (
+            queue_free("check.lock", idle=True) and queue_free("build.lock", idle=True)):
+        return
     head = board._git(repo, "rev-parse", "HEAD").decode().strip()
     if not e2e_full_due(record, head, merges_since(repo, record), now):
         return
@@ -1313,7 +1325,7 @@ def ui_sweep_tick(project, repo, root) -> None:
     write_ui_sweep(root, {"at": now, "head": head, "since": since, "result": "running", "dir": str(d)})
     spawn(project, root, "ui-sweep", "ui-sweep",
           f"Read $HOME/.claude/skills/trevskills-scrum/lanes/uisweep.md and follow it.\n"
-          f"SWEEP_DIR={d}\nPROJECT={root}/project.md\nREPO={repo}")
+          f"SWEEP_DIR={d}\nPROJECT={root}/project.md\nREPO={repo}", nice=UI_SWEEP_NICE)
 
 
 E2E_FULL_BLOCKER = "E2E full run"  # restart_blockers' entry for a project whose full run is in flight

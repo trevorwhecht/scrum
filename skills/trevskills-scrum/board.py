@@ -8266,14 +8266,14 @@ def spawn_settings(config_dir: Path, repo: Path) -> str:
 
 
 def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags=("--permission-mode", "acceptEdits"),
-          model: str | None = None, account: str | None = None) -> tuple[subprocess.Popen, str]:
+          model: str | None = None, account: str | None = None, nice: int = SESSION_NICE) -> tuple[subprocess.Popen, str]:
     """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/, and set the job's runlog and account.
     start/resume get `--model <Orchestrator model>` (or `<Big ticket model>`, see orchestrator_model) unless `model` is given.
     `account` None: pick_account, preferring the job's recorded account; with none free, the one whose limit ends soonest
     (the recorded account on a tie), else the first (Trevor's Play and Resume are never refused on usage). Any account but the first runs with
-    CLAUDE_CONFIG_DIR=<its dir>; the first runs with CLAUDE_CONFIG_DIR removed. `flags` without their own get
-    --strict-mcp-config and --settings spawn_settings(...); a job whose job_lane is not lilguy runs with
-    CLAUDE_CODE_DISABLE_CLAUDE_MDS=1. Returns (proc, log path relative to root)."""
+    CLAUDE_CONFIG_DIR=<its dir>; the first runs with CLAUDE_CONFIG_DIR removed. The session runs at `nice` (SESSION_NICE;
+    the UI sweep passes 19). `flags` without their own get --strict-mcp-config and --settings spawn_settings(...); a job
+    whose job_lane is not lilguy runs with CLAUDE_CODE_DISABLE_CLAUDE_MDS=1. Returns (proc, log path relative to root)."""
     root = Path(root)  # a chat hand-off passes a str
     if not SPAWN_ID_RE.fullmatch(job_id):
         raise SystemExit(f"bad spawn id {job_id!r}")
@@ -8320,7 +8320,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         log.unlink(missing_ok=True)
         raise
     try:  # job 958: below Trevor's apps (its tools inherit it); not taskpolicy -b, which pins to the efficiency cores
-        os.setpriority(os.PRIO_PROCESS, proc.pid, SESSION_NICE)
+        os.setpriority(os.PRIO_PROCESS, proc.pid, nice)
     except (OSError, TypeError):  # already exited, or a test's mock pid
         pass
     proc.account = acc.name  # the account the session really runs on; serve.spawn records it in RUNS
