@@ -2796,7 +2796,23 @@ def _waited(prev, end, starts, mtimes, human=()):
     return total
 
 
-def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
+def _deps_done_at(job, by_id):
+    """The latest board updatedAt (epoch secs) of job's depends_on blockers when every one is in by_id ({id: board
+    job}) at stage done with an updatedAt _epoch reads; None otherwise (no depends_on, no by_id, a blocker missing, not
+    done or undated)."""
+    deps = job.get("depends_on")
+    if by_id is None or not isinstance(deps, list) or not deps:
+        return None
+    ends = []
+    for d in deps:
+        b = by_id.get(d) if isinstance(d, str) else None
+        if not isinstance(b, dict) or b.get("stage") != "done" or (at := _epoch(b.get("updatedAt"))) is None:
+            return None
+        ends.append(at)
+    return max(ends)
+
+
+def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=None):
     """(row cells, wall secs, rounds, no-change rounds, E2E lock waits, stall secs to resume) for one claimed job. The no-change cell is the count and the later round of each
     equal pair, e.g. `2 (rounds 2,3)`. Created is feature.md's
     mtime (else spec.md's), Spec starts at claimed-at.txt (cmd_ready) when sane, the wait before it counting as Queue; done is the board updatedAt; each round's time runs from the previous round's last file
@@ -2807,7 +2823,10 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
     then ` (held: <tokens>)` from stall-holds.txt (serve.py note_stall_hold: what auto_resume passed it over for).
     Each `queued` epoch (a questions.log queue-wait line) runs to the job's next run log, else the round's end, is
     subtracted like `waits` and adds one to E2E lock waits. An autoPlayed job's Round times start `paused `, and a job
-    whose board entry lists depends_on gets `depends_on:<id>` as its Queue gate when queue-gates.txt gives none."""
+    whose board entry lists depends_on gets `depends_on:<id>` as its Queue gate when queue-gates.txt gives none.
+    by_id (write_timing's {id: board job}): when every depends_on blocker is on it at stage done (_deps_done_at), the
+    Queue cell is `<total> (<after> after depends_on)`, <after> being the part of each Queue piece (feature.md to the
+    claim, each dep-waits.txt span, spec.md to round 1's start) after the latest blocker's updatedAt."""
     folder = Path(root) / "jobs" / job_id
     created = _mtime(folder / "feature.md") or _mtime(folder / "spec.md")
     done, spec_at = _epoch(job.get("updatedAt")), _mtime(folder / "spec.md")
@@ -2824,6 +2843,7 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
             claim = None
         first = None if start or not spec_at else claim if claim and claim > spec_at else next((r for r in runs if r > spec_at), None)
         start, queue = (first, first - spec_at) if first else (spec_at, 0 if spec_at else None)
+    pieces = [(spec_at, spec_at + queue)] if queue else []  # each (from, to) the Queue adds up, for `after depends_on`
     times, hwaits, heads, prev = [], [], [], start or created
     mtimes = sorted(t for q in folder.rglob("*") if (t := _mtime(q))) if waits else []
     runs = _run_starts(root, job_id)
@@ -2851,6 +2871,7 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
     spec_from = created
     if claim and spec_at and created and created <= claim <= spec_at:
         spec, queue, spec_from = spec_at - claim, queue + claim - created, claim
+        pieces.append((created, claim))
     try:  # cmd_wait_on: a parentless job's dependency wait counts as Queue, not Spec
         dep = [float(l.split()[0]) for l in (folder / "dep-waits.txt").read_text(encoding="utf-8").splitlines()
                if re.fullmatch(r"\d+(\.\d+)? \S+", l.strip())]
@@ -2863,6 +2884,7 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
             a = max(a, upto)
             if b > a:
                 total, upto = total + b - a, b
+                pieces.append((a, b))
         total = min(total, spec)
         spec, queue = spec - total, queue + total
     try:  # serve.py note_queue_gate: the launch gates that queued it
@@ -2877,7 +2899,11 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
         stall_cell.append("?" if at is None else "open" if nxt is None else _mins(nxt - at))
         resume += nxt - at if nxt else 0
     paused = "paused " if job.get("autoPlayed") and times else ""  # sat paused until serve.py auto_play played it
-    cells = [job_id, _mins(wall), _mins(spec), _mins(queue), gates, str(len(rounds)), paused + ", ".join(times) or "-",
+    queue_cell = _mins(queue)
+    if queue is not None and (blocked := _deps_done_at(job, by_id)) is not None:  # the part after the planned wait
+        after = min(sum(max(b - max(a, blocked), 0) for a, b in pieces), queue)
+        queue_cell += f" ({_mins(after)} after depends_on)"
+    cells = [job_id, _mins(wall), _mins(spec), queue_cell, gates, str(len(rounds)), paused + ", ".join(times) or "-",
              ", ".join(hwaits) or "-", f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0"]
     try:  # serve.py note_stall_hold: what held its stalls
         held = (folder / "stall-holds.txt").read_text(encoding="utf-8", errors="replace").split()

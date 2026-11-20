@@ -5671,6 +5671,62 @@ class BoardTest(unittest.TestCase):
             claimed.write_text(bad)
             self.assertEqual(board._timing_row(self.root, "j", {}, {})[0][2:4], ["3h10m", "0m"], bad)
 
+    def claim_clock_job(self, t0):
+        """test_timing_row_claim_clock's last fixture for job j: feature.md at t0, claimed-at.txt t0+3h, spec.md at
+        t0+3h10m and a start log at t0+3h15m, so Queue is 3h05m (3h claim wait plus 5m to the start)."""
+        for rel, at in (("feature.md", t0), ("spec.md", t0 + 3 * 3600 + 600)):
+            os.utime(self.write(f"j/{rel}", "x\n"), (at, at))
+        (self.root / "jobs/j/claimed-at.txt").write_text(f"{t0 + 3 * 3600}\n")
+        (self.root / "runs").mkdir(exist_ok=True)
+        start = datetime.fromtimestamp(t0 + 3 * 3600 + 900, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        (self.root / "runs" / f"{start}-start-j.log").write_text("")
+
+    def test_timing_row_queue_after_depends_on(self):
+        """Job 1268: a depends_on job whose blockers are all done splits out the Queue after the latest blocker's
+        updatedAt, so the reader counts only that part (1470's 28h03m was mostly a planned wait on 1457)."""
+        t0 = 1_700_000_000
+        self.claim_clock_job(t0)
+        done = lambda job_id, at: {"id": job_id, "stage": "done",
+                                   "updatedAt": datetime.fromtimestamp(t0 + at, timezone.utc).isoformat()}
+        queue = lambda job_id, job, by_id: board._timing_row(self.root, job_id, job, {}, by_id=by_id)[0][3]
+        self.assertEqual(queue("j", {"depends_on": ["1-a"]}, {"1-a": done("1-a", 9000)}),
+                         "3h05m (35m after depends_on)")  # 30m of the claim wait after t0+2h30m, plus 5m to the start
+        self.assertEqual(queue("j", {"depends_on": ["1-a", "2-b"]}, {"1-a": done("1-a", 3600), "2-b": done("2-b", 9000)}),
+                         "3h05m (35m after depends_on)")  # the latest blocker counts
+        for rel, at in (("feature.md", 0), ("spec.md", 4 * 3600)):  # a dep-waits.txt wait (cmd_wait_on), no claim
+            os.utime(self.write(f"k/{rel}", "x\n"), (t0 + at, t0 + at))
+        (self.root / "jobs/k/dep-waits.txt").write_text(f"{t0 + 3600} 1-a\n")
+        self.assertEqual(queue("k", {"depends_on": ["1-a"]}, {"1-a": done("1-a", 3 * 3600 + 1800)}),
+                         "3h00m (30m after depends_on)")
+
+    def test_timing_row_queue_depends_on_edges(self):
+        """Job 1268: the Queue cell stays the plain total unless every blocker is on the board, done, with a readable
+        updatedAt; the split part runs from 0m to the whole Queue."""
+        t0 = 1_700_000_000
+        self.claim_clock_job(t0)
+        at = lambda secs: datetime.fromtimestamp(t0 + secs, timezone.utc).isoformat()
+        blocker = lambda **x: {"1-a": {"id": "1-a", "stage": "done", "updatedAt": at(9000), **x}}
+        dep = {"depends_on": ["1-a"]}
+        row = lambda job, by_id, job_id="j": board._timing_row(self.root, job_id, job, {}, by_id=by_id)[0]
+        self.assertEqual(row({}, blocker())[3], "3h05m")  # no depends_on
+        self.assertEqual(row({"depends_on": []}, blocker())[3], "3h05m")
+        self.assertEqual(row(dep, None)[3], "3h05m")  # no board map
+        self.assertEqual(board._timing_row(self.root, "j", dep, {})[0][3], "3h05m")  # by_id left out
+        self.assertEqual(row(dep, {})[3], "3h05m")  # blocker not on the board
+        self.assertEqual(row({"depends_on": ["1-a", "2-b"]}, blocker())[3], "3h05m")  # one of two missing
+        for stage in (s for s in board.STAGES if s != "done"):
+            self.assertEqual(row(dep, blocker(stage=stage))[3], "3h05m", stage)
+        for bad in (None, "", "soon", 5):
+            self.assertEqual(row(dep, blocker(updatedAt=bad))[3], "3h05m", bad)
+        self.assertEqual(row(dep, {"1-a": {"id": "1-a", "stage": "done"}})[3], "3h05m")  # no updatedAt
+        self.assertEqual(row(dep, blocker(updatedAt=at(4 * 3600)))[3], "3h05m (0m after depends_on)")  # after the Queue
+        self.assertEqual(row(dep, blocker(updatedAt=at(-600)))[3], "3h05m (3h05m after depends_on)")  # before feature.md
+        self.assertEqual(row(dep, blocker(), "none")[3], "-")  # no spec.md: no Queue
+        cells = row(dep, blocker())
+        self.assertEqual((cells[4], len(cells)), ("depends_on:1-a", 11))  # one cell more would break the table header
+        self.write("j/queue-gates.txt", "ram_room\n")
+        self.assertEqual(row(dep, blocker())[3:5], ["3h05m (35m after depends_on)", "ram_room"])
+
     def test_bad_window_thresholds(self):
         self.assertEqual((board.BAD_WASTED_PCT, board.BAD_FIRST_PASS, board.BAD_MIN_JOBS, board.EARLY_DIGEST_MIN),
                          (20, 0.5, 3, 3))
