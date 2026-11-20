@@ -5312,14 +5312,20 @@ def holder_files(jobs_dir, job):
     return {p for p in re.findall(r"`([^`\s]+)`", text) if PATH_RE.match(p) and repo_path(p)} | set(diff[1] if diff else ())
 
 
+def strip_line_ref(token):
+    """token without one trailing `:<line>`, `:<line>-<line>` or `:<line>:<col>` (`a.py:12-40` -> `a.py`)."""
+    return re.sub(r":\d+(?:-\d+|:\d+)?$", "", token)
+
+
 def prose_paths(text):
     """Every backticked token, and every bare token with a /, in text that matches PATH_RE."""
     def unparen(t):  # an unmatched leading ( or trailing ) is prose punctuation; a balanced pair is a Next.js route folder
         if t.count("(") != t.count(")"):
             t = t[1:] if t.startswith("(") else t[:-1] if t.endswith(")") else t
         return t
-    bare = (unparen(t.rstrip(".,;:")) for t in re.sub(r"`[^`]*`", " ", text).split())
-    return {p for p in re.findall(r"`([^`\s]+)`", text) if PATH_RE.match(p) and repo_path(p)} | \
+    bare = (unparen(strip_line_ref(t.rstrip(".,;:"))) for t in re.sub(r"`[^`]*`", " ", text).split())
+    ticked = (strip_line_ref(p) for p in re.findall(r"`([^`\s]+)`", text))
+    return {p for p in ticked if PATH_RE.match(p) and repo_path(p)} | \
            {t for t in bare if PATH_RE.match(t) and repo_path(t) and "/" in t}
 
 
@@ -5333,7 +5339,7 @@ def git_tracked(repo):
 
 def bare_name_paths(text, tracked):
     """Tracked full paths for the slash-less file names in text (`useX.ts`) that exactly one tracked entry (git_tracked) carries by base name."""
-    names = {t.lstrip("`").rstrip(".,;:`") for t in text.split()}
+    names = {strip_line_ref(t.lstrip("`").rstrip(".,;:`")) for t in text.split()}
     names = {n for n in names if "/" not in n and PATH_RE.match(n) and repo_path(n)}
     return {m[0] for n in names if len(m := [t for t in tracked if t.rsplit("/", 1)[-1] == n]) == 1}
 
