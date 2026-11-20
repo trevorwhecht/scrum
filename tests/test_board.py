@@ -5242,6 +5242,27 @@ class BoardTest(unittest.TestCase):
         text = self.pulse_ticks((0, 0, {}), (600, 1, {}))  # 10 minutes to a busy line
         self.assertIn("Idle with claimable work: 2 min (longest stretch 2 min)\n", text)
 
+    def test_pulse_lists_idle_stretches_over_30_min(self):
+        """Job 1268: each idle stretch over PULSE_STRETCH_MIN rounded minutes is listed with its times, oldest first,
+        right after the Idle line, so a digest can tell whose window the idle time fell in; none over it: no line."""
+        self.assertEqual(board.PULSE_STRETCH_MIN, 30)
+        idle = lambda ks: [(60 * k, 0, {}) for k in ks]
+        text = self.pulse_ticks(*idle(range(41)), (2460, 1, {}), *idle(range(42, 53)))  # 41 min, a session, 11 min
+        self.assertIn("Idle with claimable work: 52 min (longest stretch 41 min)\n"
+                      "Idle stretches over 30 min: 2023-11-14T22:13+00:00 to 2023-11-14T22:54+00:00 (41 min)\n"
+                      "Gated with claimable work: 0 min\n", text)
+        self.tearDown(); self.setUp()
+        # 33 min (its last line counts a capped 120 s, not the 600 s gap to the session), then a longer 35 min
+        text = self.pulse_ticks(*idle(range(32)), (2460, 1, {}), *idle(range(42, 77)))
+        self.assertIn("Idle with claimable work: 68 min (longest stretch 35 min)\n"
+                      "Idle stretches over 30 min: 2023-11-14T22:13+00:00 to 2023-11-14T22:46+00:00 (33 min); "
+                      "2023-11-14T22:55+00:00 to 2023-11-14T23:30+00:00 (35 min)\n"
+                      "Gated with claimable work: 0 min\n", text)
+        self.tearDown(); self.setUp()
+        text = self.pulse_ticks(*idle(range(30)), (1800, 1, {}))  # exactly 30 min
+        self.assertIn("Idle with claimable work: 30 min (longest stretch 30 min)\nGated with claimable work:", text)
+        self.assertNotIn("Idle stretches", text)
+
     def test_pulse_hot_tick_held_by_guard(self):
         text = self.pulse_ticks(
             (0, 0, {"cpu_load": 300, "swap": 25}),  # at the limits: idle

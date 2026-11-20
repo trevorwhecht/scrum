@@ -1713,6 +1713,7 @@ def _board_job(cache, name, n):
 
 
 PULSE_TICK_CAP_S = 120  # write_pulse: a pulse.log line counts as at most this many seconds (a gap means no ticks)
+PULSE_STRETCH_MIN = 30  # write_pulse: an idle stretch over this many rounded minutes is listed with its times
 PULSE_LAST_S = 60  # write_pulse: the last line counts one tick
 
 
@@ -1723,7 +1724,9 @@ def write_pulse(root, digest_id):
     tick, however many lines a minute holds; totals are rounded whole minutes. Only projects with Auto continue on
     (`auto` True; a line without it is off) count toward idle. Idle with claimable work (no session, no cool-down,
     some auto-on project with claimable or waiting work, and the line's cpu_load and swap within MAX_CPU_LOAD_PCT /
-    MAX_SWAP_PCT), held by machine guard (would be idle but over either limit; ends an idle stretch), gated (would be
+    MAX_SWAP_PCT; then, only when one qualifies, `Idle stretches over PULSE_STRETCH_MIN min:` each stretch whose
+    rounded minutes pass it, oldest first, joined by `; `: its first idle line's t to its last idle line's t plus that
+    line's seconds), held by machine guard (would be idle but over either limit; ends an idle stretch), gated (would be
     idle, within both limits, but the line's top-level `gates` (serve.py pulse_tick) is non-empty, or no auto-on
     project has claimable work and every auto-on project with waiting work has non-empty `gates`; ends an idle
     stretch; minutes per token, overlap:<id> counted as overlap; a missing or null `gates` is ungated), idle held by
@@ -1759,7 +1762,7 @@ def write_pulse(root, digest_id):
         over = lambda l, key, cap: is_num(l.get(key)) and l[key] > cap
         gates = lambda v: [g for g in v if isinstance(g, str)] if isinstance(v, list) else []
         idle = cooled = paused = guard = streak = longest = nonfocus = gated = guarded = 0
-        by_gate = {}
+        by_gate, stretches = {}, []  # stretches: [first idle t, last idle t + its secs, streak secs] per idle stretch
         for l, nxt in zip(lines, lines[1:] + [None]):
             dt = min(nxt["t"] - l["t"], PULSE_TICK_CAP_S) if nxt else PULSE_LAST_S
             ps = projs(l)
@@ -1780,8 +1783,11 @@ def write_pulse(root, digest_id):
                 elif isinstance(l.get("guard"), str) and l["guard"]:
                     guarded, streak = guarded + dt, 0
                 else:
+                    if not streak:  # this line starts a stretch
+                        stretches.append([l["t"], 0, 0])
                     idle, streak = idle + dt, streak + dt
                     longest = max(longest, streak)
+                    stretches[-1][1:] = [l["t"] + dt, streak]
             else:
                 streak = 0
                 if l.get("sessions") == 0 and any(work(p) for p in ps.values()):
@@ -1794,6 +1800,7 @@ def write_pulse(root, digest_id):
                 nonfocus += dt
         idle, cooled, paused, guard, longest, nonfocus, gated, guarded = (
             round(x / 60) for x in (idle, cooled, paused, guard, longest, nonfocus, gated, guarded))
+        long_idle = [(a, b, m) for a, b, secs in stretches if (m := round(secs / 60)) > PULSE_STRETCH_MIN]
         num = lambda j: str(int(m[1])) if (m := re.match(r"(\d+)-", j)) else j
         hot, started = {}, set()
         for l in lines:
@@ -1844,6 +1851,8 @@ def write_pulse(root, digest_id):
         focus = next((l["focus"] for l in reversed(lines) if isinstance(l.get("focus"), str)), "none")
         out += [f"Window: {iso(lines[0]['t'])} to {iso(lines[-1]['t'])} · ticks: {len(lines)}",
                 f"Idle with claimable work: {idle} min (longest stretch {longest} min)",
+                *([f"Idle stretches over {PULSE_STRETCH_MIN} min: " + "; ".join(
+                    f"{iso(a)} to {iso(b)} ({m} min)" for a, b, m in long_idle)] if long_idle else []),
                 f"Gated with claimable work: {gated} min"
                 + (" (" + ", ".join(f"{g} {round(v / 60)}" for g, v in by_gate.items()) + ")" if gated else ""),
                 f"Held by machine guard: {guard} min",
