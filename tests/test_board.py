@@ -7440,7 +7440,12 @@ print("stub err", file=sys.stderr)
         out = self.cli("run-all", "run-all", "/trevskills-scrum run-all")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertRegex(json.loads(out.stdout)["log"], r"^runs/\d{8}-\d{6}-run-all-run-all\.log$")
-        self.assertEqual(self.records()[0]["argv"], ["-p", "/trevskills-scrum run-all", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX])
+        self.assertEqual(self.records()[0]["argv"], ["-p", "/trevskills-scrum run-all", "--model", "sonnet", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX])
+
+    def test_spawn_cloud_home_gets_orchestrator_model(self):
+        out = self.cli("999-x", "cloud-home", "/trevskills-scrum cloud-home 999-x")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.records()[0]["argv"][2:4], ["--model", "sonnet"])
 
     def test_spawn_rejects_bad_id_or_action(self):
         for job_id, action in (("a/b", "start"), ("a b", "start"), ("..", "start"), ("../x", "start"), ("-x", "start"),
@@ -9796,7 +9801,7 @@ class LilguyFitTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / "scrum"
-        env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(Path(self.tmp.name) / "no-usage.json")})
+        env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(Path(self.tmp.name) / "no-usage.json"), "SCRUM_SPAWN": "1"})
         env.start()
         self.addCleanup(env.stop)
         self.job = board.cmd_new(self.root, "Tweak a label")
@@ -9821,6 +9826,20 @@ class LilguyFitTest(unittest.TestCase):
         out = self.fit()
         self.assertEqual(out, {"fit": False, "why": "feature.md Lane: standard"})
         self.assertEqual({k: json.loads((self.jd / "lilguy-fit.json").read_text())[k] for k in out}, out)
+
+    def test_lilguy_fit_hand_started_outside_spawn_hands_off(self):
+        self.points(1)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("SCRUM_SPAWN")
+            out = self.fit()
+            self.assertEqual(out["hand off"], f"B spawn {self.job} start")
+            self.assertEqual(board.find(board.read_board(self.root), self.job).get("lane"), "lilguy")
+            job_file = self.root / "board.json"
+            data = json.loads(job_file.read_text())
+            data["jobs"][0]["started_by"] = "runall"
+            job_file.write_text(json.dumps(data))
+            self.assertNotIn("hand off", self.fit())
+        self.assertNotIn("hand off", self.fit())  # inside a spawn session
 
     def test_lilguy_fit_no_folder_writes_nothing(self):
         shutil.rmtree(self.jd)

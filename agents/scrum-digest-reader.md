@@ -116,7 +116,7 @@ For `## Recurring blockers`, read every `JOBS_DIR/../questions.log` line inside 
 
 For `## Stops`, read this project's questions.log only and its `scrum/runs/` file names:
 - A stop line is valid JSON whose `kind` is `ask`, `stall`, `machine`, `refused` or `bigboy`. A line with `question` and no `kind` (written before kinds existed) counts as an `ask`.
-- Unblock lines (kind `round-limit`, `check-fail`, `ci-fail`, `conflict`, `blocked` or `render`), pick lines and malformed lines are not stops.
+- Unblock lines (kind `round-limit`, `check-fail`, `ci-fail`, `conflict`, `blocked` or `render`), pick lines, malformed lines and every `Terminal batch: project .claude edits` ask and its pick are not stops: serve.py answers that ask itself.
 - Group stops by cause: the leading phrase of `reason`, or of `question` when `reason` is missing. Causes include "Hard stop: agent rules", "stalled in build", "Uncommitted change", "main checkout is on", "swap used", "cannot resume yet" (logged as `can't resume yet`), "spec writer too big", "bigboy review GAPS" and "blocked on sibling".
 - One table row per cause, sorted by count, highest first. Count is the number of stop lines. Jobs holds up to 3 example job ids, separated by `, `.
 - Picks holds `<label> <n>` entries separated by `, `. A stop's pick is the next pick line for the same job after it, as in `## Repeated questions`. With no pick line, the pick is `resume` only when a `resume` run log for that job has a name timestamp later than that stop's `date` (both UTC), else `unanswered`.
