@@ -171,6 +171,10 @@ PROFILE_COPY = ('d="$HOME/scrum-work/{p}"; [ -d "$d/.git" ] || exit 3; mkdir -p 
 AUTH_COPY = ("umask 077 && mkdir -p ~/scrum-work/{p}/{d} && cat > ~/scrum-work/{p}/{f}.tmp"
              " && mv -f ~/scrum-work/{p}/{f}.tmp ~/scrum-work/{p}/{f}")  # {d}, {f}: shlex-quoted repo-relative paths
 RENDER_AUTH_RE = re.compile(r"^\s*-\s*Render auth:(.*)$", re.M)
+CONVENTIONS_RE = re.compile(r"^\s*-\s*Conventions to read:(.*)$", re.M)
+CONVENTIONS_DIRS = ("Developer/", ".claude/rules/")  # home-relative; never ~/.claude/CLAUDE.md, which md-sync owns
+# {d}, {f}: shlex-quoted home-relative paths. mv -f replaces a shop symlink at {f} instead of writing through it.
+CONVENTIONS_COPY = "umask 077 && mkdir -p ~/{d} && cat > ~/{f}.tmp && mv -f ~/{f}.tmp ~/{f}"
 REPO_URL_RE = re.compile(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*")  # fullmatch; .git or not
 JOB_RE = re.compile(r"[0-9]{3,}-[a-z0-9-]+")  # board.ID_RE's shape; fullmatch, so a trailing newline fails
 # Claude Code ignores a project's .claude/settings.json permissions until the folder is trusted; set the flag in each
@@ -495,15 +499,38 @@ def _render_auth(text: str) -> str | None:
     return rel
 
 
+def _conventions(text: str, repo: str) -> list[str]:
+    """project.md's first `- Conventions to read:` line as home-relative paths, each once, in line order: the paths
+    under this Mac's home and outside `repo` (as given and as realpath) whose home-relative path starts with a
+    CONVENTIONS_DIRS entry, ends in .md and stays on [A-Za-z0-9._/-]. A relative, `~/` or quoted token never matches."""
+    m = CONVENTIONS_RE.search(text)
+    if not m:
+        return []
+    home, out = str(Path.home()) + "/", []
+    repos = {posixpath.normpath(repo), os.path.realpath(repo)}
+    for token in re.split(r"[,\s]+", m.group(1)):
+        path = posixpath.normpath(token)
+        if not path.startswith(home) or any(p == r or p.startswith(r + "/") for p in (path, os.path.realpath(path))
+                                            for r in repos):
+            continue
+        rel = path[len(home):]
+        if rel.startswith(CONVENTIONS_DIRS) and rel.endswith(".md") and re.fullmatch(r"[A-Za-z0-9._/-]+", rel) \
+                and rel not in out:
+            out.append(rel)
+    return out
+
+
 def profile_copy(project: str, repo: str, alias: str = ALIAS) -> str:
     """Write the shop's ~/scrum-work/<project>/scrum/project.md from this Mac's <repo>/scrum/project.md (stdin only,
     tmp file + mv -f), so a cloud-job session there keeps its E2E, Test sign-in and Render auth lines (cloud.md Setup).
     The repo path (as given and its realpath) becomes the shop clone and any other path under this Mac's home moves
     to the shop's $HOME; every other byte is unchanged. The same call adds setup's `scrum/` and `.claude/worktrees/`
     lines to the clone's .git/info/exclude. Then the file the Render auth line names, when _render_auth() accepts it
-    and it exists here, goes to the same repo-relative path there (mode 600, bytes on stdin only). "copied"; "none"
-    with no ssh when there is no project.md here; "failed" with no ssh for a name off PROJECT_RE, or for a down shop
-    Mac, no clone there or a failed or timed-out copy. Prints nothing."""
+    and it exists here, goes to the same repo-relative path there (mode 600, bytes on stdin only). Then each
+    Conventions file _conventions() keeps and this Mac can read goes to the same home-relative path in the shop's
+    $HOME, one CONVENTIONS_COPY call each (mode 600, bytes on stdin only; every file is read before any ssh).
+    "copied"; "none" with no ssh when there is no project.md here; "failed" with no ssh for a name off PROJECT_RE, or
+    for a down shop Mac, no clone there or a failed or timed-out copy, which runs no later copy. Prints nothing."""
     if not PROJECT_RE.fullmatch(project):
         return "failed"
     try:
@@ -517,6 +544,12 @@ def profile_copy(project: str, repo: str, alias: str = ALIAS) -> str:
         auth = (Path(repo) / rel).read_bytes() if rel else None
     except OSError:
         auth = None
+    conventions = []
+    for name in _conventions(text, repo):
+        try:
+            conventions.append((name, (Path.home() / name).read_bytes()))
+        except OSError:  # missing or unreadable here: not copied
+            pass
     paths = sorted({str(repo), os.path.realpath(repo)}, key=len, reverse=True)
     text = re.sub("(?:" + "|".join(map(re.escape, paths)) + r")(?![A-Za-z0-9._-])",
                   lambda _: f"{HOME_TOKEN}/scrum-work/{project}", text)
@@ -527,6 +560,10 @@ def profile_copy(project: str, repo: str, alias: str = ALIAS) -> str:
     if auth is not None and run(AUTH_COPY.format(p=project, d=shlex.quote(posixpath.dirname(rel)),
                                                  f=shlex.quote(rel)), STEP_TIMEOUT, input=auth, alias=alias).returncode:
         return "failed"
+    for name, data in conventions:
+        if run(CONVENTIONS_COPY.format(d=shlex.quote(posixpath.dirname(name)), f=shlex.quote(name)), STEP_TIMEOUT,
+               input=data, alias=alias).returncode:
+            return "failed"
     return "copied"
 
 

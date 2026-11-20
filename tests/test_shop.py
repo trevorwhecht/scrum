@@ -1109,6 +1109,16 @@ AUTH_CMD = ("umask 077 && mkdir -p ~/scrum-work/onewitharts/playwright/.auth && 
             "~/scrum-work/onewitharts/playwright/.auth/admin.json.tmp && mv -f "
             "~/scrum-work/onewitharts/playwright/.auth/admin.json.tmp ~/scrum-work/onewitharts/playwright/.auth/admin.json")
 GIT_EXCLUDE = b"# git ls-files --others --exclude-from=.git/info/exclude\n# *~\n"
+# This Mac's Conventions files by home-relative path; .claude/rules/performance.md is a link on this Mac.
+CONV = [("Developer/repos/CLAUDE.md", b"# repos conventions 1245\n"),
+        ("Developer/repos/.claude/rules/debugging.md", b"# debugging rule 1245\n"),
+        (".claude/rules/performance.md", b"# performance rule 1245\n")]
+CONV_CMDS = ["umask 077 && mkdir -p ~/Developer/repos && cat > ~/Developer/repos/CLAUDE.md.tmp"
+             " && mv -f ~/Developer/repos/CLAUDE.md.tmp ~/Developer/repos/CLAUDE.md",
+             "umask 077 && mkdir -p ~/Developer/repos/.claude/rules && cat > ~/Developer/repos/.claude/rules/debugging.md.tmp"
+             " && mv -f ~/Developer/repos/.claude/rules/debugging.md.tmp ~/Developer/repos/.claude/rules/debugging.md",
+             "umask 077 && mkdir -p ~/.claude/rules && cat > ~/.claude/rules/performance.md.tmp"
+             " && mv -f ~/.claude/rules/performance.md.tmp ~/.claude/rules/performance.md"]
 
 
 class ProfileCopyTest(SetupCase):
@@ -1147,6 +1157,16 @@ class ProfileCopyTest(SetupCase):
     def write_shop_profile(self, data):
         (self.clone / "scrum").mkdir(exist_ok=True)
         (self.clone / "scrum" / "project.md").write_bytes(data)
+
+    def mac_conventions(self):
+        """Write CONV under this Mac's home; performance.md is a link into a skills clone, as on Trevor's Mac."""
+        target = self.mac / "code" / "trevorhecht-skills" / "rules" / "performance.md"
+        for rel, data in CONV:
+            path = target if rel == ".claude/rules/performance.md" else self.mac / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        (self.mac / ".claude" / "rules").mkdir(parents=True)
+        (self.mac / ".claude" / "rules" / "performance.md").symlink_to(target)
 
     def test_paths_rewritten_to_shop_home(self):
         m, r, l = self.mac, self.real, self.link
@@ -1265,6 +1285,96 @@ class ProfileCopyTest(SetupCase):
                 self.assertEqual(self.shop_profile(), f"- Test: x\n{line}".encode())
         self.assertEqual(sorted(os.listdir(self.clone)), [".git", "scrum"])
 
+    def test_conventions_copied_to_shop_home(self):
+        self.mac_conventions()
+        m = self.mac
+        self.shop(("scrum-work", LOCAL, ""), ("umask 077", LOCAL, ""), *DONE)
+        for sep in (",", ", ", " "):
+            with self.subTest(sep=sep):
+                shop._cache.clear()
+                self.calls.clear()
+                self.argv.clear()
+                for d in ("Developer", ".claude"):
+                    shutil.rmtree(self.sh / d, ignore_errors=True)
+                self.profile(f"- Test: x\n- Conventions to read: {m}/Developer/repos/CLAUDE.md{sep}"
+                             f"{m}/Developer/repos/.claude/rules/debugging.md{sep}{m}/.claude/rules/performance.md{sep}"
+                             f"{m}/Developer/./repos/CLAUDE.md\n")  # the last one is the first again: copied once
+                self.assertEqual(self.copy(), "copied")
+                self.assertEqual([c[0] for c in self.calls[:2]], [shop.PROBE_CMD, self.calls[1][0]])
+                self.assertIn("project.md", self.calls[1][0])
+                self.assertEqual(self.calls[2:], [(CONV_CMDS[0], 60, b"# repos conventions 1245\n"),
+                                                  (CONV_CMDS[1], 60, b"# debugging rule 1245\n"),
+                                                  (CONV_CMDS[2], 60, b"# performance rule 1245\n")])
+                for rel, data in (("Developer/repos/CLAUDE.md", b"# repos conventions 1245\n"),
+                                  ("Developer/repos/.claude/rules/debugging.md", b"# debugging rule 1245\n"),
+                                  (".claude/rules/performance.md", b"# performance rule 1245\n")):
+                    dest = self.sh / rel
+                    self.assertEqual((dest.read_bytes(), stat.S_IMODE(dest.stat().st_mode), dest.is_symlink()),
+                                     (data, 0o600, False), rel)
+                self.assertEqual(sorted(os.listdir(self.sh / "Developer" / "repos")), [".claude", "CLAUDE.md"])
+                self.assertEqual(os.listdir(self.sh / ".claude" / "rules"), ["performance.md"])
+                for argv in self.argv:
+                    for word in ("repos conventions 1245", "debugging rule 1245", "performance rule 1245"):
+                        self.assertNotIn(word, " ".join(argv))
+
+    def test_conventions_skipped(self):
+        m, outside = self.mac, self.sh.parent  # outside: neither this Mac's home nor the shop's
+        real = m / "Developer" / "repos" / "proj"
+        (real / "scrum").mkdir(parents=True)
+        (m / "Developer" / "link-proj").symlink_to(real)
+        (m / "Developer" / "other-link").symlink_to(real)
+        (self.sh / "scrum-work" / "proj" / ".git" / "info").mkdir(parents=True)
+        # A home as long as this Mac's, and Developer/y.md exists here too: only the home rule refuses it.
+        sibling = outside / "mac_home.2" / "Developer" / "y.md"
+        for path in (real / "CLAUDE.md", m / ".claude" / "CLAUDE.md", m / "Developer" / "x.txt", outside / "x.md", sibling,
+                     m / "code" / "x.md", m / ".ssh" / "x.md", m / "Developer" / "a$b.md", m / "Developer" / "y.md"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"# convention 1245\n")  # each exists here, so only the keep rule refuses it
+        self.shop(("scrum-work", LOCAL, ""), ("umask 077", LOCAL, ""), *DONE)
+
+        def copied(line):
+            """(the call count, every shop file but project.md) after one profile_copy through the repo's link."""
+            shop._cache.clear()
+            self.calls.clear()
+            for d in set(os.listdir(self.sh)) - {"scrum-work"}:  # what an earlier subtest wrote never fails this one
+                shutil.rmtree(self.sh / d)
+            (real / "scrum" / "project.md").write_text(f"- Test: x\n{line}")
+            self.assertEqual(self.copy("proj", m / "Developer" / "link-proj"), "copied")
+            return len(self.calls), {k: v for k, v in tree(self.sh).items() if not k.endswith("project.md")}
+        without = copied("")
+        self.assertEqual(without[0], 2)  # the probe and the profile call
+        for name, token in (("in repo, through the link", f"{m}/Developer/link-proj/CLAUDE.md"),
+                            ("in repo, real path", f"{real}/CLAUDE.md"),
+                            ("in repo, through another link", f"{m}/Developer/other-link/CLAUDE.md"),
+                            ("home CLAUDE.md", f"{m}/.claude/CLAUDE.md"), ("not .md", f"{m}/Developer/x.txt"),
+                            ("outside home", f"{outside}/x.md"), ("a sibling home", str(sibling)),
+                            ("off the two folders", f"{m}/code/x.md"),
+                            ("dot-dot out of Developer", f"{m}/Developer/../.ssh/x.md"),
+                            ("odd character", f"{m}/Developer/a$b.md"), ("relative", "~/Developer/y.md"),
+                            ("missing", f"{m}/Developer/missing.md")):
+            with self.subTest(name):
+                self.assertEqual(copied(f"- Conventions to read: {token}\n"), without)
+        self.assertFalse((self.sh / "Developer").exists() or (self.sh / ".claude").exists() or (self.sh / ".ssh").exists())
+
+    def test_conventions_replace_shop_symlink(self):
+        self.mac_conventions()
+        self.profile(f"- Conventions to read: {self.mac}/Developer/repos/CLAUDE.md\n")
+        old = self.sh / "Developer" / "repos" / "trevorhecht-skills" / "CLAUDE.md"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b"# the shop's own file\n")
+        dest = self.sh / "Developer" / "repos" / "CLAUDE.md"
+        dest.symlink_to(old)
+        self.shop(("scrum-work", LOCAL, ""), ("umask 077", LOCAL, ""), *DONE)
+        for n in (1, 2):
+            with self.subTest(copy=n):
+                self.assertEqual(self.copy(), "copied")
+                self.assertFalse(dest.is_symlink())
+                self.assertEqual((dest.read_bytes(), stat.S_IMODE(dest.stat().st_mode)),
+                                 (b"# repos conventions 1245\n", 0o600))
+                self.assertEqual(old.read_bytes(), b"# the shop's own file\n")
+                self.assertEqual(sorted(os.listdir(dest.parent)), ["CLAUDE.md", "trevorhecht-skills"])
+                self.assertEqual(len(self.cmds("CLAUDE.md.tmp")), n)
+
     def test_missing_profile_none(self):
         self.shop(*DONE)
         self.assertEqual(self.copy(), "none")
@@ -1285,16 +1395,21 @@ class ProfileCopyTest(SetupCase):
         self.assertEqual([c[0] for c in self.calls], [shop.PROBE_CMD])
 
     def test_remote_failure_failed(self):
-        self.profile("- Render auth: ../../../a.json\n")
+        self.mac_conventions()
+        self.profile("- Render auth: ../../../a.json\n"
+                     f"- Conventions to read: {self.mac}/Developer/repos/CLAUDE.md {self.mac}/.claude/rules/performance.md\n")
         (self.real / "a.json").write_bytes(AUTH)
-        for fail, ran in (("project.md", 1), ("a.json", 2)):
+        for fail, ran, auth in (("project.md", 1, False), ("a.json", 2, False), ("Developer/repos/CLAUDE.md", 3, True)):
             for rc in (1, 255, subprocess.TimeoutExpired(["ssh"], 60)):
                 with self.subTest(fail=fail, rc=rc):
                     shop._cache.clear()
-                    self.shop((fail, rc, ""), ("scrum-work", LOCAL, ""), *DONE)
+                    self.shop((fail, rc, ""), ("scrum-work", LOCAL, ""), ("umask 077", LOCAL, ""), *DONE)
                     self.assertEqual(self.copy(), "failed")
                     self.assertEqual(len(self.calls), 1 + ran)
-        self.assertFalse((self.clone / "a.json").exists())
+                    self.assertEqual(self.cmds("performance.md"), [])  # no later Conventions call
+                    self.assertEqual((self.clone / "a.json").exists(), auth)
+                    (self.clone / "a.json").unlink(missing_ok=True)
+        self.assertEqual(sorted(os.listdir(self.sh)), ["scrum-work"])
 
 
 class SecretTest(SetupCase):
