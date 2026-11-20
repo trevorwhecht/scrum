@@ -21,7 +21,7 @@ class E2eWait(unittest.TestCase):
     def test_other_cases_keep_their_line(self):
         self.assertEqual(status({**BASE, "buildLockWait": True}), "Waiting for the build lock")
         self.assertEqual(status({**BASE, "e2eWait": WAIT, "paused": True}), "Paused by you")
-        self.assertRegex(status(BASE), r"^Checking, \d+ min$")
+        self.assertRegex(status(BASE), r"^Checking, started \d{1,2}:\d{2} [AP]M$")
 
 
 if __name__ == "__main__":

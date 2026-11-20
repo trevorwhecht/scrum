@@ -98,8 +98,9 @@
   board.py e2e-specs <id> | --worktree <dir> --base <ref> --project <file>  print {"mode","command","specs",
                                    "uncovered","trigger"}: the E2E specs the diff's UI files map to (full, scoped or none;
                                    lanes/newjob.md Check gate step 2)
-  board.py render-paths <id>       print {"paths","skipped"}: the app paths the diff's UI runtime files render, at most 8,
-                                   dynamic routes skipped, ["/"] when none maps (lanes/review.md step 2 Shared render)
+  board.py render-paths <id>       print {"paths","skipped"}: the app paths the diff's UI runtime files render plus spec.md
+                                   `Render path:` URLs, at most 8, dynamic routes and placeholder URLs skipped, ["/"]
+                                   when none maps (lanes/review.md step 2 Shared render)
   board.py ui-sweep-record <review.md>  file a UI sweep review's findings and unrendered screens as p4 Trevor backlog
                                    items and close scrum/ui-sweep.json (lanes/uisweep.md)
   board.py check-reuse <id>        print {"reused"}: copy round-(n-1)'s CHECK: PASS into round-n/check.md when HEAD equals
@@ -3574,13 +3575,34 @@ def concrete_routes(route, prefix, pages) -> set[str]:
 
 
 RENDER_CAP = 8  # pages per shared review render (lanes/review.md step 2); the rest fall back to the reviewers
+RENDER_PATH_LINE_RE = re.compile(r"^\s*(?:-\s+)?render path:(.*)$", re.I | re.M)
+RENDER_URL_RE = re.compile(r"`([^`]+)`|(/[^\s,`<]*(?:<[^>]*>[^\s,`<]*)*)")
 
 
-def render_paths(wt, base: str, project_file) -> dict:
+def spec_render_paths(spec_file) -> list:
+    """The app URLs the spec's `Render path:` lines name (case-insensitive, optional leading `- `; backticks or
+    commas between URLs), in order and deduped; [] when spec_file is None or unreadable (job 1247)."""
+    if not spec_file:
+        return []
+    try:
+        text = Path(spec_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    urls = []
+    for line in RENDER_PATH_LINE_RE.findall(text):
+        for quoted, bare in RENDER_URL_RE.findall(line):
+            url = (quoted or bare).strip()
+            if url.startswith("/") and url not in urls:
+                urls.append(url)
+    return urls
+
+
+def render_paths(wt, base: str, project_file, spec_file=None) -> dict:
     """{"paths", "skipped"} for the diff base...HEAD in wt (lanes/review.md step 2 Shared render): the sorted routes the
-    changed UI runtime files render, minus dynamic ([param]) routes and those past RENDER_CAP, which go to skipped.
-    A UI runtime file that maps to no renderable route gives ["/"]; no UI runtime file (or an unreadable diff) gives
-    empty lists."""
+    changed UI runtime files render, minus dynamic ([param]) routes, then each spec_file `Render path:` URL not
+    already listed (a URL holding `<`, `>` or `[` goes to skipped as needing a real id); entries past RENDER_CAP go
+    to skipped. A UI runtime file that maps to no renderable route and no spec URL gives ["/"]; no UI runtime file
+    (or an unreadable diff) gives empty lists."""
     if base.startswith("-"):
         raise SystemExit(f"base {base!r} starts with '-'")
     try:
@@ -3596,16 +3618,22 @@ def render_paths(wt, base: str, project_file) -> dict:
     routes = sorted({c for pairs in changed_routes(wt, ui).values() for r in pairs for c in concrete_routes(*r, pages)})
     skipped = [f"{r}: dynamic route" for r in routes if "[" in r]
     static = [r for r in routes if "[" not in r]
+    for url in spec_render_paths(spec_file):
+        if any(c in url for c in "<>["):
+            skipped.append(f"{url}: needs a real id")
+        elif url not in static:
+            static.append(url)
     skipped += [f"{r}: over the {RENDER_CAP}-page cap" for r in static[RENDER_CAP:]]
     return {"paths": static[:RENDER_CAP] or ["/"], "skipped": skipped}
 
 
 def cmd_render_paths(root, job_id) -> dict:
-    """render_paths for the job's worktree and base with root/project.md."""
+    """render_paths for the job's worktree and base with root/project.md and the job's spec.md."""
     job = find(read_board(root), check_id(job_id))
     if not job.get("worktree") or not job.get("base"):
         raise SystemExit(f"job {job_id} has no {'worktree' if not job.get('worktree') else 'base'} on the board")
-    return render_paths(job["worktree"], job["base"], Path(root) / "project.md")
+    return render_paths(job["worktree"], job["base"], Path(root) / "project.md",
+                        Path(root) / "jobs" / job["id"] / "spec.md")
 
 
 # --- ui-sweep: serve.py ui_sweep_tick's later visual re-check of the screens merged on main (lanes/uisweep.md).

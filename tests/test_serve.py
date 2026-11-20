@@ -1,4 +1,4 @@
-import contextlib, errno, fcntl, hashlib, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
+import contextlib, errno, fcntl, hashlib, inspect, io, json, os, re, shutil, signal, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
@@ -12385,9 +12385,83 @@ class E2eFullTest(unittest.TestCase):
         (base / "projects.json").write_text(json.dumps([str(self.repo)]))
         serve.E2E_FULL["running"] = None
         self.addCleanup(serve.E2E_FULL.update, running=None)
+        p = mock.patch.object(serve.board, "listeners", return_value=[])  # e2e_full_run never signals a real process
+        p.start()
+        self.addCleanup(p.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def stop_new(self, before, after, alive=True):
+        """e2e_full_stop_new_servers(repo, before) with board.listeners() giving after; returns the os.kill calls.
+        alive: os.kill(pid, 0) succeeds (the pid outlived SIGTERM), else it raises ProcessLookupError."""
+        calls = []
+        def kill(pid, sig):
+            calls.append((pid, sig))
+            if sig == 0 and not alive:
+                raise ProcessLookupError
+        with mock.patch.object(self.serve.board, "listeners", return_value=after), \
+                mock.patch.object(self.serve.os, "kill", side_effect=kill), \
+                mock.patch.object(self.serve.time, "sleep"):
+            self.serve.e2e_full_stop_new_servers(self.repo, before)
+        return calls
+
+    def test_stop_new_servers_term_then_kill(self):
+        """Job 1252: a run's leftover `next dev` on the main checkout held its dev lock, so the next run exited early."""
+        repo = os.path.realpath(self.repo)
+        after = [(4242, 3000, repo), (4243, 3002, os.path.join(repo, "app"))]
+        calls = self.stop_new([], after)
+        self.assertEqual([c for c in calls if c[1] != 0],
+                         [(4242, signal.SIGTERM), (4243, signal.SIGTERM), (4242, signal.SIGKILL), (4243, signal.SIGKILL)])
+        calls = self.stop_new([], after, alive=False)
+        self.assertEqual([c for c in calls if c[1] != 0], [(4242, signal.SIGTERM), (4243, signal.SIGTERM)])
+
+    def test_stop_new_servers_spares_snapshot_pids(self):
+        repo = os.path.realpath(self.repo)
+        self.assertEqual(self.stop_new([(4242, 3000, repo)], [(4242, 3000, repo)]), [])
+
+    def test_stop_new_servers_spares_outside_worktrees_keep_ports_and_self(self):
+        repo = os.path.realpath(self.repo)
+        after = [(5001, 3000, os.path.realpath(self.tmp.name)), (5002, 3000, repo + "-other"),
+                 (5003, 3000, os.path.join(repo, ".claude", "worktrees", "scrum-1-a")),
+                 (5004, 3000, os.path.join(repo, ".claude", "worktrees")),
+                 (5005, 3000, repo), (5005, 8765, repo), (os.getpid(), 3000, repo)]
+        self.assertEqual(self.stop_new([], after), [])
+
+    def test_stop_new_servers_runs_on_timeout_and_popen_error(self):
+        repo = os.path.realpath(self.repo)
+        (self.repo / "run-e2e.sh").write_text("sleep 30\n")
+        seen = []
+        with mock.patch.object(self.serve.board, "listeners", side_effect=[[], [(4242, 3000, repo)]]), \
+                mock.patch.object(self.serve, "e2e_full_stop_new_servers",
+                                  side_effect=lambda r, b: seen.append((r, b))), \
+                mock.patch.object(self.serve, "E2E_FULL_STALE", 0.4), \
+                mock.patch.object(self.serve, "E2E_FULL_LOAD_SECS", 0.2):
+            rec = self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", self.base, 123.0, None)
+        self.assertEqual(seen, [(self.repo, [])])
+        self.assertEqual(rec["result"], "error")
+        seen.clear()
+        with mock.patch.object(self.serve.subprocess, "Popen", side_effect=OSError("no exec")), \
+                mock.patch.object(self.serve, "e2e_full_stop_new_servers",
+                                  side_effect=lambda r, b: seen.append((r, b))):
+            rec = self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", self.base, 123.0, None)
+        self.assertEqual(seen, [(self.repo, [])])
+        self.assertEqual((rec["result"], rec["exit"]), ("error", -1))
+
+    def test_stop_new_servers_failure_keeps_result(self):
+        repo = os.path.realpath(self.repo)
+        for err in (ProcessLookupError, PermissionError):
+            with mock.patch.object(self.serve.board, "listeners", side_effect=[[], [(4242, 3000, repo)]]), \
+                    mock.patch.object(self.serve.os, "kill", side_effect=err) as kill, \
+                    mock.patch.object(self.serve.time, "sleep"):
+                rec = self.run_suite("5 passed (9s)\n", 0)
+            self.assertEqual(kill.call_args_list[0], mock.call(4242, signal.SIGTERM))
+            self.assertEqual(rec["result"], "pass")
+            self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
+        with mock.patch.object(self.serve.board, "listeners", return_value=[]) as listening, \
+                mock.patch.object(self.serve.os, "kill") as kill:
+            rec = self.run_suite(E2E_LIST_OUTPUT, 1)
+        self.assertEqual((listening.call_count, kill.call_count, rec["result"]), (2, 0, "fail"))
 
     def git(self, *args):
         return subprocess.run(["git", "-C", str(self.repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
