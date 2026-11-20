@@ -1899,10 +1899,19 @@ class ContractTest(unittest.TestCase):
         self.assertLess(digester.index("**Waste.**"), digester.index("**Token sinks.**"))
         self.assertLess(digester.index("**Token sinks.**"), digester.index("**Backlog fallback.**"))
         sinks = digester[digester.index("**Token sinks.**"):digester.index("**Backlog fallback.**")]
-        for phrase in ("`not needed` cause seen in 2 or more jobs", "the agent or lane that caused it",
-                       "over 3x its lane median", '`"kind": "backlog"`', "A `None` section gets no proposal",
-                       "at-most-8 cap"):
+        for phrase in ("Every `not needed` line becomes a proposal whose `why` starts `Token sinks:`",
+                       "Lines that share a cause share one proposal", "A `needed` line gets none",
+                       "the agent or lane that caused it", '`"kind": "backlog"`',
+                       "A `None` section gets no proposal", "at-most-8 cap"):
             self.assertIn(phrase, sinks, phrase)
+        for phrase in ("2 or more jobs", "over 3x its lane median"):
+            self.assertNotIn(phrase, sinks, phrase)
+        land = digester[digester.index("How they land, so you can judge"):]
+        land = land[:land.index("\n")]
+        self.assertIn("a git-ignored `scrum/*.md` file such as `scrum/project.md`, which lets you propose "
+                      "the project.md Test line fix", land)
+        step4 = next(l for l in self.lane("digest").splitlines() if l.startswith("4. If the `proposals` list"))
+        self.assertIn("git-ignored `scrum/*.md` files written in place after a backup", step4)
         self.assertIn("**Time sinks**, **Token sinks**, **Process health**", digester)
         self.assertLess(digester.index("**Token sinks**, "), digester.index("**Escapes**, **Backlog fallback**"))
         self.assertIn("**Escapes**, **Backlog fallback**, **New skill**, **Processes** and **Waste** read `notes.md`",
