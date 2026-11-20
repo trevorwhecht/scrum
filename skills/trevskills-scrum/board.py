@@ -1678,6 +1678,29 @@ def _pulse_since(root, digest_id):
     return None
 
 
+def _pulse_since_any(root, digest_id):
+    """The newest of _pulse_since(root, digest_id) and every other registered project's (projects(), this repo skipped
+    by resolved path) digest jobs.txt mtime, or None when none counts: pulse.log is machine-wide, so write_pulse never
+    re-reports what another project's digest already did. A digest counts when its name matches DIGEST_RE, it has no
+    error.md and its jobs.txt mtime is before this digest's own digests/<digest_id>/jobs.txt mtime (now when missing).
+    An OSError on a project's digests skips that project."""
+    found = [t] if (t := _pulse_since(root, digest_id)) is not None else []
+    cutoff = _mtime(Path(root) / "digests" / digest_id / "jobs.txt")
+    cutoff = time.time() if cutoff is None else cutoff
+    me = Path(root).resolve().parent
+    for repo in projects().values():
+        try:
+            if repo.resolve() == me:
+                continue
+            for p in (repo / "scrum" / "digests").iterdir():
+                if DIGEST_RE.fullmatch(p.name) and not (p / "error.md").exists():
+                    if (at := _mtime(p / "jobs.txt")) is not None and at < cutoff:
+                        found.append(at)
+        except OSError:
+            continue
+    return max(found, default=None)
+
+
 def _board_job(cache, name, n):
     """Project `name`'s board job numbered n, or None (a project not in projects(), an unreadable board or a missing
     job). cache: {name: board jobs}."""
@@ -1694,7 +1717,8 @@ PULSE_LAST_S = 60  # write_pulse: the last line counts one tick
 
 
 def write_pulse(root, digest_id):
-    """digests/<NNN>/pulse.md: pulse.log totals since the last digest (_pulse_since). Lines sort by time; a line lasts
+    """digests/<NNN>/pulse.md: pulse.log totals since the newest digest of any registered project (_pulse_since_any:
+    pulse.log is machine-wide, so every figure below uses that one window). Lines sort by time; a line lasts
     the seconds to the next line, capped at PULSE_TICK_CAP_S (the last line PULSE_LAST_S), so no total passes the window plus one
     tick, however many lines a minute holds; totals are rounded whole minutes. Only projects with Auto continue on
     (`auto` True; a line without it is off) count toward idle. Idle with claimable work (no session, no cool-down,
@@ -1718,7 +1742,7 @@ def write_pulse(root, digest_id):
     job's `account` (none: the first account; job not on the board: unknown), in accounts() order. A line's per-project
     readings count only for projects in projects() (test fixtures never inflate a total; Other starts still names an
     unregistered one); no filter when it is empty."""
-    since = _pulse_since(root, digest_id)
+    since = _pulse_since_any(root, digest_id)
     lines = sorted((l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and "orphan_killed" not in l
                     and (since is None or l["t"] >= since)),  # serve.py stop_orphans' kill lines are no tick
                    key=lambda l: l["t"])  # in time order, so no total passes the window when two writers interleave

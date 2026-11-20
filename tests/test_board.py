@@ -5009,10 +5009,12 @@ class BoardTest(unittest.TestCase):
         self.assertIn("digest-start: escapes: ", err)
         self.assertIsNone(text)
 
-    def pulse_digest(self, lines, since=None, error_since=None, boards=None):
+    def pulse_digest(self, lines, since=None, error_since=None, boards=None, digests=None, own=False):
         """digest-start over a pulse.log of `lines` (dicts or raw strings); `since` and `error_since` (epoch) set the
         jobs.txt mtime of an earlier digest 001, and of a failed digest 002 after it. `boards` ({project: jobs}) writes
-        a registry whose repo <project> has those board jobs. Returns (pulse.md, stderr)."""
+        a registry whose repo <project> has those board jobs; `digests` ({project: [(name, epoch, failed)]}) gives a
+        registered project digests/<name>/jobs.txt at that mtime (and error.md when failed); `own` registers this
+        test's own repo too. Returns (pulse.md, stderr)."""
         self.done_jobs(1)
         for name, at, err in (("001", since, False), ("002", error_since, True)):
             if at is not None:
@@ -5023,8 +5025,17 @@ class BoardTest(unittest.TestCase):
         for name, jobs in (boards or {}).items():
             (reg / name / "scrum").mkdir(parents=True)
             (reg / name / "scrum" / "board.json").write_text(json.dumps({"jobs": jobs}))
-        if boards:
-            (reg / "projects.json").write_text(json.dumps([str(reg / n) for n in boards]))
+        for name, made in (digests or {}).items():
+            for d, at, failed in made:
+                folder = reg / name / "scrum" / "digests" / d
+                folder.mkdir(parents=True)
+                (folder / "jobs.txt").write_text("")
+                if failed:
+                    (folder / "error.md").write_text("failed\n")
+                os.utime(folder / "jobs.txt", (at, at))
+        if boards or own:
+            (reg / "projects.json").write_text(json.dumps([str(reg / n) for n in boards or {}]
+                                                          + ([str(self.root.parent)] if own else [])))
         if lines is not None:
             (reg / "pulse.log").write_text("".join((l if isinstance(l, str) else json.dumps(l)) + "\n" for l in lines))
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg / "projects.json"), "SCRUM_PULSE": str(reg / "pulse.log")}):
@@ -5394,6 +5405,48 @@ class BoardTest(unittest.TestCase):
         self.assertIn("# Pulse: digest 003\n", text)
         self.assertIn(" · ticks: 2\n", text)
         self.assertIn("Peak sessions: 2 at 1970-01-12T13:55+00:00\n", text)
+
+    def test_pulse_window_starts_at_newest_project_digest(self):
+        """Job 1268: pulse.log is machine-wide, so pulse.md starts at the newest digest of any registered project (that
+        digest already reported what came before it); processes.md keeps this project's own last digest."""
+        s = 1_700_000_000
+        tick = lambda t, top=2, cooldown=False: {"t": t, "sessions": 0, "cooldown": cooldown, "focus": "app", "projects": {
+            "app": {"claimable": 1, "waiting": 0, "busy": False, "top": top, "auto": True}}}
+        lines = [tick(s, top=1), tick(s + 30, cooldown=True)] + [tick(s + 60 * k) for k in range(1, 21)]  # app 2 in cool down
+        text, err = self.pulse_digest(lines, since=s, boards={"app": [{"id": "002-b", "started_by": "serve"}], "lib": []},
+                                      digests={"lib": [("004", s + 600, False)]})
+        self.assertIn("Window: 2023-11-14T22:23+00:00 to 2023-11-14T22:33+00:00 · ticks: 11\n"
+                      "Idle with claimable work: 11 min (longest stretch 11 min)\n", text)
+        self.assertIn("Claims during cool down: 0\n", text)
+        self.assertIn("\nSince: 2023-11-14T22:13+00:00\n", (self.root / "digests" / "002" / "processes.md").read_text())
+
+    def test_pulse_window_skips_failed_later_and_own_digests(self):
+        """Job 1268: _pulse_since_any skips another project's failed digest, one written after this digest's own
+        jobs.txt, a project with no digests folder (app) and this project's own repo."""
+        s = 1_700_000_000
+        app = {"claimable": 1, "waiting": 0, "busy": False, "top": 1, "auto": True}
+        lines = [{"t": s + 60 * k, "sessions": 0, "cooldown": False, "focus": "app", "projects": {"app": app}}
+                 for k in range(21)]
+        idle = lambda text: re.search(r"Idle with claimable work: .*\n", text)[0]
+        alone, _ = self.pulse_digest(lines, since=s, boards={"app": []})  # no other digest, own repo unregistered
+        self.assertIn("Window: 2023-11-14T22:13+00:00 to ", alone)
+        self.tearDown(); self.setUp()
+        text, err = self.pulse_digest(lines, since=s, boards={"app": [], "lib": []}, own=True, digests={
+            "lib": [("004", s + 600, True), ("005", time.time() + 86400, False)]})  # failed; after this digest
+        self.assertNotIn("digest-start: pulse", err)
+        self.assertIn("Window: 2023-11-14T22:13+00:00 to ", text)
+        self.assertEqual(idle(text), idle(alone))
+        self.assertEqual(idle(text), "Idle with claimable work: 21 min (longest stretch 21 min)\n")
+        digests, lib = self.root / "digests", Path(self.tmp.name) / "reg" / "lib" / "scrum" / "digests"
+        mark = lambda path, at: (path.mkdir(parents=True, exist_ok=True), (path / "jobs.txt").write_text(""),
+                                 os.utime(path / "jobs.txt", (at, at)))
+        mark(digests / "003", s + 700)  # own repo: never read through the registry
+        mark(digests / "002", s + 800)  # this digest's own jobs.txt
+        mark(lib / "006", s + 900)  # after it: skipped
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "reg" / "projects.json")}):
+            self.assertEqual(board._pulse_since_any(self.root, "002"), s)
+            (digests / "002" / "jobs.txt").unlink()  # no jobs.txt: now is the cutoff
+            self.assertEqual(board._pulse_since_any(self.root, "002"), s + 900)
 
     def test_timing_build_start_from_run_log(self):
         t0 = 1_700_000_000
