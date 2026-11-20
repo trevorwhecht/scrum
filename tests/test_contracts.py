@@ -1065,7 +1065,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 27350, "newjob.md")  # +lilguy hand-off, job 1261; +fast lane Out of scope, job 1257; +debug E2E in background, Build queue, job 1250; +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 27690, "newjob.md")  # +job E2E budget, job 1311; +lilguy hand-off, job 1261; +fast lane Out of scope, job 1257; +debug E2E in background, Build queue, job 1250; +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -2441,6 +2441,16 @@ class ContractTest(unittest.TestCase):
         self.assertIn("`npx eslint --cache <changed .js/.jsx/.ts/.tsx/.mjs/.cjs files>`", step2)
         self.assertIn("`eslint.config.*` or `.eslintrc*`", step2)
         self.assertIn("`Lint: skipped, no lintable file in diff`", step2)
+
+    def test_check_gate_e2e_budget(self):
+        check = self.lane("newjob").split("## Check gate")[1]
+        step2 = check[check.index("2. **Runtime files**"):check.index("\n3. ")]
+        rule = step2[step2.index("B e2e-budget $ID"):]
+        self.assertLess(step2.index("wait as in SKILL.md; a non-zero exit is `CHECK: FAIL`"), step2.index("B e2e-budget $ID"))
+        for phrase in ("`E2E: over budget, <N> passed, <M> not run`", "`over_budget` is true and `failed` is 0",
+                       "starts no **E2E triage**", "any failed test fails as before"):
+            self.assertIn(phrase, rule, phrase)
+        self.assertIn("board.py e2e-budget <id> <log>", (SKILL_DIR / "board.py").read_text())
 
     def test_check_gate_runs_db_up(self):
         check = self.lane("newjob").split("## Check gate")[1]
