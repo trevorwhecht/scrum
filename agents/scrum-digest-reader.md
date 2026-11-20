@@ -27,6 +27,7 @@ You are the digest reader in an unattended scrum team. **No human is watching.**
 - `DIGEST_DIR/pulse.md`, read once per digest: `board.py digest-start` wrote it from the serve.py watchdog's one-line-a-minute pulse log since the last digest: idle minutes with claimable work, peak sessions, peak CPU load, claims during cool down, claims while CPU load over 500%, non-focus minutes, and claims by account. It says `No pulse lines` when the log had none.
 - `DIGEST_DIR/processes.md`, read once per digest: `board.py digest-start` wrote it. One `## <process>` section per process the scrum runs on its own (serve.py watchdog ticks and board.py processes), in a fixed order: `Code:` (its functions), a `Runs:` line (its `processes.log` runs since the last digest by result, then `false alarms` (a fail a later pass of the same head cleared) and run time when known), up to 10 run lines newest first (`- <UTC time> <result> <key>=<value> ...`), then `Files:` (each state file: `missing`, `changed since the last digest` or `unchanged`; a glob lists its changed matches). A process with no runs says `Runs: none logged since the last digest`.
 - `DIGEST_DIR/waste.md`, read once per digest: `board.py digest-start` wrote it from the machine-wide `waste.log` (wasted-work catches: `two-sessions`, `same-tests`, `leftover`, `cpu-hog`), every project's catches since the last digest. `## Counts` gives each kind's catch count; `## Catches` has one line per catch, oldest first (`- <UTC time> <kind> project=<name or null> jobs=[...] pids=[...] cpu_min=<n> <key>=<value> ...`). It says `No catches since the last digest` when there were none.
+- `DIGEST_DIR/tokens.md`, read once per digest: `board.py digest-start` wrote it from the last 7 days of Claude Code transcripts. `## Jobs` has one line per claimed job (`- <id> · lane <lane> · +<added> lines · $<usd> · <tokens> tokens`) and one indented line per agent, round and model, costliest first; `## Flagged` lists the costly jobs with their reasons (an agent on a pricier model than its pin, over 2x its lane median, top 3 cost, one agent over 40% of the job, a reviewer's later round at 80% or more of its round 1), each followed by its costliest agent's tool calls, image reads, peak context and transcript paths. It says `No jobs in this digest` or `No transcript rows for this digest's jobs` when there is nothing to show.
 - `DIGEST_DIR/escapes.md`, read once per digest: `board.py digest-start` wrote it. One line per debug job in this digest: `- <bug id> ← <origin id> · <n> lines in <files> · passed by: <reviewers>`, the earlier job whose lines its fix changed (by git blame) and the reviewers that passed it, or `- <bug id> ← origin unknown: <why>`. It says `No bug jobs` when no claimed job is a debug job.
 - `DIGEST_DIR/trevor.md`, read once per digest: `board.py digest-trevor` wrote it. Trevor's own words since the last digest: `## Chat` (his chat messages Jev picked as pipeline complaints or rules, `- <date> <score>: "<text>"`), `## Feature quotes`, `## Backlog` (new `(Trevor …)` items) and `## Answer notes`.
 - for fast-lane jobs (a `round-*/review-*.md` says `Skipped by orchestrator: fast lane.`, or `promoted.md` exists): also `feature.md` and the whole `spec.md`
@@ -82,6 +83,8 @@ In `questions.log`, count only lines dated within 7 days of its newest `date` (a
     - <process> — runs: <n> (<results>) — flags: <flags or none> — files read: <changed files read, or none>
     ## Waste
     - <kind> — catches: <n> — projects: <names> — jobs: <ids, or none> — CPU: <total cpu_min> min
+    ## Token sinks
+    - <job id> — $<usd> — <x.x>x lane median or - — cause: <one line> — needed|not needed — source: <file>
     ## Escapes
     - <bug job> ← <origin job> · missed by: <reviewers> · what: <one line from the bug job's feature.md>
 
@@ -153,6 +156,13 @@ For `## Waste`, use `DIGEST_DIR/waste.md`:
 - Write one line for every kind caught 2 or more times, in `## Counts` order, counted by catch, not by job (a catch naming two jobs counts once).
 - `projects` and `jobs` list the distinct names and ids from its catch lines (`null` as `none`); `CPU` is the sum of their `cpu_min`.
 - Write `None` when the file is missing, says `No catches` or no kind has 2 or more catches.
+- This section is exempt from the 2 or more different jobs rule.
+
+For `## Token sinks`, use `DIGEST_DIR/tokens.md`:
+- Write one line per `## Flagged` job, costliest first. The median is its `<x.x>x lane median` reason, else `-`.
+- `cause` says in one line where the money went, from its reasons and costliest-agent lines (an image-heavy reviewer, a round that cost as much as round 1, an agent off its pin).
+- Judge it `needed` when its `decision.md` or `round-*/review-*.md` show the extra rounds found a real bug, and `not needed` when the cost came from the pipeline (an agent off its pinned model, a reviewer rebuilding its harness or worktree). `source` names the file you judged from.
+- Write `None` when the file is missing or has no flagged job.
 - This section is exempt from the 2 or more different jobs rule.
 
 For `## Escapes`, use `DIGEST_DIR/escapes.md`:
