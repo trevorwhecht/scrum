@@ -6308,7 +6308,7 @@ def merge_refusal(job: dict) -> str | None:
     return f"not done: could not confirm PR {pr} is merged: {why}"
 
 
-def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
+def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False, spawn_pid=None):
     """unpause writes to a paused job. Only the caller grants it: serve.py's Play and spawn bookkeeping, and
     `set --unpause`, which resume and rework use. Only an unpause write with stage= clears `paused`. expect: write only
     while the job is still in that stage (checked under the lock), else raise SystemExit and write nothing.
@@ -6322,6 +6322,8 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
     files, div = job_files(d), diverged(d)
     given = dict(pair.partition("=")[::2] for pair in pairs)
     pid = (caller_claude_pid() if given["tty"] else None) if "tty" in given else None  # ps before the lock, never under it
+    if isinstance(spawn_pid, int) and "tty" in given and not given["tty"]:  # int: a mock Popen has a MagicMock pid
+        pid = spawn_pid  # job 1274: spawn passes its child's pid (a keyword, not a set key), so a short-id prompt reads alive
     if given.get("stage") == "done":
         # Read without the lock so `gh` never runs while holding it; only one orchestrator marks a given job done,
         # so the read-then-write race is accepted.
@@ -8489,7 +8491,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         pass
     proc.account = acc.name  # the account the session really runs on; serve.spawn records it in RUNS
     try:  # the run log link reads this; a job that isn't on the board (run-all, digest) has no row to set
-        cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty=", "outcome=", f"account={acc.name}", f"reset={seven_day_reset(acc.name)}"], unpause=True)  # Play starts on a paused job; a stale interactive tty would still match the hook and liveness checks
+        cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty=", "outcome=", f"account={acc.name}", f"reset={seven_day_reset(acc.name)}"], unpause=True, spawn_pid=proc.pid)  # Play starts on a paused job; a stale interactive tty would still match the hook and liveness checks
     except SystemExit:
         pass
     return proc, f"runs/{log.name}"
