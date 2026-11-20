@@ -4255,6 +4255,11 @@ def cmd_lilguy_fit(root, job_id: str) -> dict:
     """The _lilguy_verdict, also written to jobs/<id>/lilguy-fit.json when that folder exists (process-health reads it)."""
     verdict = _lilguy_verdict(root, job_id)
     folder = Path(root) / "jobs" / job_id
+    hand_off = None
+    if verdict["fit"] and not os.environ.get("SCRUM_SPAWN"):  # job 1261: a hand-started job builds headless on the Orchestrator model, not in Trevor's Opus session
+        if find(read_board(root), check_id(job_id)).get("started_by") == "hand":
+            hand_off = f"B spawn {job_id} start"
+            cmd_set(root, job_id, ["lane=lilguy"])  # spawn() keeps CLAUDE.md only for a lilguy-lane job
     if folder.is_dir():
         out = folder / "lilguy-fit.json"
         try:
@@ -4273,7 +4278,7 @@ def cmd_lilguy_fit(root, job_id: str) -> dict:
         _write_json(out, {**verdict, "parent": parent[1] if parent else None, "points": item["points"] if item else None,
                           "hard_stop": hard[0] if hard else None, "estimate": {"files": files, "lines": lines},
                           "jev": {"score": raw.get("score"), "confidence": raw.get("confidence")} if raw else None})
-    return verdict
+    return {**verdict, "hand off": hand_off} if hand_off else verdict
 
 
 def _lilguy_verdict(root, job_id: str) -> dict:
@@ -8426,7 +8431,7 @@ def spawn_settings(config_dir: Path, repo: Path) -> str:
 def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags=("--permission-mode", "acceptEdits"),
           model: str | None = None, account: str | None = None, nice: int = SESSION_NICE) -> tuple[subprocess.Popen, str]:
     """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/, and set the job's runlog and account.
-    start/resume get `--model <Orchestrator model>` (or `<Big ticket model>`, see orchestrator_model) unless `model` is given.
+    start/resume/run-all/cloud-home get `--model <Orchestrator model>` (or `<Big ticket model>`, see orchestrator_model) unless `model` is given.
     `account` None: pick_account, preferring the job's recorded account; with none free, the one whose limit ends soonest
     (the recorded account on a tie), else the first (Trevor's Play and Resume are never refused on usage). Any account but the first runs with
     CLAUDE_CONFIG_DIR=<its dir>; the first runs with CLAUDE_CONFIG_DIR removed. The session runs at `nice` (SESSION_NICE;
@@ -8439,7 +8444,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         raise SystemExit(f"bad spawn action {action!r}")
     if model is not None and not MODEL_RE.fullmatch(model):
         raise SystemExit(f"bad model {model!r}; must match {MODEL_RE.pattern}")
-    if model is None and action in ("start", "resume"):
+    if model is None and action in ("start", "resume", "run-all", "cloud-home"):  # job 1261: run-all and cloud-home no longer run on the CLI default Opus
         model = orchestrator_model(root, job_id)
     prompt = prompt if prompt is not None else f"/trevskills-scrum {action} {job_id}"
     accs = accounts()
@@ -8457,6 +8462,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     env = dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
                CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0")  # -p kills background agents 10 min after the last turn otherwise
     env.pop("CLAUDE_CONFIG_DIR", None)
+    env["SCRUM_SPAWN"] = "1"  # job 1261: lilguy-fit tells a spawn session from Trevor's interactive one
     if acc != accs[0]:
         env["CLAUDE_CONFIG_DIR"] = str(acc.dir)
     if job_lane(root, job) == "lilguy":  # its orchestrator writes the code, so it keeps CLAUDE.md and the rules
