@@ -2918,7 +2918,8 @@ RAM_HOLD_RE = re.compile(r"^\S+ free=(?:(\d+)%|unknown) sessions=(\d+)$", re.M) 
 
 
 def write_timing(root, digest_id, jobs):
-    """digests/<NNN>/timing.md: one row per claimed job (wall, spec, queue, queue gate = queue-gates.txt, rounds, round times, no-change rounds = a
+    """digests/<NNN>/timing.md: one row per claimed job (wall, spec, queue (with the part after a done depends_on
+    blocker's updatedAt: _timing_row's by_id is this board), queue gate = queue-gates.txt, rounds, round times, no-change rounds = a
     head.txt equal to the previous round's, E2E lock waits = `exit 124` in check.md plus queue-wait lines, questions.log stall lines, each as
     its minutes to the next run log),
     totals, every job on every registered board (and this one) now stalled or held (queue_waiting) on the E2E queue, and per claimed
@@ -2945,7 +2946,8 @@ def write_timing(root, digest_id, jobs):
             stalls.setdefault(q["job"], []).append(at)
         if q.get("kind") == "queue-wait" and at and isinstance(q.get("job"), str):
             queue.setdefault(q["job"], []).append(at)
-    rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ()), human.get(j, ()), queue.get(j, ())) for j in jobs]
+    rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ()), human.get(j, ()), queue.get(j, ()), board)
+            for j in jobs]
     lines = [f"# Timing: digest {digest_id}", "",
              "| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls |",
              "|---|---|---|---|---|---|---|---|---|---|---|"]

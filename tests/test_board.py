@@ -5671,15 +5671,33 @@ class BoardTest(unittest.TestCase):
             claimed.write_text(bad)
             self.assertEqual(board._timing_row(self.root, "j", {}, {})[0][2:4], ["3h10m", "0m"], bad)
 
-    def claim_clock_job(self, t0):
-        """test_timing_row_claim_clock's last fixture for job j: feature.md at t0, claimed-at.txt t0+3h, spec.md at
+    def claim_clock_job(self, t0, job_id="j"):
+        """test_timing_row_claim_clock's last fixture for job_id: feature.md at t0, claimed-at.txt t0+3h, spec.md at
         t0+3h10m and a start log at t0+3h15m, so Queue is 3h05m (3h claim wait plus 5m to the start)."""
         for rel, at in (("feature.md", t0), ("spec.md", t0 + 3 * 3600 + 600)):
-            os.utime(self.write(f"j/{rel}", "x\n"), (at, at))
-        (self.root / "jobs/j/claimed-at.txt").write_text(f"{t0 + 3 * 3600}\n")
+            os.utime(self.write(f"{job_id}/{rel}", "x\n"), (at, at))
+        (self.root / "jobs" / job_id / "claimed-at.txt").write_text(f"{t0 + 3 * 3600}\n")
         (self.root / "runs").mkdir(exist_ok=True)
         start = datetime.fromtimestamp(t0 + 3 * 3600 + 900, timezone.utc).strftime("%Y%m%d-%H%M%S")
-        (self.root / "runs" / f"{start}-start-j.log").write_text("")
+        (self.root / "runs" / f"{start}-start-{job_id}.log").write_text("")
+
+    def test_write_timing_queue_after_depends_on(self):
+        """Job 1268: write_timing passes its board map, so a claimed job whose blocker is done on the same board gets
+        the `after depends_on` part in its timing.md Queue cell."""
+        t0 = 1_700_000_000
+        blocker, job = board.cmd_new(self.root, "Blocker"), board.cmd_new(self.root, "Waits")
+        with board.locked_board(self.root) as b:
+            board.find(b, blocker).update(stage="done",
+                                          updatedAt=datetime.fromtimestamp(t0 + 9000, timezone.utc).isoformat())
+            board.find(b, job).update(depends_on=[blocker])
+        self.claim_clock_job(t0, job)
+        (self.root / "digests" / "001").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
+            board.write_timing(self.root, "001", [job])
+        row = next(l for l in (self.root / "digests" / "001" / "timing.md").read_text().splitlines()
+                   if l.startswith(f"| {job} |"))
+        self.assertEqual([c.strip() for c in row.strip("|").split("|")][3:5],
+                         ["3h05m (35m after depends_on)", f"depends_on:{blocker}"])
 
     def test_timing_row_queue_after_depends_on(self):
         """Job 1268: a depends_on job whose blockers are all done splits out the Queue after the latest blocker's
