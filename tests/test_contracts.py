@@ -1740,6 +1740,9 @@ class ContractTest(unittest.TestCase):
         for phrase in ("`DIGEST_DIR/timing.md`", "    ## Time sinks\n", "For `## Time sinks`, use `DIGEST_DIR/timing.md`",
                        "3 or more different jobs or more than about 1 h in total", "no-change rounds"):
             self.assertIn(phrase, reader, phrase)
+        rule = reader[reader.index("For `## Time sinks`"):]
+        rule = rule[:rule.index("\n")]
+        self.assertIn("after depends_on)`, count only `<after>` as its Queue", rule)  # job 1268
 
     def test_digest_reader_reads_pulse(self):
         reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
