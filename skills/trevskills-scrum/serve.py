@@ -313,6 +313,23 @@ def cpu_first():
     return best and best[1:]
 
 
+LIVE_IDLE_STOP_S = 10  # stop_live_idle: a live-idle session still there this long after its SIGTERM gets SIGKILL
+
+
+def stop_live_idle(project, job) -> bool:
+    """Job 1275: end the session cmd_watchdog flagged live-idle (the job's reason holds board.LIVE_IDLE) before spawn
+    resumes the job, so the two never run at once. Only when the recorded pid is a live claude process in process_scan
+    (board._is_claude; a reused pid is never signalled): one stderr line, then e2e_full_term_kill sends SIGTERM and,
+    LIVE_IDLE_STOP_S later, SIGKILL if it is still there. Returns True when the pid was signalled."""
+    pid = job.get("pid")
+    if not isinstance(pid, int) or board.LIVE_IDLE not in str(job.get("reason") or ""):
+        return False
+    if not any(p == pid and board._is_claude(cmd) for p, _, _, cmd in process_scan()):
+        return False
+    print(f"live-idle: stopping {project}/{job['id']} pid {pid} before its resume", file=sys.stderr, flush=True)
+    return bool(e2e_full_term_kill([pid], LIVE_IDLE_STOP_S))
+
+
 def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits"), manual=False, idle=False,
           account=None, nice=None):
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
@@ -331,8 +348,10 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     project (live_ids). A launched non-manual `start` of a board job appends {project, job, cpu} (the gate's reading)
     to PULSE_STARTS for pulse_tick. While the CPU gate is open, a non-manual `start` of any job other than cpu_first()
     (the longest-held CPU launch) is queued too, noted cpu_queue, so that job starts ahead of new claims and other projects.
-    `nice` (the UI sweep's UI_SWEEP_NICE) goes to board.spawn only when given; every other session keeps SESSION_NICE."""
-    reason, on_board, queued_at, hold = None, False, None, None
+    `nice` (the UI sweep's UI_SWEEP_NICE) goes to board.spawn only when given; every other session keeps SESSION_NICE.
+    A board job whose session is still alive (board.spawn's LiveSession, job 1275) starts nothing: one stderr line, its
+    queued launch dropped (unqueue), None. A `resume` past the gates first stops a live-idle session (stop_live_idle)."""
+    reason, on_board, queued_at, hold, refused_live = None, False, None, None, None
     niced = {} if nice is None else {"nice": nice}
     if action in GATED:
         try:
@@ -364,7 +383,16 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 if ram_short and held_over(queued_at):
                     hold = ram_hold_text()
             else:
-                proc, log = board.spawn(root, job_id, action, prompt, flags, **niced)
+                if action == "resume":  # a live-idle session ends first, once the gates let its replacement start
+                    stop_live_idle(project, job)
+                try:
+                    proc, log = board.spawn(root, job_id, action, prompt, flags, **niced)
+                except board.LiveSession as e:  # job 1275: a second session would fight the live one
+                    refused_live = e
+        if refused_live:  # not started and not queued: play_queue_tick would retry it every tick
+            print(f"spawn refused: {project}/{job_id} {action}: {refused_live}", file=sys.stderr, flush=True)
+            unqueue(root, job)
+            return None
         with board.locked_board(root) as b:  # the live job, re-read under the lock
             live = next((j for j in b["jobs"] if j["id"] == job_id), {})  # {}: removed meanwhile, nothing to mark
             if proc is None:  # setdefault: a second click keeps the first time and launch
@@ -398,7 +426,11 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             board.find(board.read_board(root), job_id)
         except (SystemExit, OSError):
             account = off_board or board.pick_account(time.time())[0]
-        proc, log = board.spawn(root, job_id, action, prompt, flags, account=account, **niced)
+        try:
+            proc, log = board.spawn(root, job_id, action, prompt, flags, account=account, **niced)
+        except board.LiveSession as e:  # job 1275: a board job past the gate (cloud-home) is checked too
+            print(f"spawn refused: {project}/{job_id} {action}: {e}", file=sys.stderr, flush=True)
+            return None
         if action == "run-all" and not manual:  # a run-all launch (not a board job) is a start too, for pulse_tick
             with PULSE_STARTS_LOCK:
                 PULSE_STARTS.append({"project": project, "job": job_id, "cpu": board.cpu_load_pct()})
@@ -667,13 +699,14 @@ def play_queue_tick(project, root, jobs) -> bool:
 
 def held_work(project, jobs) -> list[dict]:
     """The project's held work: a queued launch (queued_launch, not running, still in its stage) or a waiting child of
-    a running, unpaused Run-all/BigBoy parent (setup not pending, no wake, every depends_on done). idle_claim starts
-    one here; shop_tick sends one to the shop Mac."""
+    a running, unpaused Run-all/BigBoy parent that is not writing its child specs (board.child_specs_pending; setup not
+    pending, no wake, every depends_on done). idle_claim starts one here; shop_tick sends one to the shop Mac."""
     by_id = {j["id"]: j for j in jobs}
 
     def waiting_child(k):
         p = by_id.get(k.get("parent")) or {}
         return k.get("stage") == "waiting" and p.get("stage") == "running" and not p.get("paused") \
+            and not board.child_specs_pending(p) \
             and p.get("lane") in ("runall", "bigboy") and k.get("setup") != "pending" and not k.get("wake") \
             and all(by_id.get(d, {}).get("stage") == "done" for d in k.get("depends_on") or [])
 

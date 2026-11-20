@@ -59,6 +59,14 @@ def processes_logged(fn):
     return out, [{k: v for k, v in l.items() if k != "t"} for l in lines]
 
 
+def specs_written(b, root, parent_id):
+    """Drop the parent's childSpecs mark (board module `b`), as BigBoy step 3's `ready --specs-done` does (job 1275):
+    plan-apply and runall-start set it and it holds every claim, so a test of a later ready call starts past step 2."""
+    with b.locked_board(root) as data:
+        b.find(data, parent_id).pop("childSpecs", None)
+    return parent_id
+
+
 class ServeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -678,7 +686,8 @@ class ServeTest(unittest.TestCase):
             "PLAN: READY\n# Big\n## Goal\nG.\n## Done when\n1. x\n## Tickets\n"
             "### T1: Store\nDepends on: none\nParallel: yes — alone\nExposure: no\nHard stops: none\nHuman setup: Create the bucket\nDo it.\n"
             "### T2: Show\nDepends on: T1\nParallel: no — last\nExposure: yes\nHard stops: none\nHuman setup: none\nShow it.\n")
-        return (parent, *b.cmd_plan_apply(self.root, parent)["children"])
+        kids = b.cmd_plan_apply(self.root, parent)["children"]
+        return (specs_written(b, self.root, parent), *kids)
 
     def stage_of(self, job_id):
         return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
@@ -2013,7 +2022,7 @@ class ServeTest(unittest.TestCase):
         usage, root = self.low_usage(base), base / "scrum"
         root.mkdir()
         (root / "backlog.md").write_text("- [ ] one\n- [ ] two\n")
-        parent = self.serve.board.cmd_runall_start(root)["id"]
+        parent = specs_written(self.serve.board, root, self.serve.board.cmd_runall_start(root)["id"])
         # finish_first reads every registered project's board: another test's leftover queue-wait job would hold the claim
         with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)), mock.patch.object(self.serve, "spawn") as spawn, \
                 mock.patch.object(self.serve.board, "finish_first", return_value=None):
@@ -2031,7 +2040,7 @@ class ServeTest(unittest.TestCase):
         root.mkdir()
         (root / "backlog.md").write_text("- [ ] one\n")
         out = b.cmd_runall_start(root)
-        parent, (kid,) = out["id"], out["children"]
+        parent, (kid,) = specs_written(b, root, out["id"]), out["children"]
         kid_job = lambda: b.find(b.read_board(root), kid)
         self.assertEqual(b.MAX_LAUNCH_CPU_LOAD_PCT, 500)
         # finish_first reads every registered project's board: another test's leftover E2E-queue job would hold the claim
@@ -3530,7 +3539,8 @@ class ServeTest(unittest.TestCase):
 
     def test_spawn_records_runlog(self):
         job_id = self.job("runlog me")
-        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+        with mock.patch.object(self.serve.subprocess, "Popen") as popen, \
+                mock.patch.object(self.serve.board, "session_alive_fn", return_value=lambda job: False):  # ps runs through the mocked Popen
             self.serve.spawn("repo", self.root, job_id, "start", "x")
             self.serve.spawn("repo", self.root, "999-not-on-board", "start", "x")  # failure is ignored
         self.addCleanup(lambda: [self.serve.RUNS.pop(f"repo/{i}", None) for i in (job_id, "999-not-on-board")])
@@ -3541,9 +3551,67 @@ class ServeTest(unittest.TestCase):
         self.assertRegex(job["runlog"], rf"^runs/\d{{8}}-\d{{6}}-start-{job_id}\.log$")
         self.assertEqual(job["runlog"], self.serve.RUNS[f"repo/{job_id}"]["log"])
 
+    def test_spawn_live_session_refusal_starts_nothing(self):
+        """Job 1275: board.spawn's live-session refusal is "not started": None, one stderr line, no traceback, no RUNS
+        entry, and nothing queued (play_queue_tick would retry it every tick); a queued launch it refused is dropped."""
+        job_id = self.job("already running", "stage=build")
+        self.patch_board(job_id, pid=4242, play_queued="2026-11-19T10:00:00+00:00",
+                         queued_launch={"action": "resume", "prompt": "x", "stage": "build"})
+        err = io.StringIO()
+        with mock.patch.object(self.serve.board, "session_alive_fn", return_value=lambda job: True), \
+                mock.patch.object(self.serve.subprocess, "Popen") as popen, contextlib.redirect_stderr(err):
+            for action in ("resume", "cloud-home"):  # a GATED launch, and one past the gate
+                self.assertIsNone(self.serve.spawn("repo", self.root, job_id, action, "x"), action)
+        popen.assert_not_called()
+        self.assertFalse(self.serve.running("repo", job_id))
+        self.assertEqual(err.getvalue().splitlines(), [
+            f"spawn refused: repo/{job_id} resume: job {job_id} already has a live session (pid 4242)",
+            f"spawn refused: repo/{job_id} cloud-home: job {job_id} already has a live session (pid 4242)"])
+        job = self.stage_of(job_id)
+        self.assertEqual([k for k in ("play_queued", "queued_launch", "runlog") if k in job], [])
+
+    def test_live_idle_resume_stops_the_old_session_before_spawn(self):
+        """Job 1275: a resume of a job the watchdog flagged live-idle (its reason ends on "(session alive but idle)")
+        whose recorded pid is still a live claude process SIGTERMs that pid, waits up to 10 s, SIGKILLs it when it is
+        still there, and only then launches. A pid that is no claude process, or a stall without the live-idle mark,
+        is never signalled."""
+        live_idle = "Stalled: no board or job-dir change for 4 h (session alive but idle)"
+        claude = [(4242, 1, 0.0, "claude -p /trevskills-scrum start x")]
+
+        def run(reason, procs, exits):
+            job_id = self.job("idle session", "stage=build")
+            self.patch_board(job_id, pid=4242, stalled=True, reason=reason)
+            calls, err = [], io.StringIO()
+
+            def kill(pid, sig):
+                calls.append((pid, sig))
+                if sig == 0 and exits:
+                    raise ProcessLookupError(pid)
+            with mock.patch.object(self.serve, "process_scan", return_value=procs), \
+                    mock.patch.object(self.serve.os, "kill", side_effect=kill), \
+                    mock.patch.object(self.serve.time, "sleep") as sleep, \
+                    mock.patch.object(self.serve.board, "session_alive_fn", return_value=lambda job: False), \
+                    mock.patch.object(self.serve.subprocess, "Popen",
+                                      side_effect=lambda *a, **k: calls.append("popen") or mock.MagicMock()), \
+                    contextlib.redirect_stderr(err):
+                self.assertIsNotNone(self.serve.spawn("repo", self.root, job_id, "resume", "x"))
+            self.addCleanup(self.serve.RUNS.pop, f"repo/{job_id}", None)
+            return job_id, [c for c in calls if c == "popen" or c[1] != 0], sum(c.args[0] for c in sleep.call_args_list), err.getvalue()
+
+        job_id, signals, waited, err = run(live_idle, claude, exits=True)
+        self.assertEqual(signals, [(4242, signal.SIGTERM), "popen"])
+        self.assertEqual(err.splitlines(), [f"live-idle: stopping repo/{job_id} pid 4242 before its resume"])
+        _, signals, waited, _ = run(live_idle, claude, exits=False)
+        self.assertEqual((signals, waited), ([(4242, signal.SIGTERM), (4242, signal.SIGKILL), "popen"], 10.0))
+        _, signals, _, _ = run(live_idle, [(4242, 1, 0.0, "node server.js")], exits=True)
+        self.assertEqual(signals, ["popen"], "a reused pid that is no claude process is never signalled")
+        _, signals, _, _ = run("Stalled: no board update for 30 min and no live session", claude, exits=True)
+        self.assertEqual(signals, ["popen"], "only a live-idle stall is stopped")
+
     def test_spawn_clears_stale_tty(self):
         job_id = self.job("was interactive", "tty=ttys004")
-        with mock.patch.object(self.serve.subprocess, "Popen"):
+        with mock.patch.object(self.serve.subprocess, "Popen"), \
+                mock.patch.object(self.serve.board, "session_alive_fn", return_value=lambda job: False):  # not this Mac's ttys004
             rel = self.serve.spawn("repo", self.root, job_id, "approve", "x")
         self.addCleanup(self.serve.RUNS.pop, f"repo/{job_id}", None)
         job = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
@@ -3605,7 +3673,8 @@ class ServeTest(unittest.TestCase):
     def test_spawn_silences_notifier(self):
         job_id = self.job("quiet spawn")
         # Headless scrum sessions export CLAUDE_NOTIFIER_DISABLE=1; unset it here so the parent-env check is hermetic.
-        with mock.patch.dict(os.environ), mock.patch.object(self.serve.subprocess, "Popen") as popen:
+        with mock.patch.dict(os.environ), mock.patch.object(self.serve.subprocess, "Popen") as popen, \
+                mock.patch.object(self.serve.board, "session_alive_fn", return_value=lambda job: False):  # ps runs through the mocked Popen
             os.environ.pop("CLAUDE_NOTIFIER_DISABLE", None)
             self.serve.spawn("repo", self.root, job_id, "start", "x")
             env = popen.call_args.kwargs["env"]
@@ -7949,7 +8018,8 @@ class AutoResumeTest(unittest.TestCase):
         s = self.serve
         (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
         self.addCleanup(lambda: [s.RUNS.pop(f"p/{j['id']}", None) for j in jobs])
-        with mock.patch.object(s.board.subprocess, "Popen") as popen, mock.patch.object(s, "running", return_value=False):
+        with mock.patch.object(s.board.subprocess, "Popen") as popen, mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s.board, "session_alive_fn", return_value=lambda job: False):  # ps runs through the mocked Popen
             s.auto_resume("p", self.root, jobs)
         return [(c.args[0][2].split()[-1], c.kwargs["env"].get("CLAUDE_CONFIG_DIR")) for c in popen.call_args_list]
 
@@ -10599,6 +10669,24 @@ class IdleClaimTest(unittest.TestCase):
         self.assertIs(got, True)
         self.assertEqual(self.started(spawn), [("003-small", "start", True)])
         self.assertNotIn("ic", s.IDLE_SINCE)
+
+    def test_child_of_a_parent_writing_child_specs_is_not_held_work(self):
+        """Job 1275 path 2: while the parent's fresh childSpecs mark stands, its waiting children are no held work, so
+        idle_claim neither claims one nor spends the tick's room on it; a mark over 60 min old holds nothing."""
+        s = self.serve
+        jobs = self.write()
+        jobs[0]["childSpecs"] = self.board.now()
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.assertEqual(s.held_work("ic", self.jobs()), [])
+        with mock.patch.object(s, "take_room", return_value=True) as room:
+            got, spawn = self.claim()
+        self.assertEqual((got, spawn.call_args_list, room.call_args_list), (False, [], []))
+        self.assertEqual([self.stage(k) for k in ("002-big", "003-small")], ["waiting", "waiting"])
+        jobs[0]["childSpecs"] = (datetime.now(timezone.utc) - timedelta(minutes=61)).isoformat(timespec="seconds")
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.assertEqual([j["id"] for j in s.held_work("ic", self.jobs())], ["002-big", "003-small"])
+        got, spawn = self.claim()
+        self.assertEqual((got, self.started(spawn)), (True, [("003-small", "start", True)]))
 
     def test_idle_claim_claims_the_cpu_first_head(self):
         """Job 1222: a light waiting child at the head of cpu_first (a current vm_pressure hold) is claimed even when

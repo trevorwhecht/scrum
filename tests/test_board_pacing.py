@@ -185,6 +185,8 @@ class ReadyPacingTest(unittest.TestCase):
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "backlog.md").write_text("".join(f"- [ ] item {i}\n" for i in range(n)))
         out = board.cmd_runall_start(self.root)
+        with board.locked_board(self.root) as b:  # past BigBoy step 2, as `ready --specs-done` leaves it (job 1275)
+            board.find(b, out["id"]).pop("childSpecs", None)
         for i, k in enumerate(out["children"]):
             self.spec(k, f"src/{i}.py")
         return out["id"], out["children"]
@@ -198,6 +200,8 @@ class ReadyPacingTest(unittest.TestCase):
         (self.root / "jobs" / parent / "plan.md").write_text(
             "PLAN: READY\n# Big\n## Goal\nShip it.\n## Done when\n1. Works.\n## Tickets\n" + tickets + "## Assumptions\n- none\n")
         kids = board.cmd_plan_apply(self.root, parent)["children"]
+        with board.locked_board(self.root) as b:  # past BigBoy step 2, as `ready --specs-done` leaves it (job 1275)
+            board.find(b, parent).pop("childSpecs", None)
         for i, k in enumerate(kids):
             self.spec(k, f"src/{i}.py")
         return parent, kids[:-1]  # the last (exposure) child depends on all the others
@@ -601,6 +605,10 @@ class SpawnAccountTest(AccountEnv):
         self.root = Path(self.tmp.name) / "scrum"
         self.root.mkdir()
         self.job = board.cmd_new(self.root, "x")
+        # job 1275: spawn's live-session scan runs ps through subprocess.run, which a mocked Popen breaks
+        alive = mock.patch.object(board, "session_alive_fn", return_value=lambda job: False)
+        alive.start()
+        self.addCleanup(alive.stop)
 
     def spawn(self, job_id=None, environ=None):
         with mock.patch.object(board.subprocess, "Popen") as popen, mock.patch.dict(os.environ, environ or {}):
