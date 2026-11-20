@@ -312,7 +312,9 @@ class ContractTest(unittest.TestCase):
             "- If Codex errors, refuses, runs out of quota, times out, or writes no `codex-review.md`, "
             "write `codex: skipped — <reason>` under Notes.\n"
             "- When Codex wrote no `codex-review.md`, the `<reason>` quotes the exit code and the last error "
-            "line from the background command's output, never just `invalid-artifact`. A skip is never a pass, "
+            "line from the background command's output, never just `invalid-artifact`; when that last error line "
+            "contains `401` or `Unauthorized`, write `codex: skipped — codex auth failed (401): run codex login` "
+            "followed by that quoted line. A skip is never a pass, "
             "and it never fails the round on its own: judge the round on your own review.", text)
 
     def test_code_reviewer_codex_path_includes_homebrew(self):
