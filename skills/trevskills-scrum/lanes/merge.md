@@ -7,9 +7,9 @@
    - No PR, or reusing one: the title is the decision.md `Merge summary` title. If there is no Merge summary (a human-approved ESCALATE), use the job title and the spec's acceptance criteria as bullets. Either way write the body to `BODY=$F/jobs/$ID/pr-body.txt`, which is also used in step 6. The body is the Merge summary bullets, then `Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/$ID/` (for a fast-lane job, the line in **Fast lane** step 3 instead; for a Clean round, the `Clean round:` line in **Review** step 5 instead), then a line `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Create it with `gh pr create --base "$DEFAULT" --head "scrum/$ID" --title "<Merge summary title>" --body-file "$BODY"`.
 
    Then `B set $ID pr=<url>`.
-4. **Checks.** Run this in the foreground, with a 600000 ms Bash timeout, each `gh` call bounded by `perl -e 'alarm 590; exec @ARGV'` (macOS has no `timeout`); when `exit=142` (the alarm fired), run the same command again. Never background it and `tail` it:
+4. **Checks.** Run this in the foreground, with a 600000 ms Bash timeout, each `gh` call bounded by `perl -e 'alarm 570; exec @ARGV'` (macOS has no `timeout`); when `exit=142` (the alarm fired), run the same command again. Never background it and `tail` it:
    ```bash
-   for i in 1 2 3 4; do out=$(perl -e 'alarm 590; exec @ARGV' gh pr checks "scrum/$ID" --watch --fail-fast --interval 15 2>&1); code=$?
+   for i in 1 2 3 4; do out=$(perl -e 'alarm 570; exec @ARGV' gh pr checks "scrum/$ID" --watch --fail-fast --interval 15 2>&1); code=$?
      echo "$out" | grep -q "no checks reported" || break; sleep 20; done; echo "exit=$code"; echo "$out" | tail -40
    ```
    - `exit=0`: continue to step 5.

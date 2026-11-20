@@ -3932,7 +3932,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for p in sorted((SKILL_DIR / "lanes").glob("*.md")) + [SKILL_DIR / "SKILL.md"]:
             self.assertNotRegex(p.read_text(), r"scrum-[a-z-]+[^\n]{0,80}in the background", p.name)
         merge = self.lane("merge")
-        self.assertIn("alarm 590; exec @ARGV", merge)
+        self.assertIn("alarm 570; exec @ARGV", merge)
         self.assertNotIn("timeout 590", merge)
         self.assertIn("exit=142", merge)
         self.assertIn("for i in 1 2 3 4 5 6; do", merge)
