@@ -7442,9 +7442,66 @@ print("stub err", file=sys.stderr)
         self.assertEqual(run("001-std")[1]["enabledPlugins"], {
             "cache-tax@claude-code-mods": False, "new@mkt": False, "claude-seo@seo": False})
 
+    def test_spawn_refuses_job_with_live_session(self):
+        """Job 1275: a job on the board whose session reads alive launches nothing and raises; a dead one launches as
+        before; a job not on the board (run-all, digest, weekly) is never checked."""
+        job_id = "911-child"
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": job_id, "stage": "spec", "pid": 4242}]}))
+        (self.root / "jobs" / job_id).mkdir(parents=True)
+        with mock.patch.object(board, "session_alive_fn", return_value=lambda job: True):
+            with self.assertRaises(SystemExit) as cm:
+                board.spawn(self.root, job_id, "start")
+            self.assertEqual(str(cm.exception), "job 911-child already has a live session (pid 4242)")
+            out = run_board("--dir", str(self.root), "spawn", job_id, "start")
+            self.assertEqual((out.returncode, out.stdout, out.stderr.strip()),
+                             (1, "", "job 911-child already has a live session (pid 4242)"))
+            self.assertFalse((self.root / "runs").exists(), "nothing launched: no run log")
+            self.assertFalse(self.out.exists(), "nothing launched: the stub never ran")
+            self.assertEqual(board.find(board.read_board(self.root), job_id), {"id": job_id, "stage": "spec", "pid": 4242})
+            proc, _ = board.spawn(self.root, "run-all", "run-all", "/trevskills-scrum run-all")  # not on the board
+            proc.wait(timeout=10)
+        self.assertEqual(self.records()[0]["argv"][:2], ["-p", "/trevskills-scrum run-all"])
+        with mock.patch.object(board, "session_alive_fn", return_value=lambda job: False):
+            proc, log = board.spawn(self.root, job_id, "start")
+            proc.wait(timeout=10)
+        self.assertEqual(self.records(2)[1]["argv"][:2], ["-p", f"/trevskills-scrum start {job_id}"])
+        job = board.find(board.read_board(self.root), job_id)
+        self.assertEqual((job["runlog"], job["pid"]), (log, proc.pid))
+
+    def test_spawn_lets_the_jobs_own_session_hand_off(self):
+        """Job 1275: `B spawn <id> start` run from the job's own session (a lilguy hand-off from Trevor's chat, a
+        cloud-home schema auto-migrate) is not refused for that session; any other live claude line for it still is."""
+        job_id = "912-handoff"
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": job_id, "stage": "spec", "pid": 5151}]}))
+        (self.root / "jobs" / job_id).mkdir(parents=True)
+        real_run = subprocess.run
+
+        def ps(lines):
+            def run(argv, *a, **k):
+                if list(argv[:2]) == ["ps", "-axo"]:
+                    return subprocess.CompletedProcess(argv, 0, stdout=lines, stderr="")
+                return real_run(argv, *a, **k)
+            return run
+        mine = "5151 ttys003 claude\n"
+        other = f"6161 ?? claude -p /trevskills-scrum start {job_id}\n"
+        with mock.patch.object(board, "caller_claude_pid", return_value=5151):
+            with mock.patch.object(board.subprocess, "run", side_effect=ps(mine + other)):
+                out = run_board("--dir", str(self.root), "spawn", job_id, "start")
+            self.assertEqual((out.returncode, out.stderr.strip()),  # its recorded pid is the caller: not the live one
+                             (1, f"job {job_id} already has a live session (pid unknown)"))
+            self.assertFalse(self.out.exists())
+            with mock.patch.object(board.subprocess, "run", side_effect=ps(mine)):
+                out = run_board("--dir", str(self.root), "spawn", job_id, "start")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.records()[0]["argv"][:2], ["-p", f"/trevskills-scrum start {job_id}"])
+        self.assertEqual(board.find(board.read_board(self.root), job_id)["pid"], json.loads(out.stdout)["pid"])
+
     def test_spawn_sets_runlog(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["tty=ttys004"])
+        alive = mock.patch.object(board, "session_alive_fn", return_value=lambda job: False)  # never this Mac's ttys004
+        alive.start()
+        self.addCleanup(alive.stop)
         proc, log = board.spawn(self.root, job_id, "resume")
         proc.wait(timeout=10)
         job = json.loads((self.root / "board.json").read_text())["jobs"][0]
