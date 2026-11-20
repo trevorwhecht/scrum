@@ -10973,6 +10973,413 @@ class DigestTrevorTest(unittest.TestCase):
         self.assertEqual(kept, items[:len(kept)])
 
 
+class DigestQuestionsTest(unittest.TestCase):
+    """board.py digest-questions: digests/<NNN>/questions.md's ## Repeated questions and ## Stops from questions.log."""
+
+    HEADER = ["| Cause | Count | Jobs | Picks | Automate |", "|---|---|---|---|---|"]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve() / "scrum"
+        self.d = self.root / "digests" / "138"
+        self.d.mkdir(parents=True)
+        self.n = 0
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def at(self, minutes):
+        """The ISO date `minutes` after 2026-11-15T00:00:00+00:00."""
+        return (datetime(2026, 11, 15, tzinfo=timezone.utc) + timedelta(minutes=minutes)).isoformat()
+
+    def stamp(self):
+        """The next line's date: one minute after the last, from 2026-11-15T00:00:00+00:00."""
+        self.n += 1
+        return self.at(self.n)
+
+    def ask(self, job, question, date=None, **extra):
+        return {"date": date or self.stamp(), "project": "p", "job": job, "kind": "ask", "question": question,
+                "reason": question, **extra}
+
+    def pick(self, job, label, date=None):
+        return {"date": date or self.stamp(), "job": job, "pick": label}
+
+    def stop(self, job, kind, reason, date=None, **extra):
+        return {"date": date or self.stamp(), "project": "p", "job": job, "kind": kind, "reason": reason, **extra}
+
+    def write(self, *lines, raw=""):
+        (self.root / "questions.log").write_text("".join(json.dumps(l) + "\n" for l in lines) + raw)
+
+    def since(self, value):
+        (self.d / "trevor.md").write_text(f"# Trevor: digest 138\nSince: {value}\n## Chat\nNone\n")
+
+    def runs(self, *names):
+        (self.root / "runs").mkdir(exist_ok=True)
+        for name in names:
+            (self.root / "runs" / name).write_text("")
+
+    def run_q(self):
+        out = run_board("--dir", str(self.root), "digest-questions", "138")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout), (self.d / "questions.md").read_text()
+
+    def section(self, text, heading):
+        lines = text.splitlines()
+        start = lines.index(heading) + 1
+        end = next((i for i in range(start, len(lines)) if lines[i].startswith("## ")), len(lines))
+        return lines[start:end]
+
+    def test_cli_writes_file_and_counts(self):
+        self.since("2026-11-15T00:00:00+00:00")
+        self.write(self.ask("101-a", "Ship it?"), self.pick("101-a", "Yes"),
+                   self.ask("102-b", "Ship it?"), self.pick("102-b", "Yes"),
+                   self.ask("103-c", "Ship it?"), self.pick("103-c", " yes "),
+                   self.stop("104-d", "stall", "stalled: waiting on the E2E queue"),
+                   self.stop("105-e", "stall", "stalled: waiting on the E2E queue"))
+        self.runs("20261115-001000-resume-104-d.log", "20261115-001000-resume-105-e.log")
+        got, text = self.run_q()
+        self.assertEqual(got, {"id": "138", "questions": 1, "stops": 2})
+        self.assertEqual(text, "# Questions: digest 138\n"
+                               "Since: 2026-11-15T00:00:00+00:00\n"
+                               "Window: 2026-11-08T00:08:00+00:00 to 2026-11-15T00:08:00+00:00\n"
+                               "## Repeated questions\n"
+                               '- 3 × "ship it?" — picks: yes 3 — jobs: 101-a, 102-b, 103-c — DEFAULT: yes (unanimous)\n'
+                               "## Stops\n"
+                               "| Cause | Count | Jobs | Picks | Automate |\n"
+                               "|---|---|---|---|---|\n"
+                               "| Ship it? | 3 | 101-a, 102-b, 103-c | yes 3 | yes |\n"
+                               "| stalled: waiting on the E2E queue | 2 | 104-d, 105-e | resume 2 | yes |\n")
+
+    def test_rerun_identical(self):
+        self.since("2026-11-15T00:00:00+00:00")
+        lines = []
+        for i, job in enumerate(("101-a", "102-b", "103-c", "104-d", "105-e", "106-f")):
+            lines += [self.ask(job, "Pick a color"), self.pick(job, ("Red", "Blue")[i % 2]),
+                      self.ask(job, "Ship it?"), self.stop(job, "stall", f"stalled: {'xyz'[i % 3]}"),
+                      self.stop(job, "machine", "waiting: swap used 30.6% of RAM (> 25%)", auto=True)]
+        self.write(*lines)
+        self.runs("20261115-010000-resume-101-a.log", "20261115-010000-resume-104-d.log")
+        first = self.run_q()
+        self.assertEqual(self.run_q(), first)
+        self.assertEqual(first[0], {"id": "138", "questions": 2, "stops": 6})
+
+    def test_unknown_digest_refused(self):
+        self.write(self.ask("101-a", "Ship it?"))
+        for name in ("139", "1", "1388", "../x"):
+            with self.subTest(name), self.assertRaises(SystemExit) as cm:
+                board.cmd_digest_questions(self.root, name)
+            self.assertEqual(str(cm.exception.code), f"no digest '{name}'")
+        out = run_board("--dir", str(self.root), "digest-questions", "139")
+        self.assertEqual((out.returncode, out.stderr.strip()), (1, "no digest '139'"))
+        self.assertEqual(list(self.root.rglob("questions.md")), [])
+
+    def test_usage_lists_command(self):
+        self.assertIn("board.py digest-questions <NNN>", board.__doc__)
+
+    def test_missing_log_and_runs(self):
+        want = ("# Questions: digest 138\nSince: none\nWindow: none\n## Repeated questions\nNone\n## Stops\nNone\n")
+        got, text = self.run_q()
+        self.assertEqual((got, text), ({"id": "138", "questions": 0, "stops": 0}, want))
+        (self.root / "questions.log").write_text("")
+        got, text = self.run_q()
+        self.assertEqual((got, text), ({"id": "138", "questions": 0, "stops": 0}, want))
+
+    def test_seven_day_cutoff(self):
+        old, edge, newest = "2026-11-07T23:59:59+00:00", "2026-11-08T00:00:00+00:00", "2026-11-15T00:00:00+00:00"
+        lines = []
+        for job in ("101-a", "102-b", "103-c"):
+            lines += [self.ask(job, "Old question?", date=old), self.pick(job, "Yes", date=old),
+                      self.stop(job, "stall", "stalled: old", date=old),
+                      self.ask(job, "Edge question?", date=edge),
+                      {"job": job, "kind": "ask", "question": "Undated question?"},
+                      self.ask(job, "Bad date question?", date="yesterday"),
+                      self.ask(job, "Number date question?", date=20261115)]
+        lines.append(self.ask("104-d", "Newest?", date=newest))
+        self.write(*lines, raw='not json\n[{"date": "2026-12-30T00:00:00+00:00", "job": "105-e", "question": "List?"}]\n'
+                               '"2026-12-30T00:00:00+00:00"\n')
+        got, text = self.run_q()
+        self.assertEqual(text, "# Questions: digest 138\n"
+                               "Since: none\n"
+                               "Window: 2026-11-08T00:00:00+00:00 to 2026-11-15T00:00:00+00:00\n"
+                               "## Repeated questions\n"
+                               '- 3 × "edge question?" — picks: unanswered 3 — jobs: 101-a, 102-b, 103-c\n'
+                               "## Stops\n"
+                               "| Cause | Count | Jobs | Picks | Automate |\n"
+                               "|---|---|---|---|---|\n"
+                               "| Edge question? | 3 | 101-a, 102-b, 103-c | unanswered 3 | no |\n"
+                               "| Newest? | 1 | 104-d | unanswered 1 | no |\n")
+        self.assertEqual(got, {"id": "138", "questions": 1, "stops": 2})
+
+    def test_since_from_trevor_md(self):
+        self.since(self.at(10))
+        self.write(*(self.ask(job, question, date=self.at(m))
+                     for question, minutes in (("Before since?", (1, 2, 3)), ("At since?", (4, 5, 10)),
+                                               ("One after since?", (6, 7, 11)))
+                     for job, m in zip(("101-a", "102-b", "103-c"), minutes)))
+        got, text = self.run_q()
+        self.assertEqual(text.splitlines()[1], "Since: 2026-11-15T00:10:00+00:00")
+        self.assertEqual(self.section(text, "## Repeated questions"),
+                         ['- 3 × "one after since?" — picks: unanswered 3 — jobs: 101-a, 102-b, 103-c'])
+        self.assertEqual(got["questions"], 1)
+
+    def test_since_missing_any_date_counts(self):
+        self.write(*(self.ask(job, "Ship it?", date="2026-11-01T00:00:00+00:00") for job in ("101-a", "102-b", "103-c")),
+                   *(self.stop(job, "stall", "stalled: x", date="2026-11-01T00:00:00+00:00") for job in ("101-a", "102-b")))
+        self.runs("20261102-000000-resume-101-a.log", "20261102-000000-resume-102-b.log")
+        want = ["# Questions: digest 138", "Since: none", "Window: 2026-10-25T00:00:00+00:00 to 2026-11-01T00:00:00+00:00",
+                "## Repeated questions", '- 3 × "ship it?" — picks: unanswered 3 — jobs: 101-a, 102-b, 103-c',
+                "## Stops", *self.HEADER, "| Ship it? | 3 | 101-a, 102-b, 103-c | resume 2, unanswered 1 | no |",
+                "| stalled: x | 2 | 101-a, 102-b | resume 2 | yes |"]
+        for trevor in (None, "# Trevor: digest 138\n## Chat\nNone\n", "# Trevor: digest 138\nSince: the start\n",
+                       "# Trevor: digest 138\nSince:\n"):
+            with self.subTest(trevor):
+                if trevor is not None:
+                    (self.d / "trevor.md").write_text(trevor)
+                self.assertEqual(self.run_q()[1].splitlines(), want)
+
+    def test_question_norm(self):
+        self.assertEqual(board.question_norm("Merge 1229-referral-link now? See src/app/page.tsx and board.py at "
+                                             "abc1234def, 3 tries"), "merge now? see and at , tries")
+        self.assertEqual(board.question_norm("Branch scrum/1279-foo is behind origin/main"), "branch is behind")
+        self.assertEqual(board.question_norm("Fix 1229-referral-link first"), "fix first")  # ids before digits
+        self.assertEqual(board.question_norm("Commit 1a2b3c4d broke it"), "commit broke it")  # hashes before digits
+        self.assertEqual(board.question_norm("Edit notes.md and v2.json"), "edit and")
+        self.assertEqual(board.question_norm("Is deadbeefcafe a hash?"), "is deadbeefcafe a hash?")  # no digit
+        self.assertEqual(board.question_norm("  Job 410 waits\n 30 s  "), "job waits s")
+
+    def test_repeated_listing_and_default(self):
+        lines = []
+        for job, label in (("201-a", "OK"), ("202-b", None), ("203-c", "ok"), ("204-d", None), ("205-e", " Ok ")):
+            lines += [self.ask(job, "Go ahead?")] + ([self.pick(job, label)] if label else [])
+        for job, label in (("101-a", "Try again"), ("102-b", "Close"), ("103-c", "try again"), ("104-d", "Try Again")):
+            lines += [self.ask(job, f"Retry the build for {job}?"), self.pick(job, label)]
+        for job, label in (("106-f", "Red"), ("107-g", "Blue"), ("106-f", "Blue"), ("108-h", "red")):
+            lines += [self.ask(job, "Pick a color"), self.pick(job, label)]
+        for job in ("105-e", "109-i", "105-e"):
+            lines += [self.ask(job, "Ship it?"), self.pick(job, "Yes")]
+        lines += [self.ask("110-j", "Wait for review?"), self.ask("111-k", "Wait for review?"),
+                  self.ask("112-l", "Wait for review?"), self.ask("113-m", "Only twice?"), self.ask("114-n", "Only twice?")]
+        self.write(*lines)
+        got, text = self.run_q()
+        self.assertEqual(self.section(text, "## Repeated questions"), [
+            '- 5 × "go ahead?" — picks: ok 3, unanswered 2 — jobs: 201-a, 202-b, 203-c, 204-d, 205-e — DEFAULT: ok',
+            '- 4 × "pick a color" — picks: blue 2, red 2 — jobs: 106-f, 107-g, 108-h',
+            '- 4 × "retry the build for ?" — picks: try again 3, close 1 — jobs: 101-a, 102-b, 103-c, 104-d '
+            '— DEFAULT: try again',
+            '- 3 × "ship it?" — picks: yes 3 — jobs: 105-e, 109-i — DEFAULT: yes (unanimous)',
+            '- 3 × "wait for review?" — picks: unanswered 3 — jobs: 110-j, 111-k, 112-l'])
+        self.assertEqual(got["questions"], 5)
+
+    def test_repeated_skips(self):
+        tb = board.TERMINAL_BATCH_QUESTION
+        lines = []
+        for job in ("101-a", "102-b", "103-c"):
+            lines += [self.ask(job, "Auto question?", auto=True),
+                      self.stop(job, "stall", "stalled: waiting on the E2E queue", question="waiting on the E2E queue"),
+                      self.stop(job, "machine", "waiting: CPU load", question="waiting on CPU load"),
+                      self.stop(job, "refused", "can't resume yet: sibling 410-x", question="Resume refused?"),
+                      self.ask(f"1{job}-terminal-batch", tb), self.pick(f"1{job}-terminal-batch", "Run it in a Terminal window"),
+                      self.ask(job, "Deploy now?"), self.ask(job, tb), self.pick(job, "Run it in a Terminal window")]
+        self.write(*lines)
+        got, text = self.run_q()
+        self.assertEqual(self.section(text, "## Repeated questions"),
+                         ['- 3 × "deploy now?" — picks: unanswered 3 — jobs: 101-a, 102-b, 103-c'])
+        self.assertEqual(got["questions"], 1)
+
+    def test_pick_joining_different_question_first(self):
+        self.write(self.ask("101-a", "Ship it?"), self.ask("101-a", "Merge it?"), self.pick("101-a", "Yes"),
+                   self.ask("102-b", "Ship it?"), self.ask("102-b", "Ship  it?"), self.pick("102-b", "No"),
+                   self.ask("103-c", "Ship it?"), self.pick("104-d", "Yes"),
+                   self.pick("107-g", "Yes"), self.ask("107-g", "Ship it?"),
+                   self.ask("105-e", "Merge it?"), self.pick("105-e", "Yes"),
+                   self.ask("106-f", "Merge it?"), self.pick("106-f", "Yes"))
+        _, text = self.run_q()
+        self.assertEqual(self.section(text, "## Repeated questions"), [
+            '- 5 × "ship it?" — picks: unanswered 3, no 2 — jobs: 101-a, 102-b, 103-c, 107-g',
+            '- 3 × "merge it?" — picks: yes 3 — jobs: 101-a, 105-e, 106-f — DEFAULT: yes (unanimous)'])
+
+    def test_stop_cause_examples(self):
+        for text, want in (("waiting: swap used 30.6% of RAM (> 25%)", "waiting: swap used"),
+                           ("Hard stop: agent rules — this change edits agents/scrum-builder.md", "Hard stop: agent rules"),
+                           ("can't resume yet: sibling 410-x", "cannot resume yet: sibling"),
+                           ("stalled: waiting on the E2E queue", "stalled: waiting on the E2E queue"),
+                           ("stalled in build: no board or job-dir change for 2 h", "stalled in build: no board or"),
+                           ("Uncommitted change. Commit it first", "Uncommitted change"),
+                           ("main checkout is on dev, not main", "main checkout is on dev"),
+                           ("spec writer too big; split it", "spec writer too big"),
+                           ("bigboy review GAPS (3 found)", "bigboy review GAPS"),
+                           ("blocked on sibling: 1229-referral-link", "blocked on sibling"),
+                           ("one two three four five six seven", "one two three four five six"),
+                           ("  :: ", "(no reason)"), ("", "(no reason)")):
+            with self.subTest(text):
+                self.assertEqual(board.stop_cause(text), want)
+
+    def test_unblock_and_terminal_batch_not_stops(self):
+        tb = board.TERMINAL_BATCH_QUESTION
+        lines = []
+        for job in ("301-u", "302-v"):
+            for kind in board.UNBLOCK_KINDS:
+                lines.append({"date": self.stamp(), "job": job, "kind": kind, "unblock": 1,
+                              "question": "blocked: wrong project. This job edits board.py"})
+            lines.append({"date": self.stamp(), "job": job, "kind": "blocked", "verdict": "fixable", "blocker": "x"})
+        for job in ("1450-terminal-batch-project-claude-edits", "1453-terminal-batch-project-claude-edits"):
+            lines += [{"date": self.stamp(), "job": job, "question": tb}, self.pick(job, "Run it in a Terminal window")]
+        lines += [self.ask("1563-terminal-batch-project-claude-edits", tb, auto=True),
+                  {"date": self.stamp(), "job": "401-a", "question": "Old style question?"},
+                  {"date": self.stamp(), "job": "401-a", "kind": "note", "action": "rework", "note": "redo it"},
+                  self.stop("402-b", "stall", "Stalled: waiting on the E2E queue"),
+                  self.stop("403-c", "stall", "stalled: waiting on the E2E queue"),
+                  self.stop("404-d", "stall", "stalled: waiting on the e2e queue"),
+                  self.stop("405-e", "stall", "stalled: waiting on the E2E queue"),
+                  self.ask("405-e", tb), self.pick("405-e", "Run it in a Terminal window"),
+                  self.stop("402-b", "stall", "stalled: waiting on the E2E queue"),
+                  self.stop("406-f", "bigboy", "bigboy review GAPS (3 found)"),
+                  self.stop("407-g", "machine", "waiting: swap used 30.6% of RAM (> 25%)", auto=True),
+                  self.stop("408-h", "machine", "waiting: swap used 41.2% of RAM (> 25%)", auto=True),
+                  self.stop("409-i", "refused", "can't resume yet: sibling 410-x"),
+                  self.stop("411-k", "ask", None, question="Deploy now?"),
+                  self.stop("412-l", "ask", "", question="Fallback question?"),
+                  self.pick("413-m", "Yes")]
+        self.write(*lines)
+        got, text = self.run_q()
+        self.assertEqual(self.section(text, "## Stops"), self.HEADER + [
+            "| Stalled: waiting on the E2E queue | 5 | 404-d, 405-e, 402-b | unanswered 5 | no |",
+            "| waiting: swap used | 2 | 407-g, 408-h | unanswered 2 | no |",
+            "| Deploy now? | 1 | 411-k | unanswered 1 | no |",
+            "| Fallback question? | 1 | 412-l | unanswered 1 | no |",
+            "| Old style question? | 1 | 401-a | unanswered 1 | no |",
+            "| bigboy review GAPS | 1 | 406-f | unanswered 1 | no |",
+            "| cannot resume yet: sibling | 1 | 409-i | unanswered 1 | no |"])
+        self.assertEqual(got["stops"], 7)
+
+    def test_resume_fallback_from_run_logs(self):
+        self.write(self.stop("501-a", "stall", "stalled: resume run later", date=self.at(1)),
+                   self.stop("502-b", "stall", "stalled: resume run same second", date=self.at(2)),
+                   self.stop("503-c", "stall", "stalled: resume run earlier", date=self.at(3)),
+                   self.stop("504-d", "stall", "stalled: build run only", date=self.at(4)),
+                   self.stop("505-e", "stall", "stalled: picked before the resume", date=self.at(5)),
+                   self.pick("505-e", "Abort", date=self.at(6)),
+                   self.stop("506-f", "stall", "stalled: resume run weeks later", date=self.at(7)),
+                   self.stop("507-g", "stall", "stalled: bad run names", date=self.at(8)),
+                   self.stop("508-h", "stall", "stalled: another stop first", date=self.at(9)),
+                   self.stop("508-h", "machine", "waiting: CPU load 512%", date=self.at(10)),
+                   self.pick("508-h", "Resume", date=self.at(11)),
+                   self.stop("509-i", "stall", "stalled: same cause twice", date=self.at(12)),
+                   self.stop("509-i", "stall", "Stalled: same cause twice", date=self.at(13)),
+                   self.pick("509-i", " Retry ", date=self.at(14)))
+        self.runs("20261115-000200-resume-501-a.log", "20261115-000200-resume-502-b.log",
+                  "20261115-000100-resume-503-c.log", "20261115-000500-build-504-d.log",
+                  "20261115-001000-resume-505-e.log", "20261201-000000-resume-506-f.log",
+                  "2026111-000000-resume-507-g.log", "20261399-000000-resume-507-g.log", "20261115-001000-resume-507-g.txt")
+        _, text = self.run_q()
+        self.assertEqual(self.section(text, "## Stops"), self.HEADER + [
+            "| stalled: same cause twice | 2 | 509-i | retry 2 | yes |",
+            "| stalled: another stop first | 1 | 508-h | unanswered 1 | no |",
+            "| stalled: bad run names | 1 | 507-g | unanswered 1 | no |",
+            "| stalled: build run only | 1 | 504-d | unanswered 1 | no |",
+            "| stalled: picked before the resume | 1 | 505-e | abort 1 | no |",
+            "| stalled: resume run earlier | 1 | 503-c | unanswered 1 | no |",
+            "| stalled: resume run later | 1 | 501-a | resume 1 | no |",
+            "| stalled: resume run same second | 1 | 502-b | unanswered 1 | no |",
+            "| stalled: resume run weeks later | 1 | 506-f | resume 1 | no |",
+            "| waiting: CPU load | 1 | 508-h | resume 1 | no |"])
+
+    def test_automate_rules(self):
+        lines = [self.stop("601-a", "ask", "Only once?"), self.pick("601-a", "Go")]
+        for job, label in (("602-b", "OK"), ("603-c", "ok"), ("604-d", None)):
+            lines += [self.stop(job, "ask", "Some unanswered?")] + ([self.pick(job, label)] if label else [])
+        for job, label in (("605-e", "Red"), ("606-f", "Blue")):
+            lines += [self.stop(job, "ask", "Mixed picks?"), self.pick(job, label)]
+        for job, label in (("607-g", "Go"), ("608-h", " go ")):
+            lines += [self.stop(job, "ask", "Same pick?"), self.pick(job, label)]
+        for job in ("609-i", "610-j"):
+            lines += [self.stop(job, "refused", "can't resume yet: sibling 410-x"), self.pick(job, "Resume")]
+        lines += [self.stop("611-k", "refused", "Refused then asked 12"), self.pick("611-k", "Resume"),
+                  self.stop("612-l", "ask", "refused then asked 13"), self.pick("612-l", "Resume"),
+                  self.stop("613-m", "machine", "waiting: swap used 30.6% of RAM (> 25%)", auto=True),
+                  self.stop("614-n", "machine", "waiting: swap used 31.0% of RAM (> 25%)", auto=True),
+                  self.stop("615-o", "machine", "waiting: CPU load 512%", auto=True),
+                  self.stop("616-p", "machine", "waiting: CPU load 640%")]
+        self.write(*lines)
+        self.runs(*(f"20261116-000000-resume-{job}.log" for job in ("613-m", "614-n", "615-o", "616-p")))
+        _, text = self.run_q()
+        self.assertEqual(self.section(text, "## Stops"), self.HEADER + [
+            "| Some unanswered? | 3 | 602-b, 603-c, 604-d | ok 2, unanswered 1 | no |",
+            "| Mixed picks? | 2 | 605-e, 606-f | blue 1, red 1 | no |",
+            "| Refused then asked | 2 | 611-k, 612-l | resume 2 | yes |",
+            "| Same pick? | 2 | 607-g, 608-h | go 2 | yes |",
+            "| cannot resume yet: sibling | 2 | 609-i, 610-j | resume 2 | no |",
+            "| waiting: CPU load | 2 | 615-o, 616-p | resume 2 | yes |",
+            "| waiting: swap used | 2 | 613-m, 614-n | resume 2 | no |",
+            "| Only once? | 1 | 601-a | go 1 | no |"])
+
+    def test_automate_needs_stop_after_since(self):
+        self.since(self.at(10))
+        self.write(self.stop("701-a", "stall", "stalled: before since", date=self.at(1)),
+                   self.stop("702-b", "stall", "stalled: before since", date=self.at(2)),
+                   self.stop("703-c", "stall", "stalled: at since", date=self.at(5)),
+                   self.stop("704-d", "stall", "stalled: at since", date=self.at(10)),
+                   self.stop("705-e", "stall", "stalled: one after since", date=self.at(6)),
+                   self.stop("706-f", "stall", "stalled: one after since", date=self.at(11)))
+        self.runs(*(f"20261115-003000-resume-{n}.log" for n in ("701-a", "702-b", "703-c", "704-d", "705-e", "706-f")))
+        _, text = self.run_q()
+        self.assertEqual(self.section(text, "## Stops"), self.HEADER + [
+            "| stalled: at since | 2 | 703-c, 704-d | resume 2 | no |",
+            "| stalled: before since | 2 | 701-a, 702-b | resume 2 | no |",
+            "| stalled: one after since | 2 | 705-e, 706-f | resume 2 | yes |"])
+
+    def test_digest_138_regression(self):
+        """Digest 138: a stale "wrong project" question listed 9 times, `blocked` unblock lines in a Stops row, and the
+        Terminal batch row marked Automate yes, though none of those asks came after Since."""
+        self.since("2026-11-20T05:24:26+00:00")
+        wrong = ("wrong project: this job edits the scrum tool itself (board.py and its tests), which lives in the "
+                 "trevskills-scrum repo, not in onewitharts")
+        lines = []
+        for job, date in (("1108-a", "2026-11-14T06:20:06"), ("1108-a", "2026-11-14T06:30:00"),
+                          ("1126-b", "2026-11-14T09:02:05"), ("1126-b", "2026-11-14T09:30:00"),
+                          ("1131-c", "2026-11-14T12:51:25"), ("1134-d", "2026-11-14T16:46:13"),
+                          ("1153-e", "2026-11-15T10:00:00"), ("1222-f", "2026-11-16T10:00:00"),
+                          ("1301-g", "2026-11-17T10:00:00")):
+            lines += [{"date": f"{date}+00:00", "project": "onewitharts", "job": job, "question": wrong},
+                      self.pick(job, "Close it here", date=f"{date[:-2]}59+00:00")]
+        for job, date in (("1450-terminal-batch-project-claude-edits", "2026-11-18T12:17:21"),
+                          ("1453-terminal-batch-project-claude-edits", "2026-11-18T19:36:25"),
+                          ("1563-terminal-batch-project-claude-edits", "2026-11-18T20:22:19")):
+            lines += [{"date": f"{date}+00:00", "project": "onewitharts", "job": job,
+                       "question": board.TERMINAL_BATCH_QUESTION},
+                      self.pick(job, "Run it in a Terminal window", date=f"{date[:-2]}59+00:00")]
+        for job, date in (("1756-blog-draft", "2026-11-20T07:48:24"), ("1757-blog-draft", "2026-11-20T07:50:00")):
+            lines.append({"date": f"{date}+00:00", "project": "onewitharts", "job": job, "kind": "blocked",
+                          "unblock": 1, "question": "blocked: this job needs a blog draft created on the live site"})
+        lines += [self.stop("1770-a", "machine", "waiting: swap used 30.6% of RAM (> 25%)",
+                            date="2026-11-20T06:00:00+00:00"),
+                  self.stop("1771-b", "machine", "waiting: swap used 33.1% of RAM (> 25%)",
+                            date="2026-11-20T06:10:00+00:00")]
+        for job, minute in (("1780-a", 10), ("1781-b", 20), ("1782-c", 30)):
+            lines += [self.ask(job, "Merge with the failing check?", date=f"2026-11-20T07:{minute}:00+00:00"),
+                      self.pick(job, "Merge anyway", date=f"2026-11-20T07:{minute}:30+00:00")]
+        lines.append({"date": "2026-11-20T08:00:00+00:00", "job": "1790-x", "kind": "note", "note": "later"})
+        self.write(*lines)
+        self.runs("20261120-070000-resume-1770-a.log", "20261120-070000-resume-1771-b.log")
+        got, text = self.run_q()
+        self.assertEqual(text, "# Questions: digest 138\n"
+                               "Since: 2026-11-20T05:24:26+00:00\n"
+                               "Window: 2026-11-13T08:00:00+00:00 to 2026-11-20T08:00:00+00:00\n"
+                               "## Repeated questions\n"
+                               '- 3 × "merge with the failing check?" — picks: merge anyway 3 — jobs: 1780-a, '
+                               "1781-b, 1782-c — DEFAULT: merge anyway (unanimous)\n"
+                               "## Stops\n"
+                               "| Cause | Count | Jobs | Picks | Automate |\n"
+                               "|---|---|---|---|---|\n"
+                               "| wrong project: this job edits the | 9 | 1153-e, 1222-f, 1301-g | close it here 9 | no |\n"
+                               "| Merge with the failing check? | 3 | 1780-a, 1781-b, 1782-c | merge anyway 3 | yes |\n"
+                               "| waiting: swap used | 2 | 1770-a, 1771-b | resume 2 | yes |\n")
+        self.assertNotIn("wrong project", "\n".join(self.section(text, "## Repeated questions")))
+        self.assertNotIn("project .claude edits", text)
+        self.assertFalse([l for l in self.section(text, "## Stops") if l.startswith("| blocked")])
+        self.assertEqual(got, {"id": "138", "questions": 1, "stops": 3})
+
+
 class PipelineFitTest(unittest.TestCase):
     """board.py pipeline-fit: per-job lane, agents, diff size, verdicts and fix rounds for one digest."""
 
