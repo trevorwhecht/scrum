@@ -1973,6 +1973,64 @@ class ContractTest(unittest.TestCase):
         for phrase in ("## Trevor asked", "`fixed by: none`", "Trevor asked:", "lowest ids", "**Backlog fallback**"):
             self.assertIn(phrase, rule, phrase)
 
+    def test_digest_reads_questions(self):
+        """Job 1279: `B digest-questions` computes ## Repeated questions and ## Stops; the reader copies both."""
+        step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))
+        at, health = step1.index("B digest-questions <id>"), step1.index("B process-health <id>")
+        self.assertLess(step1.index("B digest-trevor <id>"), at)
+        self.assertLess(at, health)
+        self.assertIn("`$D/questions.md`", step1[at:health])
+        self.assertIn("a non-zero exit of any of them is named in the report only and never stops the digest",
+                      step1[health:])
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        read = reader[reader.index("**Read**"):reader.index("**Look for repeats.**")]
+        bullet = "- `DIGEST_DIR/questions.md`, read once per digest: `board.py digest-questions` wrote it"
+        self.assertIn(bullet, read)
+        self.assertLess(read.index("- `DIGEST_DIR/trevor.md`"), read.index(bullet))
+        projects = next(l for l in read.splitlines() if l.startswith("- `~/.claude/trevskills-scrum/projects.json`"))
+        self.assertEqual(projects, "- `~/.claude/trevskills-scrum/projects.json`, read once per digest: a JSON list of "
+                                   "repo paths, one per registered project.")
+        rule = ("For `## Repeated questions` and `## Stops`, copy each section's lines from `DIGEST_DIR/questions.md` as "
+                "written, never recomputed, re-sorted or trimmed")
+        self.assertEqual(reader.count(rule), 1)
+        block = reader[reader.index(rule):]
+        block = block[:block.index("\n\n")]
+        for phrase in ("`None (questions.md missing)` under both", "exempt from the 2 or more different jobs rule"):
+            self.assertIn(phrase, block, phrase)
+        for phrase in ("Join each ask line to the next pick line", "Automate is `yes` only when", "leading phrase of",
+                       "For `## Stops`, read", "For `## Repeated questions`, read"):
+            self.assertNotIn(phrase, reader, phrase)
+        self.assertLess(reader.index(rule), reader.index("For `## Recurring blockers`, read every"))
+        self.assertIn("In `questions.log`, count only lines dated within 7 days of its newest `date`", reader)
+        empty = next(l for l in reader.splitlines() if l.startswith("When `jobs.txt` is empty"))
+        self.assertIn("the `## Repeated questions` and `## Stops` sections copied from questions.md as usual", empty)
+
+    def test_digest_questions_stops_parse(self):
+        """Job 1279: the ## Stops table `board.py digest-questions` writes, copied into notes.md, parses with
+        parse_stops."""
+        import importlib.util, tempfile
+        spec = importlib.util.spec_from_file_location("board_questions", BOARD_PY)
+        board = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(board)
+        lines = [{"date": "2026-11-15T00:01:00+00:00", "job": "101-a", "kind": "stall",
+                  "reason": "stalled in build: no board or job-dir change for 2 h"},
+                 {"date": "2026-11-15T00:02:00+00:00", "job": "101-a", "pick": "Resume"},
+                 {"date": "2026-11-15T00:03:00+00:00", "job": "102-b", "kind": "stall",
+                  "reason": "stalled in build: no board or job-dir change for 3 h"},
+                 {"date": "2026-11-15T00:04:00+00:00", "job": "103-c", "kind": "machine",
+                  "reason": "waiting: swap used 30.6% of RAM (> 25%)", "auto": True}]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "scrum"
+            (root / "digests" / "138").mkdir(parents=True)
+            (root / "runs").mkdir()
+            (root / "runs" / "20261115-010000-resume-102-b.log").write_text("")
+            (root / "questions.log").write_text("".join(json.dumps(l) + "\n" for l in lines))
+            self.assertEqual(board.cmd_digest_questions(root, "138"), {"id": "138", "questions": 0, "stops": 2})
+            text = (root / "digests" / "138" / "questions.md").read_text()
+        notes = "DIGEST NOTES\nJobs read: 0\n" + text[text.index("## Repeated questions"):] + "## Pipeline fit\nNone\n"
+        self.assertEqual(parse_stops(notes), [("stalled in build: no board or", 2, ["101-a", "102-b"], {"resume": 2}, True),
+                                              ("waiting: swap used", 1, ["103-c"], {"unanswered": 1}, False)])
+
     def test_digest_agents_contract(self):
         for name in ("scrum-digest-reader", "scrum-digester"):
             self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("tools"), "Read, Grep, Glob, Write", name)
@@ -1980,14 +2038,11 @@ class ContractTest(unittest.TestCase):
         for phrase in ("jobs.txt", "decision.md", "round-*/review-*.md", "round-*/check.md", "rework.md", "promoted.md",
                        "assessment.md", "notes.md", "routing.log", "DIGEST NOTES", "150 lines", "## Rediscovery", "3 or more different jobs",
                        "## Assumptions", "## Likely files", "JOBS_DIR/../routing.log", "scrum-level",
-                       "JOBS_DIR/../questions.log", '"pick"', "## Repeated questions",
-                       "next pick line for the same job", "unanswered", "3 or more times", "DEFAULT: <label>",
+                       "JOBS_DIR/../questions.log", '"pick"', "## Repeated questions", "DEFAULT: <label>",
                        "(unanimous)", "branch names", "hashes", "jev.log", "## Builder model", "Sonnet-built",
                        "Opus-built", "promote", "avg fix rounds", "## Pipeline fit", "pipeline-fit.json",
-                       "Cheapest lane:", "trevskills-scrum/projects.json", "scrum/runs/", "resume", "UTC", "later than", "## Stops",
-                       "`ask`", "`stall`", "`machine`", "`refused`", "`bigboy`", "Hard stop: agent rules", "stalled in build",
-                       "swap used", "blocked on sibling", "| Cause | Count | Jobs | Picks | Automate |", "Automate",
-                       "Jobs read: 0", "## Recurring blockers", '"blocker"', '"verdict"', '"kind"',
+                       "Cheapest lane:", "trevskills-scrum/projects.json", "scrum/runs/", "resume", "UTC", "## Stops",
+                       "| Cause | Count | Jobs | Picks | Automate |", "Automate", "Jobs read: 0", "## Recurring blockers", '"blocker"', '"verdict"', '"kind"',
                        "2 or more different jobs", "empty `blocker`"):
             self.assertIn(phrase, reader, phrase)
         self.assertLess(reader.index("    ## Repeated questions"), reader.index("    ## Recurring blockers"))
