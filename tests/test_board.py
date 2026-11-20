@@ -10858,8 +10858,28 @@ class DigestTrevorTest(unittest.TestCase):
         self.assertEqual(sent["argv"], ["Trevor is correcting or complaining about how the dev pipeline behaved, or stating "
                                         "a rule it should follow from now on", "--top", "60", "--min", "0.8"])
         stamp = self.day.isoformat(timespec="seconds")
-        self.assertEqual(self.section(text, "## Chat"), [f'- {stamp} 0.9: "{t}"' for t in want])
+        ctx = "  context: ok scrum"
+        self.assertEqual(self.section(text, "## Chat"), [
+            f'- {stamp} 0.9: "Stop asking me about merges"',
+            f'- {stamp} 0.9: "Builder must run lint"', ctx,
+            f'- {stamp} 0.9: "worktree note"', ctx,
+            f'- {stamp} 0.9: "Reviewer keeps flagging SCRUM caps"'])
         self.assertEqual(got["chat"], 4)
+
+    def test_chat_context_line(self):
+        self.digest("001")
+        tool = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}]}}
+        long = {"type": "assistant", "message": {"content": [{"type": "text", "text": "a b\n" * 100}]}}
+        self.transcript("a.jsonl", self.user("scrum first"), long, tool,
+                        self.user([{"type": "tool_result", "content": "x"}]), self.user("scrum never again"))
+        self.transcript("b.jsonl", self.user("scrum other file"))
+        _, text = self.run_trevor("001")
+        stamp = self.day.isoformat(timespec="seconds")
+        want = ("a b " * 100).strip()[:300]
+        self.assertEqual(len(want), 300)
+        lines = self.section(text, "## Chat")
+        self.assertEqual(lines, [f'- {stamp} 0.9: "scrum first"', f'- {stamp} 0.9: "scrum never again"',
+                                 f"  context: {want}", f'- {stamp} 0.9: "scrum other file"'])
 
     def test_chat_caps(self):
         self.digest("001")
