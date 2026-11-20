@@ -841,7 +841,7 @@ class ServeTest(unittest.TestCase):
         return job_id
 
     def test_resumable_accepts_queue_waiting(self):
-        for reason in ("waiting: E2E queue", "waiting: Check queue"):
+        for reason in ("waiting: E2E queue", "waiting: Check queue", "waiting: Build queue"):
             with self.subTest(reason=reason):
                 job_id = self.queue_job("Queue wait", reason=reason)
                 job = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
@@ -8367,6 +8367,32 @@ class QueueWaitResumeTest(unittest.TestCase):
         self.jobs[0]["reason"] = "waiting: Check queue"
         self.assertEqual(self.sweep(True), (True, ["q"]))
         self.assertEqual(self.lock, "check.lock")
+
+    def test_build_queue_wait_uses_build_lock(self):
+        s = self.serve
+        self.jobs[0]["reason"] = "waiting: Build queue"
+        s.AUTO_RESUME["p/q"] = [s.AUTO_RESUME_MAX, 0.0]
+        self.assertEqual(self.sweep(False), (True, []), "build.lock busy: held")
+        self.assertEqual(self.lock, "build.lock")
+        self.assertEqual(self.jobs[0]["reason"], "waiting: Build queue")
+        self.assertEqual((self.root / "jobs" / "q" / "stall-holds.txt").read_text().split(), ["build_queue"])
+        self.assertEqual(self.sweep(True), (True, ["q"]))
+        self.assertEqual(self.lock, "build.lock")
+        self.assertEqual(s.AUTO_RESUME["p/q"], [s.AUTO_RESUME_MAX, 0.0], "no try spent")
+
+    def test_two_build_queue_waits_resume_one_per_call(self):
+        self.jobs[0]["reason"] = "waiting: Build queue"
+        self.jobs.append({"id": "r", "stage": "check", "reason": "waiting: Build queue"})
+        self.assertEqual(self.sweep(True), (True, ["q"]))
+        self.assertEqual((self.root / "jobs" / "r" / "stall-holds.txt").read_text().split(), ["build_queue"])
+
+    def test_build_queue_wait_refused_stays_waiting(self):
+        self.jobs[0]["reason"] = "waiting: Build queue"
+        with mock.patch.object(self.serve, "resume_refusal", return_value="machine busy (load)"):
+            busy, resumed = self.sweep(True)
+        self.assertEqual(resumed, [])
+        self.assertEqual(self.lock, "build.lock")
+        self.assertEqual(self.jobs[0]["reason"], "waiting: Build queue")
 
     def test_job_in_check_here_or_in_another_project_does_not_hold_it(self):
         orepo = Path(tempfile.mkdtemp()); (orepo / "scrum").mkdir()

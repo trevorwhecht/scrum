@@ -6318,7 +6318,7 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
     order. recommend is an optional (key, why) naming the option the agent advises. Returns the stored option dicts.
     An eligible kind (lanes/unblock.md) leaves the job in its stage and returns {"unblock": True, "n": N} instead.
     title must be a STOP_TITLES key; it is stored as stopTitle on a parked job (not on an unblock, a stall or a queue wait: a check job asking `waiting on the
-    E2E|Check queue` stays in check with reason E2E_QUEUE_WAIT or CHECK_QUEUE_WAIT and returns {"waiting": True})."""
+    E2E|Check|Build queue` stays in check with reason E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT or BUILD_QUEUE_WAIT and returns {"waiting": True})."""
     if title not in STOP_TITLES:
         raise SystemExit(f"ask needs --title, one of: {', '.join(STOP_TITLES)} (got {title!r})")
     question = question.strip()
@@ -6359,7 +6359,7 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
             return {"unblock": True, "n": n}
         was = job["stage"]
         if was == "check" and (m := QUEUE_ASK_RE.match(question)):  # a capacity wait, not a stall: no try spent
-            reason = E2E_QUEUE_WAIT if m[1].upper() == "E2E" else CHECK_QUEUE_WAIT
+            reason = {"E2E": E2E_QUEUE_WAIT, "BUILD": BUILD_QUEUE_WAIT}.get(m[1].upper(), CHECK_QUEUE_WAIT)
             for k in ("question", "options", "recommend", "stopTitle", "outcome", "stalled"):
                 job.pop(k, None)
             job.update(reason=reason, updatedAt=now())
@@ -7104,8 +7104,9 @@ LIVE_IDLE = "(session alive but idle)"  # cmd_watchdog's live-idle stall reason 
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
 STALL = "stalled: "  # new-shape reason prefix: the job keeps its WATCHED stage and has board `stalled` true
 AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not loaded|^waiting on the (?:E2E|Check) queue", re.I)
-QUEUE_ASK_RE = re.compile(r"^waiting on the (E2E|Check) queue", re.I)  # cmd_ask holds a check job on it as waiting, not stalled
+QUEUE_ASK_RE = re.compile(r"^waiting on the (E2E|Check|Build) queue", re.I)  # cmd_ask holds a check job on it as waiting, not stalled
 E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT = "waiting: E2E queue", "waiting: Check queue"  # serve.py auto_resume starts it once the lock frees
+BUILD_QUEUE_WAIT = "waiting: Build queue"  # a second Build 124 (job 1250): auto_resume starts it once build.lock frees
 CI_BILLING_RE = re.compile(r"failed account payments|spending limit|CI refused: GitHub billing", re.I)
 LOAD_BLOCK_RE = re.compile(r"CPU load|machine load|swap|out of memory|low memory|memory pressure|free RAM", re.I)
 LOAD_BLOCK_WAIT = "debug blocked by machine load; retrying on a quiet machine"  # serve.py auto_resume re-runs the debugger once
@@ -7131,10 +7132,10 @@ def stalled(job: dict) -> bool:
 
 
 def queue_waiting(job: dict) -> bool:
-    """A check job cmd_ask holds on the E2E or Check queue (reason E2E_QUEUE_WAIT or CHECK_QUEUE_WAIT): not stalled,
-    not paused; serve.py auto_resume starts it as soon as that lock is free, spending no try."""
+    """A check job cmd_ask holds on the E2E, Check or Build queue (reason E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT or
+    BUILD_QUEUE_WAIT): not stalled, not paused; serve.py auto_resume starts it as soon as that lock is free, spending no try."""
     return job.get("stage") == "check" and not job.get("paused") and not job.get("stalled") \
-        and str(job.get("reason") or "").startswith((E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT))
+        and str(job.get("reason") or "").startswith((E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT, BUILD_QUEUE_WAIT))
 
 
 FINISH_FIRST = "finishing work in flight first"  # finish_first's reason prefix; serve.py held_gate's finish_first token
@@ -7156,7 +7157,7 @@ def resume_waits(job: dict, by_id: dict) -> bool:
 def finish_first(root=None, jobs=None) -> str | None:
     """Why no automatic new claim (backlog next, a Run-all or BigBoy child, auto-continue, wake) may start in any
     project now, or None (job 971: finish the task at hand first). Read across root's board (`jobs` when given: the
-    caller's locked copy) and every registered project's: a job held on the E2E or Check queue (queue_waiting, or
+    caller's locked copy) and every registered project's: a job held on the E2E, Check or Build queue (queue_waiting, or
     stalled on E2E_WAIT_REASON or CHECK_WAIT_REASON), else a stalled job auto_resume restarts (resume_waits) that waits
     on the machine gate: spawn's gate queued its resume (queued_launch), or resume_gate refuses it. Paused and
     needs-human jobs never hold it (job 751); Trevor's clicks (Play, Resume, Run now) never ask it."""
@@ -7172,7 +7173,8 @@ def finish_first(root=None, jobs=None) -> str | None:
             reason = str(j.get("reason") or "")
             if queue_waiting(j) or stalled(j) and j.get("stage") != "needs-human" \
                     and reason.startswith((STALL + E2E_WAIT_REASON, STALL + CHECK_WAIT_REASON)):
-                queue = "E2E" if reason.startswith((E2E_QUEUE_WAIT, STALL + E2E_WAIT_REASON)) else "Check"
+                queue = "E2E" if reason.startswith((E2E_QUEUE_WAIT, STALL + E2E_WAIT_REASON)) \
+                    else "Build" if reason.startswith(BUILD_QUEUE_WAIT) else "Check"
                 return f"{FINISH_FIRST}: {name}/{j.get('id')} waits on the {queue} queue"
             if resume_waits(j, by_id):
                 waiting.append((scrum, name, j))

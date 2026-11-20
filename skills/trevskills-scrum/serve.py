@@ -565,7 +565,7 @@ def resume_job(project, root, job, jobs, manual=False, note=None):
 
 def resumable(job):
     """Paused by Trevor (Play), stalled in either shape (board.stalled), needs-human for a reason whose card offers
-    Resume (RESUMABLE), or a check job held on the E2E or Check queue (board.queue_waiting)."""
+    Resume (RESUMABLE), or a check job held on the E2E, Check or Build queue (board.queue_waiting)."""
     return bool(job.get("paused") or job["stage"] == "needs-human" and (job.get("reason") or "").startswith(board.RESUMABLE)
                 or board.stalled(job) or board.queue_waiting(job))
 
@@ -1379,11 +1379,11 @@ def auto_resume(project, root, jobs):
     60 s after it is first seen, then each time an ACTIONS_ALERT check newer than its last resume shows no refusal;
     it spends no try, is never parked as spent and is not busy while it waits. Each hold that passes a stalled job
     over (a refusal, a spent budget, a busy E2E or Check queue, cool-down) is noted in stall-holds.txt (note_stall_hold).
-    A check job held on a queue (board.queue_waiting: not stalled) is resumed as soon as its lock is free (queue_free),
-    whatever else sits in check, under the same one-per-tick E2E cap and one-per-call Check cap, spending no try and
-    never parked as spent."""
+    A check job held on a queue (board.queue_waiting: not stalled) is resumed as soon as its lock is free (queue_free:
+    e2e.lock, check.lock, or build.lock for a Build-queue wait), whatever else sits in check, under the same one-per-tick
+    E2E cap and one-per-call Check and Build caps, spending no try and never parked as spent."""
     global E2E_RESUMED
-    now, busy, e2e_resumed, check_resumed = time.time(), False, bool(E2E_RESUMED), False
+    now, busy, e2e_resumed, check_resumed, build_resumed = time.time(), False, bool(E2E_RESUMED), False, False
 
     def check_job(j):
         return j.get("stage") == "check" and not j.get("paused") and not board.stalled(j) and not limit_held(j) \
@@ -1446,15 +1446,19 @@ def auto_resume(project, root, jobs):
             if running(project, job["id"]):
                 continue
             e2e = job["reason"].startswith(board.E2E_QUEUE_WAIT)
-            if (e2e_resumed if e2e else check_resumed) or not queue_free("e2e.lock" if e2e else "check.lock"):
+            q = "e2e" if e2e else "build" if job["reason"].startswith(board.BUILD_QUEUE_WAIT) else "check"
+            done = {"e2e": e2e_resumed, "build": build_resumed, "check": check_resumed}[q]
+            if done or not queue_free(f"{q}.lock"):
                 busy = True
-                note_stall_hold(root, job["id"], "e2e_queue" if e2e else "check_queue")
+                note_stall_hold(root, job["id"], f"{q}_queue")
             elif refused(job) is None and room(job):
                 busy = True
                 if e2e:
                     e2e_resumed = True
                     if E2E_RESUMED is not None:
                         E2E_RESUMED = True
+                elif q == "build":
+                    build_resumed = True
                 else:
                     check_resumed = True
                 resume_job(project, root, job, jobs)
