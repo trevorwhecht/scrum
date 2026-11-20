@@ -26,6 +26,10 @@ Find each name with `grep -n 'def <name>'`; never trust a line number. Every fun
 - `cmd_abort(...)` calls `abort_job(root, job, requeue, reason)`.
 - `projects()`: registered repos that have a `scrum/` folder; `SCRUM_REGISTRY` overrides the registry path.
 - Job-folder readers to reuse, never re-parse: `md_section(text, heading)`, `likely_files(spec_text)`, `likely_funcs(spec_text)`, `job_files(d)`, `_round_text(folder, name)`; `.claude/` routing is `is_claude_path(path)` and `claude_split(root, job)`.
+- A child's files: `child_files(jobs_dir, job_id)` reads spec.md, else feature.md, through `text_files`; with no Likely files section it falls back to `prose_paths`, `bare_name_paths` and `strip_line_ref` (`a.py:12` becomes `a.py`).
+- jev.log rows are tab-separated: time, step, question, raw JSON, decision, seconds. `_jev_model(folder)` reads the last `model` row, else `spec-model`; `cmd_spec_models(root, ids)` picks each run-all child's spec-writer model (tests: `SpecModelsTest`).
+- Digest reports: `cmd_digest_start` claims the jobs, then writes `digests/<NNN>/<name>.md` with `write_timing` (one `_timing_row` per job), `write_escapes`, `write_history`, `write_pulse`, `write_processes`, `write_waste` and `write_tokens`.
+- `write_tokens` prices `transcript_tokens` rows with `row_cost` and flags jobs with `_token_reasons`, `_two_sessions` and `_two_agents` (tests: `TranscriptTokensTest`).
 
 ## serve.py (`skills/trevskills-scrum/serve.py`)
 - `Handler.route(project, root, rest, body)`: the dashboard POST API (`/attachments`, `/manual-checks`, `/backlog`, job actions). When you add or remove a job action, check which branch an unmatched action reaches.
