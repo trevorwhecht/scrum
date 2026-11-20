@@ -2091,6 +2091,31 @@ class BoardTest(unittest.TestCase):
         self.write("j2/spec.md", "Fix `useQuoteBuilderDraft.ts`.\n## Likely files\n- `src/q.py`\n")
         self.assertEqual(board.child_files(jobs, "j2"), {"src/q.py"})
 
+    def test_prose_paths_strips_line_suffix(self):
+        want = {"e2e/quote-builder.spec.ts"}
+        for tok in (":101", ":12-40", ":12:3"):
+            self.assertEqual(board.prose_paths(f"Edit `e2e/quote-builder.spec.ts{tok}` now"), want)
+            self.assertEqual(board.prose_paths(f"Edit e2e/quote-builder.spec.ts{tok}, now"), want)
+        self.assertEqual(board.prose_paths("see `foo.py:bar` and http://x.com/a.py and 3:4 and `3:4`"), set())
+
+    def test_child_files_line_suffix_names(self):
+        repo = Path(self.tmp.name)
+        sh = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+        sh("init", "-q")
+        for f in ("src/views/OrdersView-Board.tsx", "e2e/quote-builder.spec.ts", "a/dup.ts", "b/dup.ts"):
+            (repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (repo / f).write_text("x")
+        sh("add", "-A")
+        tracked = board.git_tracked(repo)
+        for t in ("`OrdersView-Board.tsx:799-878`", "OrdersView-Board.tsx:799-878,", "OrdersView-Board.tsx:799-878."):
+            self.assertEqual(board.bare_name_paths(f"See {t}", tracked), {"src/views/OrdersView-Board.tsx"})
+        self.assertEqual(board.bare_name_paths("See dup.ts:5", tracked), set())
+        jobs = self.root / "jobs"
+        self.write("j1/feature.md", "Fix e2e/quote-builder.spec.ts:101 only.\n")
+        self.write("j2/feature.md", "Fix `OrdersView-Board.tsx:799-878`.\n")
+        self.assertEqual(board.child_files(jobs, "j1"), {"e2e/quote-builder.spec.ts"})
+        self.assertEqual(board.child_files(jobs, "j2"), {"src/views/OrdersView-Board.tsx"})
+
     def test_prose_paths_strips_unmatched_parens(self):
         self.assertEqual(board.prose_paths("Reword (lanes/cloud.md wording) now"), {"lanes/cloud.md"})
         self.assertEqual(board.prose_paths("see (the lanes/cloud.md)"), {"lanes/cloud.md"})
