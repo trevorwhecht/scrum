@@ -66,7 +66,13 @@ GH_LOGIN = ("gh auth login --hostname github.com --git-protocol https --with-tok
 # /usr/bin/python3: a bare python3 under PATH_PREFIX is uv's externally-managed one, which refuses pip install --user.
 RUFF_CHECK = "command -v ruff"
 RUFF_INSTALL = 'PYTHONUSERBASE="$HOME/.local" /usr/bin/python3 -m pip install --user -q ruff'
-OPTIONAL_STEPS = {"ruff"}  # a failed step here never holds a dispatch; setup() still prints and returns its real result
+# Codex CLI for scrum-review-code's second review: this Mac's version (it runs -m gpt-6.1-sol). --prefix: the shop's npm
+# prefix is node's own share dir, so a plain `npm i -g` would put the bin outside ~/.local/bin.
+CODEX_VERSION = "0.166.0"
+CODEX_CHECK = "command -v codex"
+CODEX_INSTALL = 'npm install -g --prefix "$HOME/.local" @openai/codex@' + CODEX_VERSION
+# A failed step here never holds a dispatch; setup() still prints and returns its real result.
+OPTIONAL_STEPS = {"ruff", "codex", "codex login"}
 GIT_HELPER = "git config --global --get-all credential.https://github.com.helper"
 
 # Entries of this Mac's ~/.claude-owa that are links into ~/.claude (read 2026-11-17); its credentials are not.
@@ -78,6 +84,10 @@ SHOP_ACCOUNTS = {"main": None, "owa": "$HOME/.claude-owa"}  # account: its CLAUD
 ACCOUNT_CHECK = "claude -p 'Reply with the single word ok' --model haiku --max-turns 1"
 NO_TOKEN = 3  # the account check's exit code when the account's oauth-token file is missing
 TOKEN_HINT = " (run claude setup-token in the shop GUI)"
+# Codex logs in from a token file saved on the shop, read in the shop's own shell; never this Mac's ~/.codex/auth.json
+# (a ChatGPT refresh token used on two machines can log this Mac out).
+CODEX_LOGIN = f'f="$HOME/.codex/access-token"; [ -r "$f" ] || exit {NO_TOKEN}; codex login --with-access-token < "$f"'
+CODEX_HINT = " (save a Codex access token to ~/.codex/access-token or run codex login on the shop)"
 JEV_KEY_FILE = "$HOME/.config/typesafe/key"  # jev's TypeSafe key on a worker: its keychain is locked over ssh
 JEV_KEYCHAIN = ["/usr/bin/security", "find-generic-password", "-s", "TypeSafe", "-a", "typesafe", "-w"]  # jev.api_key's
 JEV_KEY_WRITE = ("umask 077 && mkdir -p ~/.config/typesafe && cat > ~/.config/typesafe/key.tmp"
@@ -374,16 +384,20 @@ def _account_step(name: str, alias: str) -> tuple[str, str]:
     return ("ok", "") if a == "ok" else ("not ready", TOKEN_HINT if a == "no token" else "")
 
 
-def _ruff(alias: str) -> tuple[str, str]:
-    if run(RUFF_CHECK, STEP_TIMEOUT, alias=alias).returncode == 0:
+def _codex_login(alias: str) -> tuple[str, str]:
+    """"ok" when the shop's codex is logged in; else one CODEX_LOGIN call with no input, "not ready" when its token
+    file is missing."""
+    if run("codex login status", STEP_TIMEOUT, alias=alias).returncode == 0:
         return "ok", ""
-    return _done(run(RUFF_INSTALL, INSTALL_TIMEOUT, alias=alias))
+    r = run(CODEX_LOGIN, STEP_TIMEOUT, alias=alias)
+    return ("not ready", CODEX_HINT) if r.returncode == NO_TOKEN else _done(r)
 
 
-def _chrome(alias: str) -> tuple[str, str]:
-    if run(f'[ -x "{CFT_BIN}" ]', STEP_TIMEOUT, alias=alias).returncode == 0:
+def _install(check: str, install: str, alias: str) -> tuple[str, str]:
+    """"ok" when `check` exits 0 on worker `alias`; else one `install` call of INSTALL_TIMEOUT."""
+    if run(check, STEP_TIMEOUT, alias=alias).returncode == 0:
         return "ok", ""
-    return _done(run(CFT_INSTALL, INSTALL_TIMEOUT, alias=alias))
+    return _done(run(install, INSTALL_TIMEOUT, alias=alias))
 
 
 def _jev_key(alias: str) -> tuple[str, str]:
@@ -417,7 +431,9 @@ def setup(alias: str = ALIAS) -> dict[str, str]:
              "gh login": lambda: _gh_login(alias), "gh git": lambda: _gh_git(alias),
              "permissions": lambda: _permissions(alias), "owa links": lambda: _owa_links(alias),
              **{f"account {n}": (lambda n=n: _account_step(n, alias)) for n in _accounts(alias)},
-             "ruff": lambda: _ruff(alias), "chrome": lambda: _chrome(alias), "jev key": lambda: _jev_key(alias)}
+             "codex": lambda: _install(CODEX_CHECK, CODEX_INSTALL, alias), "codex login": lambda: _codex_login(alias),
+             "ruff": lambda: _install(RUFF_CHECK, RUFF_INSTALL, alias),
+             "chrome": lambda: _install(f'[ -x "{CFT_BIN}" ]', CFT_INSTALL, alias), "jev key": lambda: _jev_key(alias)}
     out = {}
     for name, step in steps.items():
         out[name], note = step()

@@ -356,7 +356,8 @@ DONE = (("sysctl", 0, HAVE_ALL), ("gh auth status", 0, ""),
         ("credential.https://github.com.helper", 0, "\n!/u/.local/bin/gh auth git-credential\n"),
         ('mkdir -p "$HOME/.claude-owa"', 0, ""), ("python3 -", 0, "same\n"), ("claude -p", 0, "ok\n"))
 ALL_OK = ["node: ok", "gh: ok", "gh login: ok", "gh git: ok", "permissions: ok", "owa links: ok", "account main: ok",
-          "account owa: ok", "ruff: ok", "chrome: ok", "jev key: ok"]
+          "account owa: ok", "codex: ok", "codex login: ok", "ruff: ok", "chrome: ok", "jev key: ok"]
+CODEX_HINT = " (save a Codex access token to ~/.codex/access-token or run codex login on the shop)"
 GH_LOGIN = ("gh auth login --hostname github.com --git-protocol https --with-token --insecure-storage"
             " && chmod 600 ~/.config/gh/hosts.yml")
 CHECK = "claude -p 'Reply with the single word ok' --model haiku --max-turns 1"
@@ -440,28 +441,32 @@ class SetupTest(SetupCase):
         answers = (("sysctl", 0, "{ 1.00 0.50 0.25 }\n4\n/u/.local/bin/gh\n/u/.local/bin/claude\n"),
                    ("nodejs.org", 0, ""), (shop.GIT_HELPER, 1, ""), ("setup-git", 1, ""),
                    ('mkdir -p "$HOME/.claude-owa"', 0, "agents\nskills\n"), ("python3 -", 0, "changed\n"),
-                   (".claude-owa/oauth-token", 3, ""), ("claude -p", 0, "Ok.\n"), ("gh auth status", 0, ""))
+                   (".claude-owa/oauth-token", 3, ""), ("claude -p", 0, "Ok.\n"), ("gh auth status", 0, ""),
+                   ("command -v codex", 1, ""), ("codex login status", 1, ""), ("--with-access-token", 3, ""))
         self.shop(*answers)
         got, lines = self.setup_out()
         self.assertEqual(lines, ["node: ok (changed)", "gh: ok", "gh login: ok", "gh git: failed (exit 1)",
                                  "permissions: ok (changed)", "owa links: ok (changed)", "account main: ok",
-                                 "account owa: not ready (run claude setup-token in the shop GUI)", "ruff: ok",
-                                 "chrome: ok", "jev key: ok"])
+                                 "account owa: not ready (run claude setup-token in the shop GUI)", "codex: ok (changed)",
+                                 "codex login: not ready" + CODEX_HINT, "ruff: ok", "chrome: ok", "jev key: ok"])
         self.assertEqual(got, {"node": "changed", "gh": "ok", "gh login": "ok", "gh git": "failed",
                                "permissions": "changed", "owa links": "changed", "account main": "ok",
-                               "account owa": "not ready", "ruff": "ok", "chrome": "ok", "jev key": "ok"})
+                               "account owa": "not ready", "codex": "changed", "codex login": "not ready",
+                               "ruff": "ok", "chrome": "ok", "jev key": "ok"})
         self.assertEqual(list(got), ["node", "gh", "gh login", "gh git", "permissions", "owa links", "account main",
-                                     "account owa", "ruff", "chrome", "jev key"])
+                                     "account owa", "codex", "codex login", "ruff", "chrome", "jev key"])
         self.assertEqual([(c[0].split()[0], c[1]) for c in self.calls[1:]],
                          [("d=$(mktemp", 600), ("gh", 60), ("git", 60), ("gh", 60), ("python3", 60), ("mkdir", 60),
-                          ("ln", 60), ("[", 120), ("[", 120), ("command", 60), ("[", 60), ("[", 60)])
+                          ("ln", 60), ("[", 120), ("[", 120), ("command", 60), ("npm", 600), ("codex", 60),
+                          ('f="$HOME/.codex/access-token";', 60), ("command", 60), ("[", 60), ("[", 60)])
         self.assertEqual(self.calls[-1], (JEV_CHECK, 60, None))
         self.assertEqual(self.setup_out(cli=True)[0], 1)
         self.shop(("setup-git", 0, ""), *answers)
         self.assertEqual(self.setup_out(cli=True), (0, [
             "node: ok (changed)", "gh: ok", "gh login: ok", "gh git: ok (changed)", "permissions: ok (changed)",
             "owa links: ok (changed)", "account main: ok",
-            "account owa: not ready (run claude setup-token in the shop GUI)", "ruff: ok", "chrome: ok", "jev key: ok"]))
+            "account owa: not ready (run claude setup-token in the shop GUI)", "codex: ok (changed)",
+            "codex login: not ready" + CODEX_HINT, "ruff: ok", "chrome: ok", "jev key: ok"]))
 
     def test_worker_accounts_only(self):
         self.worker_file("shopmac 2 owa,main\nnewmac 1 owa\n")
@@ -473,7 +478,8 @@ class SetupTest(SetupCase):
                 with contextlib.redirect_stdout(io.StringIO()) as out:
                     got = shop.setup(alias=alias)
                 self.assertEqual(out.getvalue().splitlines(),
-                                 base + [f"account {n}: ok" for n in accounts] + ["ruff: ok", "chrome: ok", "jev key: ok"])
+                                 base + [f"account {n}: ok" for n in accounts]
+                                 + ["codex: ok", "codex login: ok", "ruff: ok", "chrome: ok", "jev key: ok"])
                 self.assertEqual([k for k in got if k.startswith("account ")], [f"account {n}" for n in accounts])
                 self.assertEqual(len(self.cmds("claude -p")), len(accounts))
                 self.assertEqual({a[1] for a in self.argv if a[0] == "ssh"}, {alias})
@@ -483,7 +489,8 @@ class SetupTest(SetupCase):
         got, lines = self.setup_out()
         self.assertEqual(lines, ALL_OK)
         self.assertEqual(set(got.values()), {"ok"})
-        for key in ("curl", "gh auth login", "ln -s", "setup-git", 'mkdir -p "$HOME/.local'):
+        for key in ("curl", "gh auth login", "ln -s", "setup-git", 'mkdir -p "$HOME/.local', "npm install",
+                    "--with-access-token"):
             self.assertEqual(self.cmds(key), [], key)
         self.assertEqual(len(self.cmds("python3 -")), 1)  # the merge script writes only on a change (PermissionsMergeTest)
         self.assertNotIn(["gh", "auth", "token"], self.argv)
@@ -643,7 +650,68 @@ class SetupTest(SetupCase):
         self.shop(("command -v ruff", 1, ""), ("pip install", 1, "error: externally-managed-environment"), *DONE)
         got, lines = self.setup_out()
         self.assertEqual((lines[-3], got["ruff"]), ("ruff: failed (exit 1)", "failed"))
-        self.assertEqual(shop.OPTIONAL_STEPS, {"ruff"})
+        self.assertEqual(shop.OPTIONAL_STEPS, {"ruff", "codex", "codex login"})
+
+    def test_codex_steps_optional(self):
+        self.assertEqual(shop.OPTIONAL_STEPS, {"ruff", "codex", "codex login"})  # never holds a dispatch
+        self.shop(("codex login status", 1, ""), ("--with-access-token", 3, ""), *DONE)
+        self.assertEqual(self.setup_out(cli=True), (0, ALL_OK[:9] + ["codex login: not ready" + CODEX_HINT]
+                                                    + ALL_OK[10:]))
+        self.shop(("command -v codex", 1, ""), ("npm install", 1, ""), *DONE)
+        self.assertEqual(self.setup_out(cli=True), (1, ALL_OK[:8] + ["codex: failed (exit 1)"] + ALL_OK[9:]))
+
+    def test_codex_installed_into_local_when_missing(self):
+        self.assertEqual(shop.CODEX_VERSION, "0.166.0")
+        self.shop(*DONE)  # `command -v codex` exits 0: nothing else runs
+        got, lines = self.setup_out()
+        self.assertEqual((lines[8], got["codex"]), ("codex: ok", "ok"))
+        self.assertEqual(self.cmds("command -v codex"), [("command -v codex", 60, None)])
+        self.assertEqual(self.cmds("npm install"), [])
+        self.shop(("command -v codex", 1, ""), *DONE)
+        got, lines = self.setup_out()
+        self.assertEqual((lines[8], got["codex"]), ("codex: ok (changed)", "changed"))
+        self.assertEqual(self.cmds("npm install"),
+                         [('npm install -g --prefix "$HOME/.local" @openai/codex@0.166.0', 600, None)])
+        self.shop(("command -v codex", 1, ""), ("npm install", 1, ""), *DONE)
+        rc, lines = self.setup_out(cli=True)
+        self.assertEqual((rc, lines[8]), (1, "codex: failed (exit 1)"))
+        self.assertEqual(len(self.cmds("npm install")), 1)
+
+    def test_codex_login_states(self):
+        login = 'f="$HOME/.codex/access-token"; [ -r "$f" ] || exit 3; codex login --with-access-token < "$f"'
+        hint = " (save a Codex access token to ~/.codex/access-token or run codex login on the shop)"
+        for name, status, write, result, line in (
+                ("logged in", 0, None, "ok", "codex login: ok"),
+                ("token login", 1, 0, "changed", "codex login: ok (changed)"),
+                ("no token file", 1, 3, "not ready", "codex login: not ready" + hint),
+                ("login fails", 1, 1, "failed", "codex login: failed (exit 1)"),
+                ("ssh fails", 1, 255, "failed", "codex login: failed (exit 255)"),
+                ("timeout", 1, subprocess.TimeoutExpired(["ssh"], 60), "failed", "codex login: failed (exit 124)")):
+            with self.subTest(name=name):
+                self.shop(("codex login status", status, ""), ("--with-access-token", write, ""), *DONE)
+                got, lines = self.setup_out()
+                self.assertEqual((lines[9], got["codex login"]), (line, result))
+                self.assertEqual(self.cmds("codex login"), [("codex login status", 60, None)]
+                                 + ([] if write is None else [(login, 60, None)]))  # no input: no token from this Mac
+                self.assertEqual([a for a in self.argv if a[0] != "ssh"], [])  # no local read of any kind
+
+    def test_codex_login_reads_shop_token_file(self):
+        """The login call runs in a local sh under a temp home with a fake codex, as the shop would."""
+        h = Path(self.home)
+        (h / ".local" / "bin").mkdir(parents=True)
+        codex = h / ".local" / "bin" / "codex"
+        codex.write_text('#!/bin/sh\n[ "$2" = status ] && exit 1\necho "$*" > "$HOME/args"\ncat > "$HOME/stdin"\n')
+        codex.chmod(0o755)
+        self.shop(("codex login", LOCAL, ""), *DONE)
+        self.assertEqual(self.setup_out()[1][9], "codex login: not ready (save a Codex access token to "
+                                                 "~/.codex/access-token or run codex login on the shop)")
+        self.assertEqual(sorted(os.listdir(h)), [".local"])  # exit 3 before codex login ran
+        (h / ".codex").mkdir()
+        (h / ".codex" / "access-token").write_text("cdx-tok-1245\n")
+        self.assertEqual(self.setup_out()[1][9], "codex login: ok (changed)")
+        self.assertEqual(((h / "args").read_text(), (h / "stdin").read_text()),
+                         ("login --with-access-token\n", "cdx-tok-1245\n"))
+        self.assertFalse([a for a in self.argv if "cdx-tok" in " ".join(a)])
 
     def test_jev_key_skipped_when_file_exists(self):
         self.shop((JEV_CHECK, 0, ""), *DONE)
