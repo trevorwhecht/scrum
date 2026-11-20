@@ -3782,7 +3782,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_child_start_silences_notifier(self):
         text = self.rules()
-        step3 = self.section(text, "3. **Start.** Run `B ready $ID`", "4. **Spec refresh**")
+        step3 = self.section(text, "3. **Start.** Run `B ready $ID --specs-done`", "4. **Spec refresh**")
         self.assertIn("run `B spawn <child> start`", step3)
         self.assertIn("detached from the main checkout with `CLAUDE_NOTIFIER_DISABLE=1`", step3)
 
@@ -3804,7 +3804,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_child_start_passes_orchestrator_model(self):
         text = self.rules()
-        step3 = self.section(text, "3. **Start.** Run `B ready $ID`", "4. **Spec refresh**")
+        step3 = self.section(text, "3. **Start.** Run `B ready $ID --specs-done`", "4. **Spec refresh**")
         for phrase in ("run `B spawn <child> start`", "adds `--model` from the `- Orchestrator model:` line",
                        "blank, missing or malformed gives `sonnet`", "`inherit` drops it",
                        '`claude -p "/trevskills-scrum start <child>" --permission-mode acceptEdits`'):
