@@ -1831,6 +1831,46 @@ class ContractTest(unittest.TestCase):
                        "A `None` section gets no proposal", "at-most-8 cap"):
             self.assertIn(phrase, waste, phrase)
 
+    def test_digest_reads_tokens(self):
+        """Job 1241: the digest reads each job's cost audit through $D/tokens.md (board.write_tokens)."""
+        step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))
+        last = step1[step1.rindex(". ", 0, len(step1) - 1) + 2:]
+        self.assertIn("; and `$D/tokens.md`", last)
+        self.assertLess(last.index("`$D/waste.md`"), last.index("`$D/tokens.md`"))
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        read = reader[reader.index("**Read**"):reader.index("**Look for repeats.**")]
+        bullet = "- `DIGEST_DIR/tokens.md`, read once per digest: `board.py digest-start` wrote it"
+        self.assertIn(bullet, read)
+        self.assertLess(read.index("- `DIGEST_DIR/waste.md`"), read.index(bullet))
+        line = read[read.index(bullet):]
+        line = line[:line.index("\n")]
+        for phrase in ("`## Jobs`", "`## Flagged`", "`No transcript rows"):
+            self.assertIn(phrase, line, phrase)
+        self.assertIn("    ## Token sinks\n    - <job id> — $<usd> — <x.x>x lane median or - — cause: <one line> — "
+                      "needed|not needed — source: <file>\n", reader)
+        self.assertLess(reader.index("    ## Waste\n"), reader.index("    ## Token sinks\n"))
+        self.assertLess(reader.index("    ## Token sinks\n"), reader.index("    ## Escapes\n"))
+        start = reader.index("For `## Token sinks`, use `DIGEST_DIR/tokens.md`:")
+        self.assertLess(reader.index("For `## Waste`, use `DIGEST_DIR/waste.md`:"), start)
+        rule = reader[start:]
+        rule = rule[:rule.index("\n\n")]
+        for phrase in ("one line per `## Flagged` job", "found a real bug", "an agent off its pinned model",
+                       "a reviewer rebuilding its harness or worktree", "has no flagged job",
+                       "exempt from the 2 or more different jobs rule"):
+            self.assertIn(phrase, rule, phrase)
+        digester = (ROOT / "agents" / "scrum-digester.md").read_text()
+        self.assertLess(digester.index("**Waste.**"), digester.index("**Token sinks.**"))
+        self.assertLess(digester.index("**Token sinks.**"), digester.index("**Backlog fallback.**"))
+        sinks = digester[digester.index("**Token sinks.**"):digester.index("**Backlog fallback.**")]
+        for phrase in ("`not needed` cause seen in 2 or more jobs", "the agent or lane that caused it",
+                       "over 3x its lane median", '`"kind": "backlog"`', "A `None` section gets no proposal",
+                       "at-most-8 cap"):
+            self.assertIn(phrase, sinks, phrase)
+        self.assertIn("**Time sinks**, **Token sinks**, **Process health**", digester)
+        self.assertLess(digester.index("**Token sinks**, "), digester.index("**Escapes**, **Backlog fallback**"))
+        self.assertIn("**Escapes**, **Backlog fallback**, **New skill**, **Processes** and **Waste** read `notes.md`",
+                      digester)
+
     def test_digest_reads_trevor(self):
         step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))
         self.assertIn("B digest-trevor <id>", step1)
