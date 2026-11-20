@@ -9465,6 +9465,14 @@ class RouteCheckTest(unittest.TestCase):
     def test_route_check_lilguy_31_lines_promotes(self):
         self.assertEqual(self.lilguy({"src/a.py": "x\n" * 31}), "diff over 30 added lines (31)")
 
+    def test_route_check_lilguy_cause_pinned_excludes_test_files(self):
+        files = {"src/a.py": "x\n" * 20, "tests/test_a.py": "y\n" * 40}
+        self.assertIsNone(self.lilguy(files, feature="Bug\nLane: lilguy — bug, cause pinned: x\n"))
+
+    def test_route_check_lilguy_plain_counts_test_files(self):
+        files = {"src/a.py": "x\n" * 20, "tests/test_a.py": "y\n" * 40}
+        self.assertEqual(self.lilguy(files), "diff over 30 added lines (60)")
+
     def test_route_check_lilguy_11_files_promotes(self):
         self.assertEqual(self.lilguy({f"src/f{i}.py": "x\n" for i in range(11)}),
                          "more than 10 files with added lines (11)")
