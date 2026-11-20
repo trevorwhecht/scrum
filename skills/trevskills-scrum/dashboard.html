@@ -1408,8 +1408,9 @@ function renderManual() {
 // "waits on: …" after an item's text: each needs id as that item's text from the project's backlog (open or done), cut to
 // 40 chars, or #<id> when no item has it. Muted once nothing it needs still waits. Empty for an item with no needs.
 function needsTag(it, all) {
-  if (!it.needs?.length) return "";
-  const names = it.needs.map(id => all.find(i => i.id === id)?.text || `#${id}`);
+  const extra = (it.waits || []).filter(w => /[: ]/.test(w));  // a cross-repo {after repo:job} still open, or "requeue loop" (3 requeue aborts in 24 h; edit the item to claim it again)
+  if (!it.needs?.length && !extra.length) return "";
+  const names = (it.needs || []).map(id => all.find(i => i.id === id)?.text || `#${id}`).concat(extra.map(w => w === "requeue loop" ? "requeued 3 times in 24 h: edit it to claim again" : `job ${w}`));
   const cut = t => t.length > 40 ? t.slice(0, 39) + "…" : t;
   return `<span class="needs${it.waits?.length ? "" : " met"}" title="${esc(names.join("; "))}">waits on: ${esc(names.map(cut).join(", "))}</span>`;
 }

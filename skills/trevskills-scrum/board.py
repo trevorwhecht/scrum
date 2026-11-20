@@ -405,7 +405,7 @@ def cmd_new(root, title, job_id=None, unique=False, started_by="hand"):
 # An item's text excludes the markers, so its spec_path never changes. A setup marker is a Human setup checklist: next and runall-start skip the item until Setup done. ---
 FIB = (1, 2, 3, 5, 8, 13)
 ITEM_RE = re.compile(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*?)(?: \{#([a-z0-9]{4})\})?(?: \{p:([1-5])\})?(?: \{needs((?: #[a-z0-9]{4})+)\})?"
-                     r"(?: \{setup: ([^{}]*)\})?(?: \{by:(t|back)\})?(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
+                     r"(?: \{setup: ([^{}]*)\})?(?: \{after ([^{}]*)\})?(?: \{by:(t|back)\})?(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
 ID_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
 KEEP = object()
 ITEM_MAX = 2000  # backlog item text; long enough that a triage merge keeps every original requirement
@@ -415,7 +415,7 @@ def clean(text, limit=300):
     return re.sub(r"\s+", " ", str(text).replace("<!--", "").replace("-->", "")).strip()[:limit]
 
 
-LOOSE_MARK_RE = re.compile(r" \{(?:#[a-z0-9]{4}|p:[1-5]|needs(?: #[a-z0-9]{4})+|setup: [^{}]*|by:(?:t|back))\}| → \d{3,}-[a-z0-9-]+")
+LOOSE_MARK_RE = re.compile(r" \{(?:#[a-z0-9]{4}|p:[1-5]|needs(?: #[a-z0-9]{4})+|setup: [^{}]*|after [^{}]*|by:(?:t|back))\}| → \d{3,}-[a-z0-9-]+")
 LOOSE_WHY_RE = re.compile(r" <!-- (.*?) -->")
 
 
@@ -438,7 +438,7 @@ def loose_item(line):
     prios = re.findall(r" \{p:([1-5])\}", tail)
     needs = "".join(re.findall(r" \{needs((?: #[a-z0-9]{4})+)\}", tail))
     return (m[1], m[2], text, one(r" \{#([a-z0-9]{4})\}"), min(prios) if prios else None, needs or None,
-            one(r" \{setup: ([^{}]*)\}"), one(r" \{by:(t|back)\}"), (re.search(r" → (\d{3,}-[a-z0-9-]+)", re.sub(r" \{setup: [^{}]*\}", "", tail)) or [None, None])[1], why[1] if why else None)
+            one(r" \{setup: ([^{}]*)\}"), one(r" \{after ([^{}]*)\}"), one(r" \{by:(t|back)\}"), (re.search(r" → (\d{3,}-[a-z0-9-]+)", re.sub(r" \{(?:setup|after)[ :][^{}]*\}", "", tail)) or [None, None])[1], why[1] if why else None)
 
 
 def read_backlog(root):
@@ -448,11 +448,12 @@ def read_backlog(root):
     items = []
     for n, line in enumerate(lines):
         if g := loose_item(line):
-            done, pts, text, item_id, prio, needs, setup, by, job, why = g
+            done, pts, text, item_id, prio, needs, setup, after, by, job, why = g
             items.append({"index": len(items), "line": n, "done": done == "x",
                           "points": int(pts) if pts and pts.isdigit() else None, "text": text.strip(), "why": why, "job": job,
                           "id": item_id, "priority": int(prio) if prio else None, "needs": needs.replace("#", "").split() if needs else [],
-                          "setup": [s.strip() for s in setup.split(";") if s.strip()] if setup else [], "by": by})
+                          "setup": [s.strip() for s in setup.split(";") if s.strip()] if setup else [],
+                          "after": after.split() if after else [], "by": by})
     return lines, items
 
 
@@ -462,6 +463,7 @@ def format_item(item):
             + (f" {{p:{item['priority']}}}" if item.get("priority") else "")
             + (" {needs " + " ".join(f"#{n}" for n in item["needs"]) + "}" if item.get("needs") else "")
             + (" {setup: " + "; ".join(item["setup"]) + "}" if item.get("setup") else "")
+            + (" {after " + " ".join(item["after"]) + "}" if item.get("after") else "")
             + (f" {{by:{item['by']}}}" if item.get("by") else "")
             + (f" → {item['job']}" if item["job"] else "") + (f" <!-- {item['why']} -->" if item["why"] else ""))
 
@@ -478,11 +480,51 @@ def waiting_on(item, items, board):
     """The ids in item's needs that still block it: a line with that id is open, or is claimed by a job whose board
     stage is not done or aborted. An id no line carries, a closed line with no job, or a job missing from the board
     does not block."""
-    if not item["needs"]:
-        return []  # most items: skip building the board's stage map
-    stage = {j.get("id"): j.get("stage") for j in board.get("jobs") or []}
-    blocks = lambda i: not i["done"] or (i["job"] in stage and stage[i["job"]] not in ("done", "aborted"))
-    return [n for n in item["needs"] if any(i["id"] == n and blocks(i) for i in items)]
+    out = []
+    if item["needs"]:  # most items: skip building the board's stage map
+        stage = {j.get("id"): j.get("stage") for j in board.get("jobs") or []}
+        blocks = lambda i: not i["done"] or (i["job"] in stage and stage[i["job"]] not in ("done", "aborted"))
+        out = [n for n in item["needs"] if any(i["id"] == n and blocks(i) for i in items)]
+    return out + [a for a in item.get("after") or [] if after_blocks(a)] + requeue_loop(item, board)
+
+
+def after_blocks(ref):
+    """True while a cross-repo {after repo:job} reference still blocks: the registered repo whose folder name is `repo` has
+    that job (an id, or a number the id starts with) on its board in a stage other than done or aborted. An unregistered
+    repo, an unreadable board or a job it does not list does not block."""
+    repo, _, num = ref.partition(":")
+    for path in read_registry():
+        if Path(path).name != repo:
+            continue
+        try:
+            jobs = json.loads((Path(path) / "scrum" / "board.json").read_text()).get("jobs") or []
+        except (OSError, ValueError, AttributeError):
+            continue
+        return any((j.get("id") == num or str(j.get("id", "")).startswith(num + "-")) and j.get("stage") not in ("done", "aborted") for j in jobs)
+    return False
+
+
+LOOP_CLAIMS, LOOP_HOURS = 3, 24
+
+
+def requeue_loop(item, board):
+    """["requeue loop"] when an open item's last LOOP_CLAIMS claims all ended in a requeue abort within LOOP_HOURS: jobs of its title
+    (short_title of its text) aborted with a reason starting "requeue". It stays blocked until Trevor edits the text (a new title)
+    or the oldest of those aborts is a day old."""
+    if item["done"]:
+        return []
+    title = short_title(item["text"])
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOP_HOURS)
+    recent = []
+    for j in board.get("jobs") or []:
+        if j.get("title") == title and j.get("stage") == "aborted" and str(j.get("reason") or "").startswith("requeue"):
+            try:
+                at = datetime.fromisoformat(j["updatedAt"])
+            except (KeyError, ValueError, TypeError):
+                continue
+            if at >= cutoff:
+                recent.append(at)
+    return ["requeue loop"] if len(recent) >= LOOP_CLAIMS else []
 
 
 def origin_open(item, board):
@@ -5245,7 +5287,7 @@ def cmd_runall_start(root, match=None):
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         held = {i["index"] for i in items if not i["done"]  # indexes of open items left open
-                and (i["setup"] or origin_open(i, board) or match is not None and not match_words(i["text"], match))}
+                and (i["setup"] or origin_open(i, board) or any(":" in w or " " in w for w in waiting_on(i, items, board)) or match is not None and not match_words(i["text"], match))}
         while True:
             more = {i["index"] for i in items if not i["done"] and i["index"] not in held
                     and any(o["id"] == n and (o["done"] or o["index"] in held)

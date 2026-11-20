@@ -37,9 +37,9 @@ class BacklogTest(unittest.TestCase):
 
     def test_loose_item_comment_before_trailing_markers(self):
         g = board.loose_item("- [ ] [3] Text here {#abcd} <!-- why it matters {p:5} --> {p:2}")
-        self.assertEqual((g[2], g[3], g[4], g[9]), ("Text here", "abcd", "2", "why it matters {p:5}"))
+        self.assertEqual((g[2], g[3], g[4], g[10]), ("Text here", "abcd", "2", "why it matters {p:5}"))
         g = board.loose_item("- [ ] Text <!-- why --> {#abcd}")
-        self.assertEqual((g[2], g[3], g[9]), ("Text", "abcd", "why"))
+        self.assertEqual((g[2], g[3], g[10]), ("Text", "abcd", "why"))
         g = board.loose_item("- [ ] Text <!-- why --> prose {p:2}")  # prose after the comment: the text keeps it
         self.assertEqual(g[2], "Text <!-- why --> prose")
 
@@ -336,6 +336,35 @@ class BacklogTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("plan.json", r.stderr)
         self.assertEqual(self.text(), before)
+
+    # --- cross-repo {after repo:job} marker and the requeue-loop guard (job 1232) ---
+    def _registry(self, jobs):
+        other = Path(self.tmp.name) / "otherrepo"
+        (other / "scrum").mkdir(parents=True, exist_ok=True)
+        (other / "scrum" / "board.json").write_text(json.dumps({"jobs": jobs}))
+        (Path(self.tmp.name) / "projects.json").write_text(json.dumps([str(other)]))
+
+    def test_after_marker_round_trips_and_blocks_until_job_done(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Wait for it {#a1b2} {after otherrepo:1600} <!-- why -->\n")
+        (self.root / "board.json").write_text(json.dumps({"jobs": []}))
+        self._registry([{"id": "1600-thing", "stage": "build"}])
+        items = board.backlog_items(self.root)
+        self.assertEqual((items[0]["text"], items[0]["after"], items[0]["waits"]), ("Wait for it", ["otherrepo:1600"], ["otherrepo:1600"]))
+        lines, parsed = board.read_backlog(self.root)
+        self.assertEqual(board.format_item(parsed[0]), lines[1])
+        self.assertIsNone(board.cmd_next(self.root)["id"])
+        self._registry([{"id": "1600-thing", "stage": "done"}])
+        self.assertIsNotNone(board.cmd_next(self.root)["id"])
+
+    def test_requeue_loop_guard_blocks_after_three_requeues(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Looping item\n")
+        stamp = board.now()
+        jobs = [{"id": f"00{n}-x", "title": "Looping item", "stage": "aborted", "reason": "requeue: boom", "updatedAt": stamp} for n in range(3)]
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.assertEqual(board.backlog_items(self.root)[0]["waits"], ["requeue loop"])
+        self.assertIsNone(board.cmd_next(self.root)["id"])
+        board.backlog_op(self.root, "edit", index=0, text="Looping item, reworded")  # Trevor edits it: claimable again
+        self.assertEqual(board.backlog_items(self.root)[0]["waits"], [])
 
     # --- dependencies: {#id} and {needs #id ...} markers ---
     def test_id_and_needs_markers_round_trip(self):
