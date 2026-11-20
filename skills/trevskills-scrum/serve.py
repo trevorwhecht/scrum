@@ -1809,9 +1809,10 @@ def shop_tick(project, repo, root) -> bool:
     (held_work: a queued `start` launch or a waiting child; never paused, board.shop_excluded (lilguy: board lane,
     `Lane: lilguy` anywhere in feature.md, or lilguy-fit.json fit true with no parent or a Run-all parent, unless this
     Mac's gates have held it over 2 h, board.SHOP_LILGUY_HELD_SECS; or naming a digest proposals.json), setup pending,
-    nor any job of a board.shop_project_excluded project (a `- Base branch:` line or docker in project.md), nor a launch whose files are not clear_of_busy(busy_files), checked only when the pool
-    holds a launch) to the first shop_worker() worker (out of backoff, room, ready, an account; later workers are not
-    probed). This Mac's cool-down does not stop the shop; a worker's own does (shop_worker).
+    nor any job of a board.shop_project_excluded project (a `- Base branch:` line or docker in project.md), nor a
+    launch whose files are not clear_of_busy(busy_files), checked only when the pool holds a launch) to the first
+    shop_worker() worker (out of backoff, room, ready, an account; later workers are not probed).
+    This Mac's cool-down does not stop the shop; a worker's own does (shop_worker).
     A job tagged Runs on main (board.tag_runs_on; Jev is asked, if at all, only here, with a worker free) is never sent: it is skipped and the next one is tried (job 1155). A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
     profile_copy and start run on that worker; a failed step puts a claimed child back to waiting, prints one
     `shop: <project>: <id>: <step> failed on <alias>` line and holds that worker for SHOP_RETRY_EVERY. With nothing in
