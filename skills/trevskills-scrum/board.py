@@ -4259,6 +4259,7 @@ def cmd_lilguy_fit(root, job_id: str) -> dict:
     if verdict["fit"] and not os.environ.get("SCRUM_SPAWN"):  # job 1261: a hand-started job builds headless on the Orchestrator model, not in Trevor's Opus session
         if find(read_board(root), check_id(job_id)).get("started_by") == "hand":
             hand_off = f"B spawn {job_id} start"
+            cmd_set(root, job_id, ["lane=lilguy"])  # spawn() keeps CLAUDE.md only for a lilguy-lane job
     if folder.is_dir():
         out = folder / "lilguy-fit.json"
         try:

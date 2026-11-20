@@ -9685,6 +9685,7 @@ class LilguyFitTest(unittest.TestCase):
             os.environ.pop("SCRUM_SPAWN")
             out = self.fit()
             self.assertEqual(out["hand off"], f"B spawn {self.job} start")
+            self.assertEqual(board.find(board.read_board(self.root), self.job).get("lane"), "lilguy")
             job_file = self.root / "board.json"
             data = json.loads(job_file.read_text())
             data["jobs"][0]["started_by"] = "runall"
