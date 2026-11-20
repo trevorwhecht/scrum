@@ -496,6 +496,7 @@ class BoardTest(unittest.TestCase):
     def test_ask_resume_abort_exempt_asks(self):
         for stage, question in (("merging", "Unpushed commits in repo: x"),
                                 ("check", "waiting on the E2E queue"),
+                                ("check", "waiting on the Build queue"),
                                 ("merging", "GitHub refused to start the checks because of failed account payments.")):
             with self.subTest(question=question):
                 job_id = board.cmd_new(self.root, "x")
@@ -792,7 +793,8 @@ class BoardTest(unittest.TestCase):
                 self.assertNotIn("stalled", job)
 
     def test_ask_e2e_queue_wait_is_waiting_not_stalled(self):
-        for q, want in (("waiting on the E2E queue", "waiting: E2E queue"), ("waiting on the Check queue", "waiting: Check queue")):
+        for q, want in (("waiting on the E2E queue", "waiting: E2E queue"), ("waiting on the Check queue", "waiting: Check queue"),
+                        ("waiting on the Build queue", "waiting: Build queue")):
             with self.subTest(q=q):
                 job_id = board.cmd_new(self.root, "x")
                 board.cmd_set(self.root, job_id, ["stage=check"])

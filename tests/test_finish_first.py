@@ -96,6 +96,15 @@ class FinishFirst(unittest.TestCase):
         self.assertEqual((self.root / "backlog.md").read_text(), "- [ ] Alpha\n- [ ] Beta\n")
         self.assertEqual(board.cmd_next(self.root, 1)["feature"], "Beta", "Run now still claims")
 
+    def test_build_queue_wait_holds_backlog_next(self):
+        (self.root / "backlog.md").write_text("- [ ] Alpha\n")
+        self.other_jobs({"id": "050-queued", "stage": "check", "reason": "waiting: Build queue"})
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_next(self.root)
+        self.assertEqual(str(e.exception), "finishing work in flight first: other/050-queued waits on the Build queue: "
+                                           "no new backlog claim. It claims again once that job moves on.")
+        self.assertEqual((self.root / "backlog.md").read_text(), "- [ ] Alpha\n")
+
     def test_paused_and_needs_human_never_hold(self):
         self.other_jobs({"id": "050-paused", "stage": "check", "paused": True, "reason": "waiting: E2E queue"},
                         {"id": "051-human", "stage": "needs-human", "reason": "stalled in build: no output"},
