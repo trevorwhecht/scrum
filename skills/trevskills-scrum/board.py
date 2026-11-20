@@ -1407,7 +1407,7 @@ def cmd_digest_start(root):
         print(f"digest-start: waste: {e}", file=sys.stderr)
     try:
         write_tokens(root, digest_id)
-    except (SystemExit, OSError, ValueError, TypeError) as e:
+    except (SystemExit, OSError, ValueError, TypeError, subprocess.TimeoutExpired) as e:
         print(f"digest-start: tokens: {e}", file=sys.stderr)
     return out
 
@@ -1855,8 +1855,8 @@ def _model_family(model):
 
 def _token_reasons(job, usd, groups, lane_median, top):
     """write_tokens' ## Flagged reasons for one job, in the fixed order: pricier model than the agent's pin, over
-    TOKENS_FLAG median_x its lane median, a top-cost job, one agent over agent_share of the job, a reviewer's later round
-    at round_share or more of its round 1."""
+    TOKENS_FLAG median_x its lane median, a top-cost job, one of 2 or more agents over agent_share of the job, a
+    reviewer's later round at round_share or more of its round 1."""
     out, by_agent, by_round = [], {}, {}
     for (agent, rnd, model), (_, a) in groups.items():
         by_agent[agent] = by_agent.get(agent, 0) + a
@@ -1870,8 +1870,8 @@ def _token_reasons(job, usd, groups, lane_median, top):
         out.append(f"{usd / lane_median:.1f}x lane median (${lane_median:.2f})")
     if job in top:
         out.append("top 3 cost")
-    for agent, a in sorted(by_agent.items(), key=lambda x: -x[1]):
-        if usd > 0 and a > TOKENS_FLAG["agent_share"] * usd:
+    for agent, a in sorted(by_agent.items(), key=lambda x: -x[1]):  # a one-agent job is always 100% that agent
+        if usd > 0 and len(by_agent) > 1 and a > TOKENS_FLAG["agent_share"] * usd:
             out.append(f"{agent} {100 * a / usd:.0f}% of job cost")
     for (agent, rnd), a in sorted(by_round.items(), key=lambda x: (x[0][0], x[0][1] or 0)):
         base = by_round.get((agent, 1), 0)
@@ -1900,7 +1900,7 @@ def _costliest_detail(rows):
     out = [f"  - costliest: {agent} ${by_agent[agent]:.2f}",
            "  - tools: " + (", ".join(f"{k} {v}" for k, v in top) or "none"),
            f"  - image reads: {images}",
-           f"  - peak context: {max(r['input_tokens'] + r['cache_read_input_tokens'] for r in mine)} tokens"]
+           f"  - peak context: {max(r['input_tokens'] + r['cache_read_input_tokens'] for r in mine):,} tokens"]
     if len(paths) > TOKENS_TRANSCRIPTS:
         keep = TOKENS_TRANSCRIPTS - 1
         return out + [f"  - transcript: {p}" for p in paths[:keep]] + [f"  - transcript: +{len(paths) - keep} more"]
@@ -1908,24 +1908,31 @@ def _costliest_detail(rows):
 
 
 def write_tokens(root, digest_id):
-    """digests/<NNN>/tokens.md: what each job in the digest's jobs.txt cost and why, from transcript_tokens over the last
-    JOB_COST_DAYS days, kept to this root's registered project and the listed jobs. `## Jobs`: one line per job (lane,
-    added lines from _fit_diff, usd, tokens) and one indented line per (agent, round, model), costliest first; a job
-    with no rows says so and its diff is never read. `## Flagged`: the jobs _token_reasons flags, costliest first, each
-    with _costliest_detail. Under unittest with no SCRUM_TRANSCRIPTS it reads no transcripts (job_costs' guard).
-    Overwrites the file on every run."""
+    """digests/<NNN>/tokens.md: what each job in the digest's jobs.txt cost and why, from transcript_tokens over a window
+    from the earliest listed job's creation (feature.md, else spec.md, mtime) to now, never longer than JOB_COST_DAYS,
+    kept to this root's registered project and the listed jobs. `Window:` names it in UTC minutes. `## Jobs`: one line
+    per job with rows, costliest first (lane, added lines from _fit_diff, usd, tokens, tokens per added line or `-`) and
+    one indented line per (agent, round, model), costliest first; then each job with no rows, in listed order, which
+    says so and never reads its diff. `## Flagged`: the jobs _token_reasons flags, costliest first, each with
+    _costliest_detail. Under unittest with no SCRUM_TRANSCRIPTS it reads no transcripts (job_costs' guard), and an
+    unregistered root reads none. Overwrites the file on every run."""
     d = Path(root) / "digests" / digest_id
     listed = list(dict.fromkeys(l.strip() for l in (d / "jobs.txt").read_text().splitlines() if l.strip()))
     path = d / "tokens.md"
     if not listed:
         path.write_text("No jobs in this digest\n")
         return
-    rows = []
+    rows, now = [], time.time()
+    floor = now - JOB_COST_DAYS * 86400
+    # ponytail: a job created more than JOB_COST_DAYS ago is undercounted, and a feature.md rewritten after creation
+    # drops the rows written before the rewrite; the window stays short because transcript_tokens reads ~10 s a day
+    made = [t for t in (_mtime(Path(root) / "jobs" / j / "feature.md") or _mtime(Path(root) / "jobs" / j / "spec.md")
+                        for j in listed) if t]
+    start = max(min(made, default=floor), floor)
     if not ("unittest" in sys.modules and not os.environ.get("SCRUM_TRANSCRIPTS")) and transcripts_dir().is_dir():
         me = Path(root).resolve().parent
-        name = next((n for n, p in projects().items() if p.resolve() == me), None)
-        now, want = time.time(), set(listed)
-        rows = [r for r in transcript_tokens(now - JOB_COST_DAYS * 86400, now)
+        name, want = next((n for n, p in projects().items() if p.resolve() == me), None), set(listed)
+        rows = [r for r in transcript_tokens(start, now)
                 if r["project"] == name and r["job"] in want] if name is not None else []
     if not rows:
         path.write_text("No transcript rows for this digest's jobs\n")
@@ -1942,8 +1949,9 @@ def write_tokens(root, digest_id):
         tok, usd = g.get((r["agent"], r["round"], r["model"]), (0, 0))
         g[r["agent"], r["round"], r["model"]] = (tok + sum(r[k] for k in TOKEN_KEYS), usd + row_cost(r))
     lane = {j: board.get(j, {}).get("lane") or "standard" for j in costs}
-    out = [f"# Tokens: digest {digest_id}", "", f"Rows: the last {JOB_COST_DAYS} days of transcripts", "", "## Jobs"]
-    for j in listed:
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="minutes")  # write_pulse's format
+    out = [f"# Tokens: digest {digest_id}", "", f"Window: {iso(start)} to {iso(now)}", "", "## Jobs"]
+    for j in sorted((j for j in listed if j in costs), key=lambda j: -costs[j][1]) + [j for j in listed if j not in costs]:
         if j not in costs:
             out.append(f"- {j} · no transcript rows")
             continue
@@ -1952,9 +1960,11 @@ def write_tokens(root, digest_id):
         except (OSError, ValueError, SystemExit, subprocess.SubprocessError):
             added = None
         tok, usd = costs[j]
-        out.append(f"- {j} · lane {lane[j]} · +{'?' if added is None else added} lines · ${usd:.2f} · {tok} tokens")
+        per = f"{round(tok / added):,}" if added else "-"
+        out.append(f"- {j} · lane {lane[j]} · +{'?' if added is None else added} lines · ${usd:.2f} · {tok:,} tokens"
+                   f" · {per} tokens per added line")
         for (agent, rnd, model), (t, u) in sorted(groups[j].items(), key=lambda g: (-g[1][1], -g[1][0])):
-            out.append(f"  - {agent} · round {'-' if rnd is None else rnd} · {model or 'unknown'} · ${u:.2f} · {t} tokens")
+            out.append(f"  - {agent} · round {'-' if rnd is None else rnd} · {model or 'unknown'} · ${u:.2f} · {t:,} tokens")
     ranked = sorted(costs, key=lambda j: (-costs[j][1], j))
     top = {j for j in ranked[:TOKENS_FLAG["top"]] if costs[j][1] > 0}
     medians = {}

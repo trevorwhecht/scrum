@@ -150,6 +150,7 @@ class WriteTokensTest(unittest.TestCase):
         self.addCleanup(env.stop)
         fit = mock.patch.object(board, "_fit_diff", side_effect=self.fit)
         self.fit_calls = []
+        self.added = {"1-a": 120}
         fit.start()
         self.addCleanup(fit.stop)
         self.t = time.time() - 3600
@@ -157,7 +158,7 @@ class WriteTokensTest(unittest.TestCase):
 
     def fit(self, root, job):
         self.fit_calls.append(job["id"])
-        return (120, 3, 2, None) if job["id"] == "1-a" else (None, None, None, None)
+        return (self.added[job["id"]], 3, 2, None) if job["id"] in self.added else (None, None, None, None)
 
     def board_jobs(self, *jobs):
         (self.root / "board.json").write_text(json.dumps({"jobs": [
@@ -208,15 +209,15 @@ class WriteTokensTest(unittest.TestCase):
         jobs = text[text.index("## Jobs\n"):text.index("## Flagged\n")]
         self.assertEqual(jobs, (
             "## Jobs\n"
-            "- 1-a · lane standard · +120 lines · $12.50 · 507000 tokens\n"
-            "  - scrum-review-ui · round 1 · claude-opus-4-5 · $5.00 · 201000 tokens\n"
-            "  - scrum-review-ui · round 2 · claude-opus-4-5 · $4.50 · 186000 tokens\n"
-            "  - main · round - · claude-opus-4-5 · $2.00 · 80000 tokens\n"
-            "  - scrum-builder · round 0 · claude-opus-4-5 · $1.00 · 40000 tokens\n"
-            "- 2-b · lane standard · +? lines · $1.00 · 40000 tokens\n"
-            "  - main · round - · claude-opus-4-5 · $1.00 · 40000 tokens\n"
-            "- 3-c · lane standard · +? lines · $2.00 · 133333 tokens\n"
-            "  - main · round - · claude-sonnet-4-5 · $2.00 · 133333 tokens\n"
+            "- 1-a · lane standard · +120 lines · $12.50 · 507,000 tokens · 4,225 tokens per added line\n"
+            "  - scrum-review-ui · round 1 · claude-opus-4-5 · $5.00 · 201,000 tokens\n"
+            "  - scrum-review-ui · round 2 · claude-opus-4-5 · $4.50 · 186,000 tokens\n"
+            "  - main · round - · claude-opus-4-5 · $2.00 · 80,000 tokens\n"
+            "  - scrum-builder · round 0 · claude-opus-4-5 · $1.00 · 40,000 tokens\n"
+            "- 3-c · lane standard · +? lines · $2.00 · 133,333 tokens · - tokens per added line\n"
+            "  - main · round - · claude-sonnet-4-5 · $2.00 · 133,333 tokens\n"
+            "- 2-b · lane standard · +? lines · $1.00 · 40,000 tokens · - tokens per added line\n"
+            "  - main · round - · claude-opus-4-5 · $1.00 · 40,000 tokens\n"
             "- 4-d · no transcript rows\n"
             "\n"))
         self.assertNotIn("5-e", text)
@@ -231,8 +232,7 @@ class WriteTokensTest(unittest.TestCase):
         self.assertEqual(lines[0], (
             "- 1-a · $12.50 · scrum-review-ui ran on claude-opus-4-5, pinned sonnet; 6.3x lane median ($2.00); "
             "top 3 cost; scrum-review-ui 76% of job cost; scrum-review-ui round 2 $4.50 = 90% of round 1 $5.00"))
-        self.assertEqual(lines[1:], ["- 3-c · $2.00 · top 3 cost; main 100% of job cost",
-                                     "- 2-b · $1.00 · top 3 cost; main 100% of job cost"])
+        self.assertEqual(lines[1:], ["- 3-c · $2.00 · top 3 cost", "- 2-b · $1.00 · top 3 cost"])
         self.assertIn("  - scrum-review-ui · round 1 · claude-opus-4-5 · $5.00", text)
         self.assertIn("  - scrum-review-ui · round 2 · claude-opus-4-5 · $4.50", text)
 
@@ -272,7 +272,7 @@ class WriteTokensTest(unittest.TestCase):
             "  - costliest: scrum-review-ui $9.50",
             "  - tools: Bash 2, Read 1",
             "  - image reads: 1",
-            "  - peak context: 3000 tokens",
+            "  - peak context: 3,000 tokens",
             f"  - transcript: {self.r1}",
             f"  - transcript: {self.r2}"])
         self.assertLessEqual(len(block.splitlines()) - 1, 10)
@@ -318,6 +318,7 @@ class WriteTokensTest(unittest.TestCase):
         (self.root / "digests" / "001").rmdir()
         job_id = board.cmd_new(self.root, "done 0")
         board.cmd_set(self.root, job_id, ["stage=done"], internal=True)
+        self.stamp(job_id, "feature.md", self.t - 60)  # created before its rows
         self.main("s1", job_id, self.replies([1]))
         order = []
         real_waste, real_tokens = board.write_waste, board.write_tokens
@@ -327,7 +328,7 @@ class WriteTokensTest(unittest.TestCase):
         self.assertEqual(out["id"], "001")
         self.assertEqual(order, ["waste", "tokens"])
         text = (self.root / "digests" / "001" / "tokens.md").read_text()
-        self.assertIn(f"- {job_id} · lane standard · +? lines · $1.00 · 40000 tokens\n", text)
+        self.assertIn(f"- {job_id} · lane standard · +? lines · $1.00 · 40,000 tokens · - tokens per added line\n", text)
         board.cmd_new(self.root, "done 1")
         job2 = board.read_board(self.root)["jobs"][-1]["id"]
         board.cmd_set(self.root, job2, ["stage=done"], internal=True)
@@ -338,6 +339,126 @@ class WriteTokensTest(unittest.TestCase):
         self.assertIn("digest-start: tokens: boom\n", err.getvalue())
         self.assertTrue((self.root / "digests" / "002" / "waste.md").exists())
         self.assertFalse((self.root / "digests" / "002" / "tokens.md").exists())
+
+    # Job 1251: tokens per added line, `,` separators, the window start, the 2+ agents share rule, TimeoutExpired.
+    def done_job(self, title):
+        guard = mock.patch.object(board, "merge_refusal", return_value=None)  # PR-less fixture jobs may go done
+        guard.start()
+        self.addCleanup(guard.stop)
+        job_id = board.cmd_new(self.root, title)
+        board.cmd_set(self.root, job_id, ["stage=done"], internal=True)
+        self.stamp(job_id, "feature.md", self.t - 60)  # created before its rows
+        return job_id
+
+    def test_digest_start_writes_tokens_by_agent(self):
+        (self.root / "digests" / "001").rmdir()
+        job = self.done_job("job c")
+        self.added = {job: 100}
+        self.main("s1", job, [reply(self.t + 1, "c1", cwd=str(self.repo), input_tokens=400_000)])
+        self.sub("s1", "u1", "scrum-review-ui", job, 1,
+                 [reply(self.t + 2, "c2", cwd=str(self.repo), input_tokens=600_000)])
+        self.assertEqual(board.cmd_digest_start(self.root)["id"], "001")
+        text = (self.root / "digests" / "001" / "tokens.md").read_text()
+        self.assertIn(
+            f"- {job} · lane standard · +100 lines · $5.00 · 1,000,000 tokens · 10,000 tokens per added line\n"
+            "  - scrum-review-ui · round 1 · claude-opus-4-5 · $3.00 · 600,000 tokens\n"
+            "  - main · round - · claude-opus-4-5 · $2.00 · 400,000 tokens\n", text)
+        self.assertIn(f"- {job} · $5.00 · scrum-review-ui ran on claude-opus-4-5, pinned sonnet; top 3 cost; "
+                      "scrum-review-ui 60% of job cost\n", text)  # main's 40% is not over agent_share
+        self.assertIn("  - peak context: 600,000 tokens\n", text)
+
+    def test_tokens_no_rows_and_no_added(self):
+        self.board_jobs(("1-a", None), ("2-b", None), ("3-c", None), ("4-d", None), ("5-e", None))
+        self.jobs_txt("4-d", "5-e", "1-a", "3-c", "2-b")
+        self.added = {"1-a": 0, "5-e": 3}
+        self.main("s1", "1-a", self.replies([1]))
+        self.main("s2", "2-b", self.replies([2]))
+        self.main("s5", "5-e", self.replies([1]))
+        text = self.tokens()
+        jobs = text[text.index("## Jobs\n"):text.index("## Flagged\n")]
+        self.assertEqual(jobs, (
+            "## Jobs\n"
+            "- 2-b · lane standard · +? lines · $2.00 · 80,000 tokens · - tokens per added line\n"
+            "  - main · round - · claude-opus-4-5 · $2.00 · 80,000 tokens\n"
+            "- 5-e · lane standard · +3 lines · $1.00 · 40,000 tokens · 13,333 tokens per added line\n"
+            "  - main · round - · claude-opus-4-5 · $1.00 · 40,000 tokens\n"
+            "- 1-a · lane standard · +0 lines · $1.00 · 40,000 tokens · - tokens per added line\n"
+            "  - main · round - · claude-opus-4-5 · $1.00 · 40,000 tokens\n"
+            "- 4-d · no transcript rows\n"
+            "- 3-c · no transcript rows\n"
+            "\n"))
+        flagged = text[text.index("## Flagged\n"):]
+        self.assertNotIn("4-d", flagged)
+        self.assertNotIn("3-c", flagged)
+        self.assertNotIn("% of job cost", flagged)  # a one-agent job is never flagged for one agent's share
+
+    def mocked_row(self, job, ts):
+        return {"ts": ts, "model": "claude-opus-4-5", "project": "app", "job": job, "agent": "main", "skill": None,
+                "round": None, "transcript": "/t.jsonl", **{k: 0 for k in board.TOKEN_KEYS}, "output_tokens": 40_000}
+
+    def window(self, now):
+        calls = []
+
+        def tt(start, end, *rest):
+            calls.append((start, end))
+            return [self.mocked_row("1-a", end - 1)]
+        with mock.patch.object(board, "transcript_tokens", side_effect=tt), \
+                mock.patch.object(board.time, "time", return_value=now):
+            board.write_tokens(self.root, "001")
+        return calls, (self.root / "digests" / "001" / "tokens.md").read_text()
+
+    def stamp(self, job, name, t):
+        p = self.root / "jobs" / job / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
+        os.utime(p, (t, t))
+
+    def test_tokens_window_start(self):
+        now = 1_800_000_000  # 2027-01-15T08:00Z
+        self.board_jobs(("1-a", None), ("2-b", None), ("3-c", None), ("4-d", None))
+        self.jobs_txt("1-a", "2-b", "3-c")
+        calls, text = self.window(now)  # no claimed job has a folder: the 7-day floor
+        self.assertEqual(calls, [(1_799_395_200, now)])
+        self.assertIn("\nWindow: 2027-01-08T08:00+00:00 to 2027-01-15T08:00+00:00\n", text)
+        self.stamp("1-a", "feature.md", now - 3600)
+        self.stamp("1-a", "spec.md", now - 5 * 86400)  # feature.md wins over an older spec.md
+        self.stamp("2-b", "spec.md", 1_799_740_800)  # spec.md only: 2027-01-12T08:00Z, the earliest
+        self.stamp("3-c", "feature.md", now - 86400)
+        self.stamp("4-d", "feature.md", now - 6 * 86400)  # not claimed
+        calls, text = self.window(now)
+        self.assertEqual(calls, [(1_799_740_800, now)])
+        self.assertIn("\nWindow: 2027-01-12T08:00+00:00 to 2027-01-15T08:00+00:00\n", text)
+        self.stamp("3-c", "feature.md", now - 10 * 86400)  # older than the floor
+        calls, text = self.window(now)
+        self.assertEqual(calls, [(1_799_395_200, now)])
+        self.assertIn("\nWindow: 2027-01-08T08:00+00:00 to 2027-01-15T08:00+00:00\n", text)
+        self.assertNotIn("Rows: the last", text)
+
+    def test_tokens_skips_read_when_unregistered(self):
+        self.board_jobs(("1-a", None))
+        self.jobs_txt("1-a")
+        other = Path(self.tmp.name).resolve() / "other"
+        (other / "scrum").mkdir(parents=True)
+        reg = Path(self.tmp.name).resolve() / "machine" / "other.json"
+        reg.write_text(json.dumps([str(other)]))
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg)}), \
+                mock.patch.object(board, "transcript_tokens") as tt:
+            self.assertEqual(self.tokens(), "No transcript rows for this digest's jobs\n")
+        tt.assert_not_called()
+
+    def test_digest_start_tokens_failure_does_not_stop(self):
+        (self.root / "digests" / "001").rmdir()
+        for i, err in enumerate([OSError("boom"), board.subprocess.TimeoutExpired(["gh"], 30)]):
+            self.done_job(f"done {i}")
+            digest = f"00{i + 1}"
+            out = io.StringIO()
+            with mock.patch.object(board, "write_tokens", side_effect=err), redirect_stderr(out):
+                got = board.cmd_digest_start(self.root)
+            self.assertEqual(sorted(got), ["id", "jobs", "windows"])
+            self.assertEqual(got["id"], digest)
+            self.assertIn(f"digest-start: tokens: {err}\n", out.getvalue())
+            for name in ("timing.md", "processes.md", "waste.md"):
+                self.assertTrue((self.root / "digests" / digest / name).exists(), name)
 
 
 if __name__ == "__main__":
