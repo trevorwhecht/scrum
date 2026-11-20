@@ -4611,6 +4611,16 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("dev-migrated.md", dev)
         self.assertIn("Only Migrate step 3, after Step 8 succeeded on prod, writes `migrated.md`", dev)
 
+    # --- job 1291: a lilguy session reads only the lane parts it runs ---
+    def test_lilguy_reads_only_its_lane_parts(self):
+        lanes = SKILL_DIR / "lanes"
+        line = next(l for l in (lanes / "lilguy.md").read_text().splitlines() if l.startswith("Every Bash call"))
+        for phrase in ("run the `read` command `B lilguy-fit` printed", "with no `read`", "`sed -n '1,/^## Migrate/p' lanes/merge.md`"):
+            self.assertIn(phrase, line)
+        start = next(l for l in (lanes / "commands.md").read_text().splitlines() if l.startswith("- **`/trevskills-scrum start <id>`**"))
+        self.assertIn("run its `read` command", start)
+        self.assertNotIn("awk '", start)
+
 
 if __name__ == "__main__":
     unittest.main()

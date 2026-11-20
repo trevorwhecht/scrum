@@ -10025,9 +10025,75 @@ class LilguyFitTest(unittest.TestCase):
             code = board.main(["--dir", str(self.root), "lilguy-fit", self.job])
         self.assertIn(code, (0, None))
         got = json.loads(out.getvalue())
-        self.assertEqual(set(got), {"fit", "why"})
+        self.assertEqual(set(got), {"fit", "why", "read"})
         self.assertIs(got["fit"], True)
         self.assertEqual(out.getvalue().count("\n"), 1)
+        self.assertNotIn("read", json.loads((self.jd / "lilguy-fit.json").read_text()))
+        lane = str(board.LANE_DIR)
+        self.assertEqual(got["read"].count("sed -n "), 2)
+        self.assertIn("; sed -n ", got["read"])
+        self.assertTrue(got["read"].startswith("sed -n ") and shlex.quote(lane + "/newjob.md") in got["read"]
+                        and got["read"].endswith(shlex.quote(lane + "/merge.md")))
+
+    def _parts(self, read):
+        out = []
+        for cmd in read.split("; sed -n "):
+            toks = shlex.split(cmd if cmd.startswith("sed -n ") else "sed -n " + cmd)
+            out += [(Path(toks[3]).name, *map(int, r[:-1].split(","))) for r in toks[2].split(";")]
+        return out
+
+    def test_lilguy_read_ranges_start_at_headings(self):
+        want = [("newjob.md", r"2\. \*\*Base:\*\*", r"3\. \*\*Spec:\*\*"), ("newjob.md", r"4\. \*\*Worktree:\*\*", r"5\. \*\*Build:\*\*"),
+                ("newjob.md", r"2\. \*\*Runtime files\*\*", r"4\. "), ("merge.md", r"3\. \*\*PR\.\*\*", r"## Cool-down park"),
+                ("merge.md", r"## Cool-down park", r"## ")]
+        parts = self._parts(board.lilguy_read())
+        self.assertEqual(len(parts), 5)
+        for (name, a, b), (wname, ws, we) in zip(parts, want):
+            lines = (board.LANE_DIR / name).read_text().splitlines()
+            self.assertEqual(name, wname)
+            self.assertRegex(lines[a - 1], "^" + ws)
+            self.assertRegex(lines[b], "^" + we)
+
+    def test_lilguy_read_prints_only_lilguy_parts(self):
+        read = board.lilguy_read()
+        res = subprocess.run(read, shell=True, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0)
+        for want in ("2. **Base:**", "4. **Worktree:**", "2. **Runtime files**", "Write `round-$N/check.md`", "3. **PR.**",
+                     "7. **Clean up:**", "## Cool-down park"):
+            self.assertIn(want, res.stdout)
+        for bad in ("3. **Spec:**", "## Fast lane", "5. If it says PASS", "## Migrate", "## Dev migrate", "## Resuming the builder"):
+            self.assertNotIn(bad, res.stdout)
+        whole = sum(len((board.LANE_DIR / n).read_text()) for n in ("newjob.md", "merge.md"))
+        self.assertLess(len(res.stdout), whole * 2 / 3)
+
+    def test_lilguy_fit_false_prints_no_read(self):
+        for setup in (lambda: self.points(2), lambda: (self.points(1), (self.jd / "feature.md").write_text("Lane: fast\n"))):
+            setup()
+            out = io.StringIO()
+            with redirect_stdout(out):
+                board.main(["--dir", str(self.root), "lilguy-fit", self.job])
+            got = json.loads(out.getvalue())
+            self.assertIs(got["fit"], False)
+            self.assertNotIn("read", got)
+
+    def test_lilguy_read_missing_heading_prints_none(self):
+        tmp = Path(self.tmp.name) / "lanes"
+        tmp.mkdir()
+        self.assertIsNone(board.lilguy_read(tmp))
+        for n in ("newjob.md", "merge.md"):
+            shutil.copy(board.LANE_DIR / n, tmp / n)
+        self.assertIsNotNone(board.lilguy_read(tmp))
+        text = (tmp / "newjob.md").read_text()
+        (tmp / "newjob.md").write_text(text.replace("4. **Worktree:**", "4. **Tree:**"))
+        self.assertIsNone(board.lilguy_read(tmp))
+        self.points(1)
+        out = io.StringIO()
+        with mock.patch.object(board, "LANE_DIR", tmp), redirect_stdout(out):
+            code = board.main(["--dir", str(self.root), "lilguy-fit", self.job])
+        self.assertIn(code, (0, None))
+        got = json.loads(out.getvalue())
+        self.assertIs(got["fit"], True)
+        self.assertNotIn("read", got)
 
     def test_lilguy_fit_points_1_naming_skill_md_passes(self):
         self.points(1)

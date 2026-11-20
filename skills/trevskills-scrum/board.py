@@ -110,7 +110,7 @@
                                    round-(n-1)/head.txt, else null (Check gate step 1)
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
                                    git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
-  board.py lilguy-fit <id>         print {"fit","why"}: whether the job is tiny (backlog points 1, or jev.log's last model
+  board.py lilguy-fit <id>         print {"fit","why"} (+ "read": a sed command for the lane parts a lilguy job runs, when fit): whether the job is tiny (backlog points 1, or jev.log's last model
                                    answer score < 1.5 at confidence >= 0.7, or feature.md names a file path) with no
                                    hard-stop word in feature.md and an estimate (10 lines per named path) within 30
                                    lines, 10 files (SKILL.md New job step 3's Lilguy route)
@@ -4156,6 +4156,36 @@ def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool =
     clean_round = green and lane == "standard" and last_n == 1 and bool(hard) and hard.group(1).strip() == "none" \
         and not blocked and not any(ENV_RE.search(p) or SENSITIVE_RE.search(p) for p in names)
     return {"promote": promote, "clean_round": bool(clean_round), "approver_sonnet": bool(green)}
+
+
+LANE_DIR = Path(__file__).resolve().parent / "lanes"
+# (file, start-line regex, end-line regex) for the lane lines a lilguy job runs; the end line is not read
+LILGUY_READ_PARTS = (
+    ("newjob.md", r"2\. \*\*Base:\*\*", r"3\. \*\*Spec:\*\*"),
+    ("newjob.md", r"4\. \*\*Worktree:\*\*", r"5\. \*\*Build:\*\*"),
+    ("newjob.md", r"2\. \*\*Runtime files\*\*", r"4\. "),
+    ("merge.md", r"3\. \*\*PR\.\*\*", r"## Cool-down park"),
+    ("merge.md", r"## Cool-down park", r"## "),
+)
+
+
+def lilguy_read(lane_dir: Path | None = None) -> str | None:
+    """One `sed -n` shell command per lane file for the lines a lilguy job runs, or None when a file or anchor is missing."""
+    lane_dir = Path(lane_dir) if lane_dir is not None else LANE_DIR
+    ranges: dict[str, list[str]] = {}
+    for name, start, end in LILGUY_READ_PARTS:
+        try:
+            lines = (lane_dir / name).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        starts = [i for i, ln in enumerate(lines) if re.match(start, ln)]
+        if len(starts) != 1:
+            return None
+        stop = next((i for i in range(starts[0] + 1, len(lines)) if re.match(end, lines[i])), None)
+        if stop is None:
+            return None
+        ranges.setdefault(name, []).append(f"{starts[0] + 1},{stop}p")
+    return "; ".join(f"sed -n {shlex.quote(';'.join(r))} {shlex.quote(str(lane_dir / n))}" for n, r in ranges.items())
 
 
 # --- lilguy-fit: SKILL.md New job step 3's Lilguy route. Tiny (1 point, Jev confident it is trivial, or a named file)
@@ -8347,7 +8377,11 @@ def main(argv=None):
         print(json.dumps(out))
         return 1 if out.get("ok") is False else 0
     elif a.cmd == "lilguy-fit":
-        print(json.dumps(cmd_lilguy_fit(a.dir, a.id)))
+        out = cmd_lilguy_fit(a.dir, a.id)
+        read = lilguy_read() if out.get("fit") else None
+        if read:
+            out = {**out, "read": read}
+        print(json.dumps(out))
     elif a.cmd == "claude-paths":
         print(json.dumps(cmd_claude_paths(a.dir, a.id)))
     elif a.cmd == "claude-batch":
