@@ -1966,7 +1966,7 @@ def write_waste(root, digest_id):
 
 
 MODEL_RANK = {"haiku": 0, "sonnet": 1, "opus": 2, "fable": 3}  # write_tokens' pricier-model rule, cheapest first
-TOKENS_FLAG = {"median_x": 2, "top": 3, "agent_share": 0.4, "round_share": 0.8}  # write_tokens' ## Flagged limits
+TOKENS_FLAG = {"median_x": 2, "top": 3, "agent_share": 0.4, "agent_share_min_usd": 1.00, "round_share": 0.8}  # write_tokens' ## Flagged limits
 TOKENS_TRANSCRIPTS = 6  # transcript lines under a flagged job's costliest agent
 
 
@@ -1977,7 +1977,7 @@ def _model_family(model):
 
 def _token_reasons(job, usd, groups, lane_median, top):
     """write_tokens' ## Flagged reasons for one job, in the fixed order: pricier model than the agent's pin, over
-    TOKENS_FLAG median_x its lane median, a top-cost job, one of 2 or more agents over agent_share of the job, a
+    TOKENS_FLAG median_x its lane median, a top-cost job, one of 2 or more agents over agent_share of a job costing at least agent_share_min_usd, a
     reviewer's later round at round_share or more of its round 1. (write_tokens adds _two_sessions and _two_agents after them.)"""
     out, by_agent, by_round = [], {}, {}
     for (agent, rnd, model), (_, a) in groups.items():
@@ -1993,7 +1993,7 @@ def _token_reasons(job, usd, groups, lane_median, top):
     if job in top:
         out.append("top 3 cost")
     for agent, a in sorted(by_agent.items(), key=lambda x: -x[1]):  # a one-agent job is always 100% that agent
-        if usd > 0 and len(by_agent) > 1 and a > TOKENS_FLAG["agent_share"] * usd:
+        if usd >= TOKENS_FLAG["agent_share_min_usd"] and len(by_agent) > 1 and a > TOKENS_FLAG["agent_share"] * usd:
             out.append(f"{agent} {100 * a / usd:.0f}% of job cost")
     for (agent, rnd), a in sorted(by_round.items(), key=lambda x: (x[0][0], x[0][1] or 0)):
         base = by_round.get((agent, 1), 0)
