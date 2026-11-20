@@ -1964,7 +1964,8 @@ class ContractTest(unittest.TestCase):
         self.assertLess(step1.index("B pipeline-fit"), step1.index("B digest-trevor <id>"))
         self.assertIn("never stops the digest", step1[step1.index("B digest-trevor <id>"):])
         reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
-        for phrase in ("DIGEST_DIR/trevor.md", "    ## Trevor asked\n", "asked again after fix: yes|no", "`kind: note`"):
+        for phrase in ("DIGEST_DIR/trevor.md", "    ## Trevor asked\n", "asked again after fix: yes|no", "`kind: note`",
+                       "`  context: <text>` line", "which mistake a bare"):
             self.assertIn(phrase, reader, phrase)
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()
         rule = digester[digester.index("**Trevor asked.**"):]
