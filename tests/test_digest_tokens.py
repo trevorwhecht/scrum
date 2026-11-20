@@ -1,7 +1,7 @@
 """Job 1241: the digest's per-job cost audit, digests/<NNN>/tokens.md (board.write_tokens, called by cmd_digest_start),
 and the helpers it shares with serve.py job_costs (board.cost_by_job, JOB_COST_DAYS, prompt_round, agent_pin,
 transcript_tools)."""
-import io, json, os, sys, tempfile, time, unittest
+import io, json, shutil, os, sys, tempfile, time, unittest
 from contextlib import redirect_stderr
 from datetime import datetime, timezone
 from pathlib import Path
@@ -287,6 +287,32 @@ class WriteTokensTest(unittest.TestCase):
         tl = [l for l in flagged.splitlines() if l.startswith("  - transcript: ")]
         self.assertEqual(tl, [f"  - transcript: {p}" for p in paths[:5]] + ["  - transcript: +3 more"])
         self.assertIn("  - tools: none", flagged)
+
+    def span(self, t0, t1, usd, tag):
+        """Two replies stamped t0 and t1 seconds after self.t, together costing usd (opus)."""
+        return [reply(self.t + t, f"{tag}{t}", cwd=str(self.repo), output_tokens=round(usd * 20_000))
+                for t in (t0, t1)]
+
+    def two_sessions(self, a, b, agent="scrum-builder"):
+        self.board_jobs(("1-a", None))
+        self.jobs_txt("1-a")
+        for old in (self.dir / "p").glob("s*"):  # a second call in one test starts clean
+            shutil.rmtree(old, ignore_errors=True)
+        self.sub(a[0], "x1", agent, "1-a", 0, self.span(*a[1:], "p"))
+        self.sub(b[0], "x2", agent, "1-a", 0, self.span(*b[1:], "q"))
+        text = self.tokens()
+        return [l for l in text[text.index("## Flagged\n"):].splitlines() if "two sessions" in l]
+
+    def test_two_sessions_flag(self):
+        hm = lambda t: datetime.fromtimestamp(self.t + t).strftime("%H:%M")
+        got = self.two_sessions(("s1", 0, 600, 3), ("s2", 300, 1200, 1))  # overlap; the shorter run is the $1 one
+        self.assertEqual(len(got), 1)
+        self.assertIn(f"two sessions: scrum-builder {hm(0)}-{hm(600)} and {hm(300)}-{hm(1200)}, wasted $1.00", got[0])
+
+    def test_two_sessions_not_flagged_without_overlap_or_with_one_parent(self):
+        self.assertEqual(self.two_sessions(("s1", 0, 600, 3), ("s2", 900, 1200, 1)), [])  # no overlap
+        self.assertEqual(self.two_sessions(("s1", 0, 600, 3), ("s1", 300, 1200, 1)), [])  # one parent session
+        self.assertEqual(len(self.two_sessions(("s1", 0, 600, 3), ("s2", 300, 1200, 1), agent="scrum-review-ui")), 1)
 
     def test_empty_and_missing_inputs(self):
         self.board_jobs(("1-a", None))
