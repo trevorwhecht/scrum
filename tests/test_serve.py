@@ -3530,7 +3530,8 @@ class ServeTest(unittest.TestCase):
 
     def test_spawn_records_runlog(self):
         job_id = self.job("runlog me")
-        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+        with mock.patch.object(self.serve.subprocess, "Popen") as popen, \
+                mock.patch.object(self.serve.board, "session_alive_fn", return_value=lambda job: False):  # ps runs through the mocked Popen
             self.serve.spawn("repo", self.root, job_id, "start", "x")
             self.serve.spawn("repo", self.root, "999-not-on-board", "start", "x")  # failure is ignored
         self.addCleanup(lambda: [self.serve.RUNS.pop(f"repo/{i}", None) for i in (job_id, "999-not-on-board")])
@@ -3625,7 +3626,8 @@ class ServeTest(unittest.TestCase):
     def test_spawn_silences_notifier(self):
         job_id = self.job("quiet spawn")
         # Headless scrum sessions export CLAUDE_NOTIFIER_DISABLE=1; unset it here so the parent-env check is hermetic.
-        with mock.patch.dict(os.environ), mock.patch.object(self.serve.subprocess, "Popen") as popen:
+        with mock.patch.dict(os.environ), mock.patch.object(self.serve.subprocess, "Popen") as popen, \
+                mock.patch.object(self.serve.board, "session_alive_fn", return_value=lambda job: False):  # ps runs through the mocked Popen
             os.environ.pop("CLAUDE_NOTIFIER_DISABLE", None)
             self.serve.spawn("repo", self.root, job_id, "start", "x")
             env = popen.call_args.kwargs["env"]
@@ -7891,7 +7893,8 @@ class AutoResumeTest(unittest.TestCase):
         s = self.serve
         (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
         self.addCleanup(lambda: [s.RUNS.pop(f"p/{j['id']}", None) for j in jobs])
-        with mock.patch.object(s.board.subprocess, "Popen") as popen, mock.patch.object(s, "running", return_value=False):
+        with mock.patch.object(s.board.subprocess, "Popen") as popen, mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s.board, "session_alive_fn", return_value=lambda job: False):  # ps runs through the mocked Popen
             s.auto_resume("p", self.root, jobs)
         return [(c.args[0][2].split()[-1], c.kwargs["env"].get("CLAUDE_CONFIG_DIR")) for c in popen.call_args_list]
 

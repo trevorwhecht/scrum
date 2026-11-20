@@ -601,6 +601,10 @@ class SpawnAccountTest(AccountEnv):
         self.root = Path(self.tmp.name) / "scrum"
         self.root.mkdir()
         self.job = board.cmd_new(self.root, "x")
+        # job 1275: spawn's live-session scan runs ps through subprocess.run, which a mocked Popen breaks
+        alive = mock.patch.object(board, "session_alive_fn", return_value=lambda job: False)
+        alive.start()
+        self.addCleanup(alive.stop)
 
     def spawn(self, job_id=None, environ=None):
         with mock.patch.object(board.subprocess, "Popen") as popen, mock.patch.dict(os.environ, environ or {}):

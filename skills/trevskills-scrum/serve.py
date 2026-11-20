@@ -331,8 +331,10 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     project (live_ids). A launched non-manual `start` of a board job appends {project, job, cpu} (the gate's reading)
     to PULSE_STARTS for pulse_tick. While the CPU gate is open, a non-manual `start` of any job other than cpu_first()
     (the longest-held CPU launch) is queued too, noted cpu_queue, so that job starts ahead of new claims and other projects.
-    `nice` (the UI sweep's UI_SWEEP_NICE) goes to board.spawn only when given; every other session keeps SESSION_NICE."""
-    reason, on_board, queued_at, hold = None, False, None, None
+    `nice` (the UI sweep's UI_SWEEP_NICE) goes to board.spawn only when given; every other session keeps SESSION_NICE.
+    A board job whose session is still alive (board.spawn's LiveSession, job 1275) starts nothing: one stderr line, its
+    queued launch dropped (unqueue), None."""
+    reason, on_board, queued_at, hold, refused_live = None, False, None, None, None
     niced = {} if nice is None else {"nice": nice}
     if action in GATED:
         try:
@@ -364,7 +366,14 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 if ram_short and held_over(queued_at):
                     hold = ram_hold_text()
             else:
-                proc, log = board.spawn(root, job_id, action, prompt, flags, **niced)
+                try:
+                    proc, log = board.spawn(root, job_id, action, prompt, flags, **niced)
+                except board.LiveSession as e:  # job 1275: a second session would fight the live one
+                    refused_live = e
+        if refused_live:  # not started and not queued: play_queue_tick would retry it every tick
+            print(f"spawn refused: {project}/{job_id} {action}: {refused_live}", file=sys.stderr, flush=True)
+            unqueue(root, job)
+            return None
         with board.locked_board(root) as b:  # the live job, re-read under the lock
             live = next((j for j in b["jobs"] if j["id"] == job_id), {})  # {}: removed meanwhile, nothing to mark
             if proc is None:  # setdefault: a second click keeps the first time and launch
@@ -398,7 +407,11 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             board.find(board.read_board(root), job_id)
         except (SystemExit, OSError):
             account = off_board or board.pick_account(time.time())[0]
-        proc, log = board.spawn(root, job_id, action, prompt, flags, account=account, **niced)
+        try:
+            proc, log = board.spawn(root, job_id, action, prompt, flags, account=account, **niced)
+        except board.LiveSession as e:  # job 1275: a board job past the gate (cloud-home) is checked too
+            print(f"spawn refused: {project}/{job_id} {action}: {e}", file=sys.stderr, flush=True)
+            return None
         if action == "run-all" and not manual:  # a run-all launch (not a board job) is a start too, for pulse_tick
             with PULSE_STARTS_LOCK:
                 PULSE_STARTS.append({"project": project, "job": job_id, "cpu": board.cpu_load_pct()})
