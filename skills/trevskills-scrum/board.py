@@ -4384,6 +4384,20 @@ def row_cost(row):
     return sum(token_count(row.get(k)) * p for k, p in zip(TOKEN_KEYS, price)) / 1e6 if price else 0
 
 
+JOB_COST_DAYS = 7  # how far back job costs (serve.py job_costs, write_tokens) read transcripts; an older job shows no cost
+
+
+def cost_by_job(rows):
+    """{project: {job: (tokens, usd)}} over the transcript_tokens rows whose project and job are both set: tokens the
+    TOKEN_KEYS sum, usd the row_cost sum. serve.py job_costs and write_tokens share it."""
+    costs = {}
+    for r in rows:
+        if r["project"] and r["job"]:
+            tok, usd = costs.setdefault(r["project"], {}).get(r["job"], (0, 0))
+            costs[r["project"]][r["job"]] = (tok + sum(r[k] for k in TOKEN_KEYS), usd + row_cost(r))
+    return costs
+
+
 def token_count(v):
     """A usage count as an int; anything else (a string, None, a bool, NaN, Infinity) is 0."""
     try:
@@ -4406,6 +4420,13 @@ def first_prompt_tags(text):
         job = words[1] if len(words) > 1 and words[1][0].isdigit() else None
     m = re.search(r"<command-name>/?(trevskills-[\w-]*)</command-name>", text)
     return job or None, m and m.group(1)
+
+
+def prompt_round(text):
+    """The int of the first ROUND=<digits> in a transcript's first prompt (the round a scrum agent was spawned for),
+    else None; a bad value such as ROUND=x is None."""
+    m = re.search(r"(?<![\w])ROUND=([0-9]+)(?![\w])", text)
+    return int(m.group(1)) if m else None
 
 
 def read_transcript(path):
@@ -4446,7 +4467,8 @@ def read_transcript(path):
 
 def transcript_tokens(start, end, projects_dir=None):
     """One row per Claude Code assistant message stamped in [start, end) (epoch seconds), sorted by ts: token counts,
-    model, and the project, job, agent and skill it is attributed to. Reads <dir>/*/*.jsonl (main sessions) and
+    model, the project, job, agent and skill it is attributed to, its `round` (prompt_round of that file's own first
+    prompt; a subagent never inherits its parent's) and its `transcript` path as a str. Reads <dir>/*/*.jsonl (main sessions) and
     <dir>/*/<session>/subagents/agent-*.jsonl; files last written before start are never opened. Read-only."""
     root = Path(projects_dir) if projects_dir else transcripts_dir()
     repos = sorted(((n, p.resolve()) for n, p in projects().items()), key=lambda r: -len(r[1].parts))
@@ -4483,6 +4505,7 @@ def transcript_tokens(start, end, projects_dir=None):
         seen.add(real)
         rows, first = read_transcript(path)
         job, skill = first_prompt_tags(first)
+        rnd = prompt_round(first)
         if path.parent.name == "subagents":
             pjob, skill = tags.get(path.parent.parent.with_suffix(".jsonl"), (None, None))
             job = job or pjob
@@ -4497,7 +4520,8 @@ def transcript_tokens(start, end, projects_dir=None):
         for row in rows.values():
             if start <= row["ts"] < end:
                 project, wt = place(row.pop("cwd"))
-                out.append({**row, "project": project, "job": wt or job, "agent": agent, "skill": skill})
+                out.append({**row, "project": project, "job": wt or job, "agent": agent, "skill": skill,
+                            "round": rnd, "transcript": str(path)})
     return sorted(out, key=lambda r: r["ts"])
 
 

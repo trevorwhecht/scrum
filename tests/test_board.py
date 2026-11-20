@@ -12000,7 +12000,7 @@ class TranscriptTokensTest(unittest.TestCase):
         return board.transcript_tokens(start, end, self.dir)
 
     def test_transcript_tokens_rows_and_dedupe(self):
-        self.write("p/s1.jsonl", [prompt("hi"),
+        path = self.write("p/s1.jsonl", [prompt("hi ROUND=3"),
                                   reply(T0 + 2, "m2", input_tokens=7),
                                   reply(T0, "m1", input_tokens=1, output_tokens=2),
                                   reply(T0 + 1, "m1", model="claude-y", input_tokens=3, output_tokens=40,
@@ -12008,10 +12008,10 @@ class TranscriptTokensTest(unittest.TestCase):
         self.assertEqual(self.rows(), [
             {"ts": T0 + 1.0, "input_tokens": 3, "output_tokens": 40, "cache_read_input_tokens": 500,
              "cache_creation_input_tokens": 60, "model": "claude-y", "project": None, "job": None,
-             "agent": "main", "skill": None},
+             "agent": "main", "skill": None, "round": 3, "transcript": str(path)},
             {"ts": T0 + 2.0, "input_tokens": 7, "output_tokens": 0, "cache_read_input_tokens": 0,
              "cache_creation_input_tokens": 0, "model": "claude-x", "project": None, "job": None,
-             "agent": "main", "skill": None}])
+             "agent": "main", "skill": None, "round": 3, "transcript": str(path)}])
 
     def test_transcript_tokens_window_bounds(self):
         self.write("p/s1.jsonl", [reply(T0 - 1, "a", input_tokens=1), reply(T0, "b", input_tokens=2),

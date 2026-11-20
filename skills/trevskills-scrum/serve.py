@@ -5002,15 +5002,14 @@ def checkout_alert(repo: Path, jobs: list[dict]) -> str | None:
 
 
 JOB_COST_TTL = 300  # seconds one board.transcript_tokens read serves every project's job costs
-JOB_COST_DAYS = 7  # how far back job costs read transcripts; an older job shows no cost
 JOB_COST_CACHE = {}  # "at" -> time.monotonic() of the read; "costs" -> {project: {job: (tokens, usd)}}
 JOB_COST_LOCK = threading.Lock()  # one read at a time; a poll that waits shares the result
 REAL_TRANSCRIPT_TOKENS = board.transcript_tokens  # job_costs skips the real read under unittest unless a test replaced it
 
 
 def job_costs(project):
-    """{job: (tokens, usd)} for project from board.transcript_tokens over the last JOB_COST_DAYS days (usd by
-    board.row_cost), one read for every project per JOB_COST_TTL seconds. A failed read logs to stderr and is cached
+    """{job: (tokens, usd)} for project from board.transcript_tokens over the last board.JOB_COST_DAYS days (summed by
+    board.cost_by_job), one read for every project per JOB_COST_TTL seconds. A failed read logs to stderr and is cached
     as no costs. Under unittest with the real reader and no SCRUM_TRANSCRIPTS it reads nothing (Trevor's transcripts)."""
     with JOB_COST_LOCK:
         if JOB_COST_CACHE and time.monotonic() - JOB_COST_CACHE["at"] < JOB_COST_TTL:
@@ -5020,11 +5019,7 @@ def job_costs(project):
                 and not os.environ.get("SCRUM_TRANSCRIPTS")):
             now = time.time()
             try:
-                for r in board.transcript_tokens(now - JOB_COST_DAYS * 86400, now):
-                    if r["project"] and r["job"]:
-                        tok, usd = costs.setdefault(r["project"], {}).get(r["job"], (0, 0))
-                        costs[r["project"]][r["job"]] = (tok + sum(r[k] for k in board.TOKEN_KEYS),
-                                                         usd + board.row_cost(r))
+                costs = board.cost_by_job(board.transcript_tokens(now - board.JOB_COST_DAYS * 86400, now))
             except Exception as e:  # noqa: BLE001  a bad transcript never breaks the board
                 print(f"job costs: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
                 costs = {}
@@ -5043,7 +5038,7 @@ def board_with_activity(root, project):
     waiting or has a queued `start` launch gets `shopWait: True` (job 1155). A stalled or limit-held job gets
     `nextRetryAt` (epoch seconds, or None). A cpu_held job without ram_hold gets `cpuHeldSecs` (seconds since play_queued).
     A check job with an E2E waiter over E2E_WAIT_RECORD_SECS gets `e2eWait`
-    (e2e_wait_info). A job with transcript rows in the last JOB_COST_DAYS days gets `costUsd` and `costTokens`
+    (e2e_wait_info). A job with transcript rows in the last board.JOB_COST_DAYS days gets `costUsd` and `costTokens`
     (job_costs). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
     cannot go live, or None), `actionsAlert` (actions_alert's last result from the watchdog's ACTIONS_ALERT cache, or
     None), `e2eFull` (the full-E2E record's at, head, result, failed, or None), `uiSweep` (the UI sweep record's at,
