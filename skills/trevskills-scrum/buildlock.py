@@ -11,6 +11,7 @@ While board.py's cool-down flag is on, waiters go in board.lock_rank order (near
 arrival; the waiting marker holds `<cwd>\n<rank>`.
 On a HEAVY_LOCKS lock (build.lock, e2e.lock) it also waits, marker written and no slot taken, while board.heavy_hold()
 gives a reason (machine_hold, re-read every HOLD_POLL s), up to the same timeout.
+Each run that took a slot appends one line to heavy-steps.log (SCRUM_HEAVY_STEPS_LOG overrides it; log_step).
 Exits with the command's exit code, 124 on a lock timeout, 127 when the command is not found.
 """
 import fcntl, math, os, re, subprocess, sys, time
@@ -19,6 +20,7 @@ from pathlib import Path
 DEFAULT_TIMEOUT = 1800.0
 HEAVY_LOCKS = ("build", "e2e")  # lock stems held while board.heavy_hold gives a reason (job 1227); never check.lock
 HOLD_POLL = 5  # seconds at least between heavy_hold reads while waiting
+LOG_MAX, LOG_KEEP = 10000, 5000  # heavy-steps.log past LOG_MAX lines is trimmed to its last LOG_KEEP
 
 
 def lock_path() -> Path:
@@ -140,6 +142,26 @@ def outranked(board, marker: Path, rank: int) -> bool:
     return False
 
 
+def log_step(stem: str, wait: float, run: float) -> None:
+    """Append `<iso UTC> <lock stem> <cwd basename> wait=<s>s run=<s>s load5=<n> cores=<n>` to heavy-steps.log (job
+    1244: which steps overlap, for a later pacing call), trimmed to its last LOG_KEEP lines once past LOG_MAX. Never
+    raises, so a step's exit code never changes over it."""
+    try:
+        log = Path(os.environ.get("SCRUM_HEAVY_STEPS_LOG")
+                   or Path.home() / ".claude" / "trevskills-scrum" / "heavy-steps.log")
+        line = (f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {stem} {Path.cwd().name} wait={wait:.1f}s "
+                f"run={run:.1f}s load5={os.getloadavg()[1]:.2f} cores={os.cpu_count() or 0}\n")
+        with open(log, "a") as f:
+            f.write(line)
+        lines = log.read_bytes().splitlines(keepends=True)  # about 1 MB at the cap: milliseconds beside a step
+        if len(lines) > LOG_MAX:
+            tmp = log.with_name(f"{log.name}.{os.getpid()}.tmp")
+            tmp.write_bytes(b"".join(lines[-LOG_KEEP:]))
+            os.replace(tmp, log)
+    except Exception:
+        pass  # the log is only a record; never fail or change a step over it
+
+
 def build_from(path: str) -> str | None:
     try:
         text = Path(path).read_text()
@@ -165,6 +187,7 @@ def main(argv: list[str]) -> int:
         argv = [value]
     path = lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    asked = time.monotonic()
     heavy = path.stem in HEAVY_LOCKS
     why = machine_hold(board_module()) if heavy else None  # a hot machine holds Build and E2E even with a slot free
     f = None if why else take(slot_paths(path))  # only a live flock holds a slot, so a leftover file never blocks
@@ -207,6 +230,7 @@ def main(argv: list[str]) -> int:
                 pass  # the marker is only a hint; never let cleanup replace the build's exit code
     cmd = ["sh", "-c", argv[0]] if len(argv) == 1 else argv
     holder = holder_path(Path(f.name))
+    began = time.monotonic()
     with f:
         try:
             holder.write_text(f"{os.getpid()}\n{os.getcwd()}\n{time.time():.0f}")
@@ -224,6 +248,7 @@ def main(argv: list[str]) -> int:
                 holder.unlink(missing_ok=True)
             except OSError:
                 pass  # never let cleanup replace the build's exit code
+            log_step(path.stem, began - asked, time.monotonic() - began)
 
 
 if __name__ == "__main__":
