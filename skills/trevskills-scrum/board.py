@@ -103,7 +103,11 @@
                                    skip files, print {"spawn","since"} (since null = full review)
   board.py e2e-specs <id> | --worktree <dir> --base <ref> --project <file>  print {"mode","command","specs",
                                    "uncovered","trigger"}: the E2E specs the diff's UI files map to (full, scoped or none;
-                                   lanes/newjob.md Check gate step 2)
+                                   lanes/newjob.md Check gate step 2); the <id> form adds a 10 min
+                                   --global-timeout and leaves out the diff's changed spec files
+  board.py e2e-budget <id> <log>   print {"over_budget","passed","failed","not_run","slowest","line","backlog"} for a
+                                   job E2E run's output; over budget with no failed test files one deduped
+                                   "Speed up the slowest job E2E spec files" backlog item (lanes/newjob.md Check gate)
   board.py render-paths <id>       print {"paths","skipped"}: the app paths the diff's UI runtime files render plus spec.md
                                    `Render path:` URLs, at most 8, dynamic routes and placeholder URLs skipped, ["/"]
                                    when none maps (lanes/review.md step 2 Shared render)
@@ -3834,6 +3838,9 @@ SHELL_WORD = r"""(?:'[^']*'|"[^"]*"|\$\((?:'[^']*'|"[^"]*"|\([^()]*\)|[^()'"])*\
 ENV_PREFIX_RE = re.compile(rf"^(?:\s*[A-Za-z_][A-Za-z0-9_]*={SHELL_WORD})*")
 # The Playwright wrapper that sets use.channel from SCRUM_PW_CHANNEL (a machine without Playwright's own Chromium).
 PW_CHANNEL_CONFIG = '"$HOME/.claude/skills/trevskills-e2e/channel.config.mjs"'
+E2E_BUDGET_MS = 600000  # job E2E runs (B e2e-specs <id>, the Check gate) stop at 10 min (job 1311)
+E2E_SLOW_ITEM = "Speed up the slowest job E2E spec files"  # cmd_e2e_budget's backlog item, deduped by unless_open
+VIEW_DIR_RE = re.compile(r"(?:^|/)views/([^/]+)/")  # a dashboard views/<name>/ folder: its specs name `view=<name>`
 
 
 def _route_of(path):
@@ -3891,12 +3898,14 @@ def _importers(index, path):
     return sorted(set().union(*(index.get(n, set()) for n in names)) - {path})
 
 
-def _e2e_command(cmd, specs=()):
+def _e2e_command(cmd, specs=(), budget=False):
     """The E2E command narrowed to specs: after `--` for npm run, appended for playwright test, else
-    `npx playwright test` keeping the leading NAME=value tokens. With SCRUM_PW_CHANNEL set, `--config
-    PW_CHANNEL_CONFIG` goes before the specs; with no specs (the full suite) any other command stays as it is."""
+    `npx playwright test` keeping the leading NAME=value tokens. budget puts `--global-timeout=E2E_BUDGET_MS` first;
+    with SCRUM_PW_CHANNEL set, `--config PW_CHANNEL_CONFIG` goes before the specs; with no specs (the full suite) any
+    other command stays as it is."""
+    cap = [f"--global-timeout={E2E_BUDGET_MS}"] if budget else []
     conf = ["--config", PW_CHANNEL_CONFIG] if os.environ.get("SCRUM_PW_CHANNEL", "").strip() else []
-    args = " ".join([*conf, *(shlex.quote(s) for s in specs)])
+    args = " ".join([*cap, *conf, *(shlex.quote(s) for s in specs)])
     if not args:
         return cmd
     if re.search(r"\bnpm run\b", cmd):
@@ -3944,11 +3953,13 @@ def changed_routes(wt: Path, ui: list[str]) -> dict[str, set[tuple[str, bool]]]:
     return out
 
 
-def e2e_specs(wt, base: str, project_file) -> dict:
+def e2e_specs(wt, base: str, project_file, budget=False) -> dict:
     """{"mode", "command", "specs", "uncovered", "trigger"} for the diff base...HEAD in wt (lanes/newjob.md Check gate
     step 2). full: a diff file matches `- E2E full globs:` (default E2E_FULL_DEFAULT; `none` = never); scoped: the specs
-    whose string literals name a route a changed UI runtime file renders; none: no spec covers it. An unreadable diff
-    runs the full suite (the safe direction)."""
+    whose string literals name a route a changed UI runtime file renders (a file under a views/<name>/ folder: the
+    specs naming `view=<name>`, else its route's); none: no spec covers it. An unreadable diff runs the full suite (the
+    safe direction). budget (the job form): the command takes `--global-timeout` and leaves out spec files the diff
+    adds or changes, which the Check gate runs on their own."""
     if base.startswith("-"):
         raise SystemExit(f"base {base!r} starts with '-'")
     wt = Path(wt)
@@ -3963,7 +3974,7 @@ def e2e_specs(wt, base: str, project_file) -> dict:
     out = {"mode": "none", "command": None, "specs": [], "uncovered": [], "trigger": None}
     files = _names(wt, f"{base}...HEAD")
     if files is None or (full and (hit := next((f for f in sorted(files) if glob_match(f, full)), None))):
-        return {**out, "mode": "full", "command": _e2e_command(cmd) if cmd else None,
+        return {**out, "mode": "full", "command": _e2e_command(cmd, budget=budget) if cmd else None,
                 "trigger": hit if files is not None else "diff unreadable"}
     globs = _project_list(text, "UI globs") or []
     ui = sorted(f for f in files if f and not RUNTIME_EXCLUDE_RE.search(f) and glob_match(f, globs))
@@ -3977,21 +3988,65 @@ def e2e_specs(wt, base: str, project_file) -> dict:
                 spec_text[p.relative_to(wt).as_posix()] = p.read_text(encoding="utf-8", errors="replace")
     specs = set()
     for f, routes in changed_routes(wt, ui).items():
-        hits = {s for s, body in spec_text.items() for r in routes if _route_re(*r).search(body)}
+        view = VIEW_DIR_RE.search(f)
+        view_re = view and re.compile(rf"\bview={re.escape(view[1])}(?![\w-])")
+        hits = {s for s, body in spec_text.items() if view_re and view_re.search(body)}
+        hits = hits or {s for s, body in spec_text.items() for r in routes if _route_re(*r).search(body)}
         if not hits:
             out["uncovered"].append(f)
         specs |= hits
+    if budget:
+        specs -= set(files)  # changed spec files run on their own, unbudgeted (newjob.md "Whatever the `mode`")
     if specs:
-        out.update(mode="scoped", specs=sorted(specs), command=_e2e_command(cmd, sorted(specs)) if cmd else None)
+        out.update(mode="scoped", specs=sorted(specs),
+                   command=_e2e_command(cmd, sorted(specs), budget) if cmd else None)
     return out
 
 
 def cmd_e2e_specs(root, job_id) -> dict:
-    """e2e_specs for the job's worktree and base with root/project.md."""
+    """e2e_specs for the job's worktree and base with root/project.md, with the job E2E time budget."""
     job = find(read_board(root), check_id(job_id))
     if not job.get("worktree") or not job.get("base"):
         raise SystemExit(f"job {job_id} has no {'worktree' if not job.get('worktree') else 'base'} on the board")
-    return e2e_specs(job["worktree"], job["base"], Path(root) / "project.md")
+    return e2e_specs(job["worktree"], job["base"], Path(root) / "project.md", budget=True)
+
+
+PW_TIMEOUT_RE = re.compile(r"Timed out waiting \d+(?:\.\d+)?s for the")
+PW_SUMMARY_RE = re.compile(r"^\s*(\d+) (passed|failed|flaky|interrupted|did not run)\b", re.M)
+PW_TEST_RE = re.compile(r"›\s*(\S+?):\d+:\d+\s*›.*\((\d+(?:\.\d+)?)(ms|s|m)\)\s*$", re.M)
+
+
+def e2e_budget(text: str) -> dict:
+    """{"over_budget", "passed", "failed", "not_run", "slowest", "line"} from a Playwright run's output: over_budget when
+    the --global-timeout fired; passed (incl. flaky), failed and not_run (did not run + interrupted) from the summary
+    lines; slowest = up to 5 [spec file, seconds] by the list reporter's per-test durations (lanes/newjob.md Check gate)."""
+    counts = {}
+    for n, kind in PW_SUMMARY_RE.findall(text):
+        counts[kind] = int(n)  # the last summary wins
+    totals = {}
+    for spec, n, unit in PW_TEST_RE.findall(text):
+        totals[spec] = totals.get(spec, 0) + float(n) * {"ms": 0.001, "s": 1, "m": 60}[unit]
+    passed = counts.get("passed", 0) + counts.get("flaky", 0)
+    not_run = counts.get("did not run", 0) + counts.get("interrupted", 0)
+    slowest = [[f, round(t, 1)] for f, t in sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))[:5]]
+    return {"over_budget": bool(PW_TIMEOUT_RE.search(text)), "passed": passed, "failed": counts.get("failed", 0),
+            "not_run": not_run, "slowest": slowest, "line": f"E2E: over budget, {passed} passed, {not_run} not run"}
+
+
+def cmd_e2e_budget(root, job_id, log) -> dict:
+    """e2e_budget of the log file plus "backlog": when over budget with no failed test, the one E2E_SLOW_ITEM backlog
+    item this run filed (None when one is already open or nothing is filed)."""
+    job_id = check_id(job_id)
+    try:
+        text = Path(log).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raise SystemExit(f"cannot read {log}")
+    out = {**e2e_budget(text), "backlog": None}
+    if out["over_budget"] and not out["failed"]:
+        times = ", ".join(f"{f} {s:g}s" for f, s in out["slowest"]) or "no per-test times in the log"
+        item = f"{E2E_SLOW_ITEM}: {times} (job {job_id} E2E ran past the {E2E_BUDGET_MS // 60000} min budget)"
+        out["backlog"] = next(iter(cmd_backlog_add(root, [item], unless_open=E2E_SLOW_ITEM)), None)
+    return out
 
 
 def _page_routes(wt) -> set[str]:
@@ -8550,6 +8605,9 @@ def main(argv=None):
     es.add_argument("--worktree")
     es.add_argument("--base")
     es.add_argument("--project")
+    eb = sub.add_parser("e2e-budget")
+    eb.add_argument("id")
+    eb.add_argument("log")
     sub.add_parser("check-reuse").add_argument("id")
     sub.add_parser("render-paths").add_argument("id")
     sub.add_parser("ui-sweep-record").add_argument("review")
@@ -8710,6 +8768,8 @@ def main(argv=None):
             print(json.dumps(e2e_specs(a.worktree, a.base, a.project)))
         else:
             raise SystemExit("e2e-specs needs <id>, or --worktree, --base and --project")
+    elif a.cmd == "e2e-budget":
+        print(json.dumps(cmd_e2e_budget(a.dir, a.id, a.log)))
     elif a.cmd == "check-reuse":
         print(json.dumps(cmd_check_reuse(a.dir, a.id)))
     elif a.cmd == "render-paths":
