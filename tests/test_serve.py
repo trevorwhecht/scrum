@@ -59,6 +59,14 @@ def processes_logged(fn):
     return out, [{k: v for k, v in l.items() if k != "t"} for l in lines]
 
 
+def specs_written(b, root, parent_id):
+    """Drop the parent's childSpecs mark (board module `b`), as BigBoy step 3's `ready --specs-done` does (job 1275):
+    plan-apply and runall-start set it and it holds every claim, so a test of a later ready call starts past step 2."""
+    with b.locked_board(root) as data:
+        b.find(data, parent_id).pop("childSpecs", None)
+    return parent_id
+
+
 class ServeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -678,7 +686,8 @@ class ServeTest(unittest.TestCase):
             "PLAN: READY\n# Big\n## Goal\nG.\n## Done when\n1. x\n## Tickets\n"
             "### T1: Store\nDepends on: none\nParallel: yes — alone\nExposure: no\nHard stops: none\nHuman setup: Create the bucket\nDo it.\n"
             "### T2: Show\nDepends on: T1\nParallel: no — last\nExposure: yes\nHard stops: none\nHuman setup: none\nShow it.\n")
-        return (parent, *b.cmd_plan_apply(self.root, parent)["children"])
+        kids = b.cmd_plan_apply(self.root, parent)["children"]
+        return (specs_written(b, self.root, parent), *kids)
 
     def stage_of(self, job_id):
         return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
@@ -2013,7 +2022,7 @@ class ServeTest(unittest.TestCase):
         usage, root = self.low_usage(base), base / "scrum"
         root.mkdir()
         (root / "backlog.md").write_text("- [ ] one\n- [ ] two\n")
-        parent = self.serve.board.cmd_runall_start(root)["id"]
+        parent = specs_written(self.serve.board, root, self.serve.board.cmd_runall_start(root)["id"])
         # finish_first reads every registered project's board: another test's leftover queue-wait job would hold the claim
         with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)), mock.patch.object(self.serve, "spawn") as spawn, \
                 mock.patch.object(self.serve.board, "finish_first", return_value=None):
@@ -2031,7 +2040,7 @@ class ServeTest(unittest.TestCase):
         root.mkdir()
         (root / "backlog.md").write_text("- [ ] one\n")
         out = b.cmd_runall_start(root)
-        parent, (kid,) = out["id"], out["children"]
+        parent, (kid,) = specs_written(b, root, out["id"]), out["children"]
         kid_job = lambda: b.find(b.read_board(root), kid)
         self.assertEqual(b.MAX_LAUNCH_CPU_LOAD_PCT, 500)
         # finish_first reads every registered project's board: another test's leftover E2E-queue job would hold the claim

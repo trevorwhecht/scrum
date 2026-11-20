@@ -48,6 +48,28 @@ def no_claude_pid(test):
     test.addCleanup(patch.stop)
 
 
+def specs_written(root, parent_id):
+    """Drop the parent's childSpecs mark, as BigBoy step 3's `ready --specs-done` does (job 1275): plan-apply and
+    runall-start set it and it holds every claim, so a test of a later ready call starts past step 2."""
+    with board.locked_board(root) as b:
+        board.find(b, parent_id).pop("childSpecs", None)
+
+
+def plan_applied(root, parent_id, fix=False):
+    """cmd_plan_apply, with the parent past BigBoy step 2 (specs_written)."""
+    out = board.cmd_plan_apply(root, parent_id, fix)
+    specs_written(root, parent_id)
+    return out
+
+
+def runall_started(root, match=None):
+    """cmd_runall_start, with the parent past BigBoy step 2 (specs_written)."""
+    out = board.cmd_runall_start(root, match)
+    if out["id"]:
+        specs_written(root, out["id"])
+    return out
+
+
 class BoardTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1165,7 +1187,7 @@ class BoardTest(unittest.TestCase):
         """T1, T2 (optional setup) independent; T3 is the exposure ticket. Children are 002, 003, 004."""
         parent = self.plan(self.ticket(1), self.ticket(2, setup=setup),
                            self.ticket(3, deps="T1, T2", parallel="no — wires both", exposure="yes"))
-        return parent, board.cmd_plan_apply(self.root, parent)["children"]
+        return parent, plan_applied(self.root, parent)["children"]
 
     def test_plan_apply_creates_waiting_children(self):
         parent = self.plan(self.ticket(1), self.ticket(2, setup="Add STRIPE_KEY to .env"),
@@ -1219,7 +1241,7 @@ class BoardTest(unittest.TestCase):
 
     def test_plan_apply_exposure_depends_on_subset(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1", exposure="yes"))
-        self.assertEqual(board.cmd_plan_apply(self.root, parent), {"children": ["002-part-1", "003-part-2", "004-part-3"]})
+        self.assertEqual(plan_applied(self.root, parent), {"children": ["002-part-1", "003-part-2", "004-part-3"]})
         self.assertEqual([self.child(k)["stage"] for k in ("002-part-1", "003-part-2", "004-part-3")], ["waiting"] * 3)
         self.assertEqual(self.child("004-part-3")["depends_on"], ["002-part-1"])
 
@@ -1252,7 +1274,7 @@ class BoardTest(unittest.TestCase):
         self.gaps(parent, fix="")
         self.assertIn("Fix ticket", self.assert_refused(parent, fix=True))
         self.gaps(parent)
-        board.cmd_plan_apply(self.root, parent, fix=True)
+        plan_applied(self.root, parent, fix=True)
         self.gaps(parent)
         self.assertIn("already", self.assert_refused(parent, fix=True))
         self.assertEqual(len(self.jobs()), 5)
@@ -1308,7 +1330,7 @@ class BoardTest(unittest.TestCase):
 
     def test_ready_waits_for_dependencies(self):
         parent = self.plan(self.ticket(1), self.ticket(2, deps="T1"), self.ticket(3, deps="T1, T2", exposure="yes"))
-        c1, c2, c3 = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, c3 = plan_applied(self.root, parent)["children"]
         self.assertEqual(board.cmd_ready(self.root, parent),
                          {"ready": [c1], "merged": 0, "total": 3, "in_progress": 1, "all_merged": False, "held": None})
         self.assertEqual(self.child(c1)["stage"], "spec")
@@ -1378,7 +1400,7 @@ class BoardTest(unittest.TestCase):
     def test_ready_writes_claimed_at_once(self):
         claimed = lambda c: self.root / "jobs" / c / "claimed-at.txt"
         parent = self.plan(self.ticket(1), self.ticket(2, deps="T1"), self.ticket(3, deps="T1, T2", exposure="yes"))
-        c1, c2, c3 = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, c3 = plan_applied(self.root, parent)["children"]
         before = int(time.time())
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
         self.assertTrue(before <= int(claimed(c1).read_text()) <= int(time.time()))
@@ -1401,7 +1423,7 @@ class BoardTest(unittest.TestCase):
     @mock.patch.object(board, "MAX_YOUNG_SESSIONS", 4)  # heavy starts count 2 young: keep 2 per batch
     def test_ready_serializes_overlapping_likely_files(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3), self.ticket(4, deps="T1, T2, T3", exposure="yes"))
-        c1, c2, c3, c4 = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, c3, c4 = plan_applied(self.root, parent)["children"]
         self.spec(c1, "src/a.py", "src/b.py")
         self.spec(c2, "src/b.py")
         self.spec(c3, "src/c.py")  # `other/file.py` sits outside Likely files in every spec, so it never counts
@@ -1412,7 +1434,7 @@ class BoardTest(unittest.TestCase):
             board.cmd_set(self.root, c, ["stage=done"])
         # A parallel=no child starts only when no sibling is in progress.
         parent = self.plan(self.ticket(1), self.ticket(2, parallel="no — touches everything"), self.ticket(3, deps="T1, T2", exposure="yes"))
-        d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        d1, d2, _ = plan_applied(self.root, parent)["children"]
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d1])
         board.cmd_set(self.root, d1, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d2])
@@ -1421,7 +1443,7 @@ class BoardTest(unittest.TestCase):
         def setup(a_ticket, b_ticket, a_files, b_files):
             self.tearDown(); self.setUp()
             parent = self.plan(self.ticket(1, **a_ticket), self.ticket(2, **b_ticket), self.ticket(3, deps="T1, T2", exposure="yes"))
-            a, b, _ = board.cmd_plan_apply(self.root, parent)["children"]
+            a, b, _ = plan_applied(self.root, parent)["children"]
             self.spec(a, *a_files)
             self.spec(b, *b_files)
             with board.locked_board(self.root) as bd:
@@ -1469,7 +1491,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(gates(c2), [f"overlap:{c1}:src/a.py"])
         self.assertEqual(gates(c3), [f"depends_on:{c1}", f"depends_on:{c2}"])
         parent = self.plan(self.ticket(1), self.ticket(2, parallel="no"), self.ticket(3, deps="T1, T2", exposure="yes"))
-        d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        d1, d2, _ = plan_applied(self.root, parent)["children"]
         self.spec(d1, "src/x.py")
         board.cmd_ready(self.root, parent)
         self.assertEqual(gates(d2), [f"runs_alone:{d1}"])  # job 825: names the holder
@@ -1498,7 +1520,7 @@ class BoardTest(unittest.TestCase):
         call's only claim; a standard kid waits."""
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3),
                            self.ticket(4, deps="T1, T2, T3", exposure="yes"))
-        std, fast1, fast2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        std, fast1, fast2, _ = plan_applied(self.root, parent)["children"]
         self.spec(std, "src/a.py")
         self.spec(fast1, "src/b.py")
         board.cmd_set(self.root, fast1, ["lane=fast"])
@@ -1517,7 +1539,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.child(std)["stage"], "waiting")
         # standard room 1, light room 2: spawn counts the standard claim as a young session, so the fast kid waits
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
-        std, fast, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        std, fast, _ = plan_applied(self.root, parent)["children"]
         self.spec(std, "src/d.py")
         self.spec(fast, "src/e.py")
         board.cmd_set(self.root, fast, ["lane=fast"])
@@ -1547,7 +1569,7 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, c2, ["stage=done"])
         # A child with no spec and no plan paths runs alone.
         parent = self.plan(self.ticket(1), self.ticket(2, parallel="no"), self.ticket(3, deps="T1, T2", exposure="yes"))
-        d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        d1, d2, _ = plan_applied(self.root, parent)["children"]
         self.spec(d1, "src/x.py")
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d1])
         self.assertEqual(self.overlap_of(d2), {"ids": [d1], "text": "this job runs alone"})
@@ -1564,7 +1586,7 @@ class BoardTest(unittest.TestCase):
             board.find(b, out)["stage"] = out_stage
         self.spec(out, "src/a.py")
         parent = self.plan(self.ticket(1), self.ticket(2, deps="T1", exposure="yes"))
-        c1, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, _ = plan_applied(self.root, parent)["children"]
         self.spec(c1, "src/a.py")
         return parent, c1, out
 
@@ -1612,7 +1634,7 @@ class BoardTest(unittest.TestCase):
         # a "runs alone" hold expires the same way
         self.tearDown(); self.setUp()
         parent = self.plan(self.ticket(1), self.ticket(2, parallel="no"), self.ticket(3, deps="T1, T2", exposure="yes"))
-        d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        d1, d2, _ = plan_applied(self.root, parent)["children"]
         self.spec(d1, "src/x.py")
         board.cmd_set(self.root, d1, ["stage=build"])
         board.cmd_ready(self.root, parent)
@@ -1629,7 +1651,7 @@ class BoardTest(unittest.TestCase):
                 self.tearDown(); self.setUp()
                 (self.root.parent / "skills/trevskills-scrum").mkdir(parents=True, exist_ok=True)
                 parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
-                c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+                c1, c2, _ = plan_applied(self.root, parent)["children"]
                 for c in (c1, c2):
                     self.spec(c, big)
                 board.cmd_set(self.root, c1, ["stage=build"])
@@ -1678,7 +1700,7 @@ class BoardTest(unittest.TestCase):
         """c1 (Part 1) in stage spec holding src/a.py, c2 titled `title` waiting on the same file."""
         parent = self.plan(self.ticket(1), self.ticket(2, title=title),
                            self.ticket(3, deps="T1, T2", parallel="no — wires both", exposure="yes"))
-        c1, c2, c3 = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, c3 = plan_applied(self.root, parent)["children"]
         self.spec(c1, "src/a.py")
         self.spec(c2, "src/a.py")
         board.cmd_set(self.root, c1, ["stage=spec"])
@@ -1715,7 +1737,7 @@ class BoardTest(unittest.TestCase):
         """A parent with holder 002 (stage spec), fast kid 003 and standard kid 004, all waiting but 002 claimed."""
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3),
                            self.ticket(4, deps="T1, T2, T3", exposure="yes"))
-        c1, c2, c3, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, c3, _ = plan_applied(self.root, parent)["children"]
         if holder_files:
             self.spec(c1, *holder_files)
         if kid_files:
@@ -1745,7 +1767,7 @@ class BoardTest(unittest.TestCase):
         out = board.cmd_new(self.root, "Outside")  # stage spec, another tree's leaf job
         self.spec(out, "src/a.py")
         parent = self.plan(self.ticket(1), self.ticket(2, deps="T1", exposure="yes"))
-        c1, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, _ = plan_applied(self.root, parent)["children"]
         board.cmd_set(self.root, c1, ["lane=lilguy"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
 
@@ -1756,7 +1778,7 @@ class BoardTest(unittest.TestCase):
         if files:
             self.spec(out, *files)
         parent = self.plan(self.ticket(1), self.ticket(2, deps="T1", exposure="yes"))
-        c1, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, _ = plan_applied(self.root, parent)["children"]
         self.spec(c1, "src/a.py")
         return parent, c1, board.cmd_ready(self.root, parent)["ready"]
 
@@ -1786,7 +1808,7 @@ class BoardTest(unittest.TestCase):
                 out = board.cmd_new(self.root, "Outside")  # stage spec, no spec.md
                 self.write(f"{out}/feature.md", feature + "\n")
                 parent = self.plan(self.ticket(1), self.ticket(2, deps="T1", exposure="yes"))
-                c1, _ = board.cmd_plan_apply(self.root, parent)["children"]
+                c1, _ = plan_applied(self.root, parent)["children"]
                 self.spec(c1, "src/fetchWithBackoff.ts")
                 self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1] if claimed else [])
                 gates = self.root / "jobs" / c1 / "queue-gates.txt"
@@ -1867,7 +1889,7 @@ class BoardTest(unittest.TestCase):
             board.cmd_set(self.root, out, ["stage=build"])
             self.spec(out, *out_files)  # no paths: unreadable Likely files
             parent = self.plan(self.ticket(1), self.ticket(2, deps="T1", exposure="yes"))
-            c1, _ = board.cmd_plan_apply(self.root, parent)["children"]
+            c1, _ = plan_applied(self.root, parent)["children"]
             self.lane_spec(c1, lane, *kid_files, name=name)
             return parent, c1, out
         for lane, name, claimed in (("fast", "spec.md", True), ("standard", "spec.md", False),
@@ -1890,7 +1912,7 @@ class BoardTest(unittest.TestCase):
             with self.subTest(sibling=lane):
                 self.tearDown(); self.setUp()
                 parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
-                c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+                c1, c2, _ = plan_applied(self.root, parent)["children"]
                 self.spec(c1)
                 board.cmd_set(self.root, c1, ["stage=build"])
                 self.lane_spec(c2, lane, "src/a.py")
@@ -1901,7 +1923,7 @@ class BoardTest(unittest.TestCase):
             self.tearDown(); self.setUp()
             parent = self.plan(self.ticket(1, parallel="no — big"), self.ticket(2),
                                self.ticket(3, deps="T1, T2", exposure="yes"))
-            c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+            c1, c2, _ = plan_applied(self.root, parent)["children"]
             self.spec(c1, "src/d.py")
             board.cmd_set(self.root, c1, ["stage=build"])
             self.lane_spec(c2, "fast", "src/a.py")
@@ -1920,7 +1942,7 @@ class BoardTest(unittest.TestCase):
         """A building sibling holder and two waiting siblings, each naming board.py with these function lists."""
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3),
                            self.ticket(4, deps="T1, T2, T3", exposure="yes"))
-        h, c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        h, c1, c2, _ = plan_applied(self.root, parent)["children"]
         self.funcs_spec(h, "standard", holder)
         board.cmd_set(self.root, h, ["stage=build"])
         self.funcs_spec(c1, lane, k1)
@@ -1964,7 +1986,7 @@ class BoardTest(unittest.TestCase):
         self.spec(out, "src/a.py", "src/b.py")
         parent = self.plan(self.ticket(1, title="Critical: fix the queue"), self.ticket(2),
                            self.ticket(3, deps="T1, T2", parallel="no — wires both", exposure="yes"))
-        c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, _ = plan_applied(self.root, parent)["children"]
         self.spec(c1, "src/a.py")
         self.spec(c2, "src/b.py")
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
@@ -1978,7 +2000,7 @@ class BoardTest(unittest.TestCase):
     def test_ready_critical_first_for_room(self):
         parent = self.plan(self.ticket(1), self.ticket(2, title="Critical: fix the queue"),
                            self.ticket(3, deps="T1, T2", parallel="no — wires both", exposure="yes"))
-        c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, _ = plan_applied(self.root, parent)["children"]
         self.spec(c1, "src/a.py")
         self.spec(c2, "src/b.py")
         with mock.patch.object(board, "ram_room", return_value=1):
@@ -1992,7 +2014,7 @@ class BoardTest(unittest.TestCase):
                                  self.ticket(2, parallel="yes — touches only `src/lib/` and `docs/x.md`"),
                                  self.ticket(3, deps="T1, T2", parallel="no — wires both", exposure="yes"))
         parent = plan()
-        c1, c2, c3 = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, c3 = plan_applied(self.root, parent)["children"]
         feature = (self.root / "jobs" / c2 / "feature.md").read_text()
         self.assertIn("## Likely files\n- `src/lib/`\n- `docs/x.md`\n", feature)
         self.assertNotIn("## Likely files", (self.root / "jobs" / c3 / "feature.md").read_text())
@@ -2002,7 +2024,7 @@ class BoardTest(unittest.TestCase):
             board.cmd_set(self.root, c, ["stage=done"])
         # A specced file under a waiting sibling's folder clashes with it (prefix-aware), in ready and resume_blocker.
         parent = plan()
-        d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        d1, d2, _ = plan_applied(self.root, parent)["children"]
         self.spec(d2, "src/app/(pages)/page.tsx")
         hit = board.resume_blocker(self.root, d2, live={d1})
         self.assertEqual((str(hit), hit.ids), (f"sibling {d1} shares src/app/(pages)/page.tsx", [d1]))
@@ -2014,7 +2036,7 @@ class BoardTest(unittest.TestCase):
         # T2 has no spec, then a Likely files section holding only a non-path token: both mean "files unknown".
         for unknown in (None, "# x\n## Likely files\n- `cmd_ready(root)`: the scheduler\n## Assumptions\n- `src/z.py`\n"):
             parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
-            c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+            c1, c2, _ = plan_applied(self.root, parent)["children"]
             self.spec(c1, "src/a.py")
             if unknown:
                 self.write(f"{c2}/spec.md", unknown)
@@ -2024,7 +2046,7 @@ class BoardTest(unittest.TestCase):
             board.cmd_set(self.root, c2, ["stage=done"])  # job 751: a live spec-less job holds every other tree
         # Reversed: the spec-less child is claimed first, and a disjoint sibling waits until it is done.
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
-        d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        d1, d2, _ = plan_applied(self.root, parent)["children"]
         self.spec(d2, "src/c.py")
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d1])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
@@ -2034,7 +2056,7 @@ class BoardTest(unittest.TestCase):
     @mock.patch.object(board, "MAX_YOUNG_SESSIONS", 4)  # heavy starts count 2 young: keep 2 per batch
     def test_ready_spec_less_child_uses_paths_from_feature_text(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
-        c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, _ = plan_applied(self.root, parent)["children"]
         jobs = self.root / "jobs"
         self.write(f"{c2}/feature.md", "# x\nEdit `src/a.py` and docs/b.md, e.g. nothing else.\n")
         self.assertEqual(board.child_files(jobs, c2), {"src/a.py", "docs/b.md"})
@@ -2106,7 +2128,7 @@ class BoardTest(unittest.TestCase):
     @mock.patch.object(board, "MAX_YOUNG_SESSIONS", 4)  # heavy starts count 2 young: keep 2 per batch
     def test_ready_spec_copy_of_feature_uses_prose_paths(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
-        c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, _ = plan_applied(self.root, parent)["children"]
         self.write(f"{c1}/spec.md", "# x\nEdit `src/a.py`.\n")
         self.write(f"{c2}/spec.md", "# x\nEdit `src/b.py`.\n")
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])
@@ -2217,7 +2239,7 @@ class BoardTest(unittest.TestCase):
     def test_cmd_ready_project_shared_files(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3),
                            self.ticket(4, deps="T1, T2, T3", exposure="yes"))
-        h, c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        h, c1, c2, _ = plan_applied(self.root, parent)["children"]
         (self.root / "project.md").write_text("- Shared files: CLAUDE.md\n")
         for j in (h, c1, c2):
             self.spec(j, "CLAUDE.md")
@@ -2329,7 +2351,7 @@ class BoardTest(unittest.TestCase):
     def five(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1"), self.ticket(4, deps="T2"),
                            self.ticket(5, deps="T1, T2, T3, T4", exposure="yes"))
-        return parent, board.cmd_plan_apply(self.root, parent)["children"]
+        return parent, plan_applied(self.root, parent)["children"]
 
     @mock.patch.object(board, "MAX_YOUNG_SESSIONS", 4)  # heavy starts count 2 young: keep 2 per batch
     def test_ready_failed_child_blocks_only_dependents(self):
@@ -2405,7 +2427,7 @@ class BoardTest(unittest.TestCase):
         # Job 825: only= claims that one waiting child, as parallel, past a parked sibling and ram_room 0.
         parent = self.plan(self.ticket(1), self.ticket(2, parallel="no"), self.ticket(3), self.ticket(4),
                            self.ticket(5, deps="T1, T2, T3, T4", exposure="yes"))
-        c1, c2, c3, c4, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, c3, c4, _ = plan_applied(self.root, parent)["children"]
         for k, f in ((c1, "src/a.py"), (c2, "src/b.py"), (c3, "src/b.py"), (c4, "src/a.py")):
             self.spec(k, f)
         board.cmd_set(self.root, c1, ["stage=build"])
@@ -2710,7 +2732,7 @@ class BoardTest(unittest.TestCase):
             self.root.mkdir(parents=True)
             if backlog is not None:
                 (self.root / "backlog.md").write_text(backlog)
-            self.assertEqual(board.cmd_runall_start(self.root), {"id": None, "children": []})
+            self.assertEqual(runall_started(self.root), {"id": None, "children": []})
             self.assertFalse((self.root / "jobs").exists() and any((self.root / "jobs").iterdir()), backlog)
             self.assertEqual(self.jobs() if (self.root / "board.json").exists() else [], [], backlog)
 
@@ -2718,7 +2740,7 @@ class BoardTest(unittest.TestCase):
         self.root.mkdir(parents=True)
         (self.root / "backlog.md").write_text("# Backlog\n- [ ] [3] Add CSV export <!-- small -->\n"
                                               "- [x] Old thing → 009-old\n- [ ] Dark mode\n")
-        out = board.cmd_runall_start(self.root)
+        out = runall_started(self.root)
         self.assertEqual(out, {"id": "001-run-all", "children": ["002-add-csv-export", "003-dark-mode"]})
         p = self.child("001-run-all")
         self.assertEqual((p["title"], p["lane"], p["stage"], p["children"]),
@@ -2738,7 +2760,7 @@ class BoardTest(unittest.TestCase):
         specs.mkdir()
         spec = specs / (hashlib.sha1(b"Dark mode").hexdigest()[:12] + ".md")
         spec.write_text("# Dark mode\nbody\n")
-        out = board.cmd_runall_start(self.root)
+        out = runall_started(self.root)
         self.assertEqual(out["children"], ["002-add-csv-export", "003-dark-mode"])
         self.assertEqual((self.root / "jobs" / "003-dark-mode" / "spec.md").read_text(), "# Dark mode\nbody\n")
         self.assertFalse(spec.exists())
@@ -2904,7 +2926,7 @@ class BoardTest(unittest.TestCase):
         (self.root / "backlog.md").write_text(
             "# Backlog\n- [ ] Add UI {needs #api1 #sch2}\n- [ ] Add API {#api1} {needs #sch2}\n- [ ] Add schema {#sch2}\n"
             "- [ ] Docs {needs #zzzz}\n")
-        out = board.cmd_runall_start(self.root)
+        out = runall_started(self.root)
         self.assertEqual(out, {"id": "001-run-all",
                                "children": ["002-add-ui", "003-add-api", "004-add-schema", "005-docs"]})
         self.assertEqual(self.child("002-add-ui")["depends_on"], ["003-add-api", "004-add-schema"])
@@ -2921,7 +2943,7 @@ class BoardTest(unittest.TestCase):
         (self.root / "backlog.md").write_text(
             "# Backlog\n- [ ] Plain {needs #hi11}\n- [ ] Low {#lo11} {p:1}\n- [ ] High {#hi11} {p:5} {needs #lo11}\n"
             "- [ ] Mid {p:3}\n")
-        out = board.cmd_runall_start(self.root)
+        out = runall_started(self.root)
         self.assertEqual(out, {"id": "001-run-all", "children": ["002-high", "003-mid", "004-plain", "005-low"]})
         self.assertEqual(self.child("001-run-all")["children"], ["002-high", "003-mid", "004-plain", "005-low"])
         self.assertEqual(self.child("002-high")["depends_on"], ["005-low"])
@@ -2939,7 +2961,7 @@ class BoardTest(unittest.TestCase):
         backlog = (f"# Backlog\n- [x] Outside {{#out1}} → {outside}\n- [x] Finished {{#fin2}} → {finished}\n"
                    "- [ ] Blocked {#blk3} {needs #out1}\n- [ ] Chained {needs #blk3}\n- [ ] Free {needs #fin2}\n")
         (self.root / "backlog.md").write_text(backlog)
-        out = board.cmd_runall_start(self.root)
+        out = runall_started(self.root)
         self.assertEqual(out, {"id": "003-run-all", "children": ["004-free"]})
         self.assertEqual(self.child("004-free")["depends_on"], [])
         self.assertEqual((self.root / "backlog.md").read_text(),
@@ -2948,13 +2970,13 @@ class BoardTest(unittest.TestCase):
                          "- [x] Free {needs #fin2} → 004-free\n")
         # every open item held back: no parent
         jobs = len(self.jobs())
-        self.assertEqual(board.cmd_runall_start(self.root), {"id": None, "children": []})
+        self.assertEqual(runall_started(self.root), {"id": None, "children": []})
         self.assertEqual(len(self.jobs()), jobs)
 
     def test_ready_holds_dependent_runall_child(self):
         self.root.mkdir(parents=True)
         (self.root / "backlog.md").write_text("# Backlog\n- [ ] Second {needs #aaaa}\n- [ ] First {#aaaa}\n")
-        out = board.cmd_runall_start(self.root)
+        out = runall_started(self.root)
         parent, (second, first) = out["id"], out["children"]
         self.spec(second, "src/second.py")
         self.spec(first, "src/first.py")
@@ -2968,7 +2990,7 @@ class BoardTest(unittest.TestCase):
     def runall(self, n):
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "backlog.md").write_text("".join(f"- [ ] item {chr(97 + i)}\n" for i in range(n)))
-        out = board.cmd_runall_start(self.root)
+        out = runall_started(self.root)
         return out["id"], out["children"]
 
     @mock.patch.object(board, "MAX_YOUNG_SESSIONS", 4)  # heavy starts count 2 young: keep 2 per batch
@@ -3167,7 +3189,7 @@ class BoardTest(unittest.TestCase):
         self.spec_file("Alpha").write_text("# Alpha\n\n## Likely files\n- `a.py`: edit\n")
         board_before = (self.root / "board.json").read_text() if (self.root / "board.json").exists() else None
         with self.cooling():
-            for call in (lambda: board.cmd_next(self.root), lambda: board.cmd_runall_start(self.root)):
+            for call in (lambda: board.cmd_next(self.root), lambda: runall_started(self.root)):
                 with self.assertRaises(SystemExit) as e:
                     call()
                 self.assertEqual(str(e.exception), msg)
@@ -3743,7 +3765,7 @@ class BoardTest(unittest.TestCase):
     def test_bigboy_ready_unchanged_by_runall(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3), self.ticket(4),
                            self.ticket(5, deps="T1, T2, T3, T4", exposure="yes"))
-        c1, c2, c3, c4, c5 = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, c3, c4, c5 = plan_applied(self.root, parent)["children"]
         for k in (c1, c2, c3, c4):
             self.spec(k, f"src/{k}.py")
         out = board.cmd_ready(self.root, parent)
@@ -4229,7 +4251,7 @@ class BoardTest(unittest.TestCase):
     def test_abort_cascade_reopens_runall_child_backlog_line(self):
         self.root.mkdir(parents=True)
         (self.root / "backlog.md").write_text("# Backlog\n- [ ] Add schema {#sch2}\n- [ ] Add API {needs #sch2}\n")
-        run = board.cmd_runall_start(self.root)
+        run = runall_started(self.root)
         schema, api = run["children"]
         bb, bb_a, bb_b = (board.cmd_new(self.root, t) for t in ("bb", "bb a", "bb b"))
         self.edit_jobs(**{bb: {"lane": "bigboy", "stage": "running", "children": [bb_a, bb_b]},
@@ -4247,7 +4269,7 @@ class BoardTest(unittest.TestCase):
         """Job 1226: job 1197, a Run-all child, lost its backlog item when its shop session ended without a PR."""
         self.root.mkdir(parents=True)
         (self.root / "backlog.md").write_text("# Backlog\n- [ ] Add schema\n- [ ] Add API\n- [ ] Add page\n")
-        schema, api, page = board.cmd_runall_start(self.root)["children"]
+        schema, api, page = runall_started(self.root)["children"]
         bb, bb_a, orphan = (board.cmd_new(self.root, t) for t in ("bb", "bb a", "orphan"))
         self.edit_jobs(**{schema: {"stage": "cloud"}, api: {"stage": "cloud"}, page: {"stage": "cloud"},
                           bb: {"lane": "bigboy", "stage": "running", "children": [bb_a]},
@@ -4385,7 +4407,7 @@ class BoardTest(unittest.TestCase):
     def test_pause_parent_pauses_children_and_blocks_ready(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1"),
                            self.ticket(4, deps="T1, T2, T3", parallel="no — last", exposure="yes"))
-        c1, c2, c3, c4 = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, c3, c4 = plan_applied(self.root, parent)["children"]
         board.cmd_set(self.root, c1, ["stage=done"])
         board.cmd_set(self.root, c2, ["stage=build"])
         self.assertEqual(sorted(board.cmd_pause(self.root, parent)), sorted([parent, c2]))
@@ -4404,7 +4426,7 @@ class BoardTest(unittest.TestCase):
     def test_paused_child_is_idle_for_ready_and_named_in_waiting_on(self):
         parent = self.plan(self.ticket(1), self.ticket(2),
                            self.ticket(3, deps="T1, T2", parallel="no — last", exposure="yes"))
-        c1, c2, c3 = board.cmd_plan_apply(self.root, parent)["children"]
+        c1, c2, c3 = plan_applied(self.root, parent)["children"]
         board.cmd_set(self.root, parent, ["stage=running"])
         board.cmd_set(self.root, c1, ["stage=build"])
         board.cmd_set(self.root, c2, ["stage=build"])
@@ -6310,7 +6332,7 @@ class BoardTest(unittest.TestCase):
             (self.root.parent / "src").mkdir(exist_ok=True)
             parent = self.plan(self.ticket(1), self.ticket(2, parallel=out_parallel) if out_parallel else self.ticket(2),
                                self.ticket(3, deps="T1, T2", exposure="yes"))
-            c1, out, _ = board.cmd_plan_apply(self.root, parent)["children"]
+            c1, out, _ = plan_applied(self.root, parent)["children"]
             self.spec(out, *out_files)  # no paths: unreadable Likely files
             board.cmd_set(self.root, out, ["stage=build"])
             self.lane_spec(c1, lane, *kid_files, name=name)
@@ -6361,7 +6383,7 @@ class BoardTest(unittest.TestCase):
         # BigBoy, no cap: a, b, c parallel; d parallel=no.
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3), self.ticket(4, parallel="no — big"),
                            self.ticket(5, deps="T1, T2, T3, T4", exposure="yes"))
-        a, b, c, d, e = board.cmd_plan_apply(self.root, parent)["children"]
+        a, b, c, d, e = plan_applied(self.root, parent)["children"]
         self.spec(a, "src/a.py", "src/shared.py")
         self.spec(b, "src/b.py")
         self.spec(c, "src/c.py", "src/shared.py")
@@ -10589,7 +10611,7 @@ class RunAllLilguyTest(unittest.TestCase):
         self.addCleanup(env.stop)
         (self.root / "backlog.md").write_text(
             "# Backlog\n- [ ] [1] Tweak the dashboard label text\n- [ ] [3] Reword the board legend\n")
-        out = board.cmd_runall_start(self.root)
+        out = runall_started(self.root)
         self.parent, (self.one, self.three) = out["id"], out["children"]
 
     def job(self, job_id):
@@ -12583,7 +12605,7 @@ class ReadyUsageTest(unittest.TestCase):
         self.addCleanup(hold.stop)
         self.root.mkdir()
         (self.root / "backlog.md").write_text("".join(f"- [ ] item {i}\n" for i in range(5)))
-        out = board.cmd_runall_start(self.root)
+        out = runall_started(self.root)
         self.parent, self.kids = out["id"], out["children"]
         for i, k in enumerate(self.kids):
             spec = self.root / "jobs" / k / "spec.md"
@@ -12638,7 +12660,7 @@ class ReadyUsageTest(unittest.TestCase):
         (self.root / "jobs" / big / "plan.md").write_text(
             "PLAN: READY\n# Big\n## Goal\nShip.\n## Done when\n1. It works.\n## Tickets\n"
             + BoardTest.ticket(1) + BoardTest.ticket(2, deps="T1", exposure="yes") + "## Assumptions\n- none\n")
-        first = board.cmd_plan_apply(self.root, big)["children"][0]
+        first = plan_applied(self.root, big)["children"][0]
         self.assertEqual(board.cmd_ready(self.root, big)["ready"], [])
         jobs = {j["id"]: j for j in json.loads((self.root / "board.json").read_text())["jobs"]}
         self.assertEqual(jobs[first]["stage"], "waiting")
@@ -12677,7 +12699,7 @@ class ReadyHighUsageTest(unittest.TestCase):
 
     def runall(self):
         (self.root / "backlog.md").write_text("- [ ] item 0\n")
-        out = board.cmd_runall_start(self.root)
+        out = runall_started(self.root)
         parent, (kid,) = out["id"], out["children"]
         (self.root / "jobs" / kid / "spec.md").write_text("# x\n## Likely files\n- `src/0.py`: why\n")
         board.cmd_set(self.root, kid, ["lane=standard"])
@@ -12694,7 +12716,7 @@ class ReadyHighUsageTest(unittest.TestCase):
         (self.root / "jobs" / parent / "plan.md").write_text(
             "PLAN: READY\n# Big\n## Goal\nShip.\n## Done when\n1. It works.\n## Tickets\n"
             + BoardTest.ticket(1) + BoardTest.ticket(2, deps="T1", exposure="yes") + "## Assumptions\n- none\n")
-        first = board.cmd_plan_apply(self.root, parent)["children"][0]
+        first = plan_applied(self.root, parent)["children"][0]
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [first])
         self.assertEqual(self.job(first)["stage"], "spec")
 
@@ -13376,7 +13398,7 @@ class StartedByTest(unittest.TestCase):
 
     def test_runall_start_children_runall(self):
         (self.root / "backlog.md").write_text("# Backlog\n- [ ] Alpha\n- [ ] Beta\n")
-        out = board.cmd_runall_start(self.root)
+        out = runall_started(self.root)
         self.assertEqual([self.by(j) for j in [out["id"], *out["children"]]], ["runall", "runall", "runall"])
         with board.locked_board(self.root) as b:  # a parent with no started_by (made before job 842): runall
             parent = board.find(b, out["id"])

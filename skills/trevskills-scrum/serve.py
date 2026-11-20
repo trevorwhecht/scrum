@@ -680,13 +680,14 @@ def play_queue_tick(project, root, jobs) -> bool:
 
 def held_work(project, jobs) -> list[dict]:
     """The project's held work: a queued launch (queued_launch, not running, still in its stage) or a waiting child of
-    a running, unpaused Run-all/BigBoy parent (setup not pending, no wake, every depends_on done). idle_claim starts
-    one here; shop_tick sends one to the shop Mac."""
+    a running, unpaused Run-all/BigBoy parent that is not writing its child specs (board.child_specs_pending; setup not
+    pending, no wake, every depends_on done). idle_claim starts one here; shop_tick sends one to the shop Mac."""
     by_id = {j["id"]: j for j in jobs}
 
     def waiting_child(k):
         p = by_id.get(k.get("parent")) or {}
         return k.get("stage") == "waiting" and p.get("stage") == "running" and not p.get("paused") \
+            and not board.child_specs_pending(p) \
             and p.get("lane") in ("runall", "bigboy") and k.get("setup") != "pending" and not k.get("wake") \
             and all(by_id.get(d, {}).get("stage") == "done" for d in k.get("depends_on") or [])
 

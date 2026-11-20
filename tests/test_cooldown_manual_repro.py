@@ -116,6 +116,7 @@ class CooldownManualReproTest(unittest.TestCase):
         with b.locked_board(self.root) as board:
             b.find(board, done).update(stage="done")
             b.find(board, parent).update(stage="running", reason="waiting: cooling down")
+            b.find(board, parent).pop("childSpecs", None)  # past BigBoy step 2, as `ready --specs-done` leaves it (job 1275)
         self.assertEqual((self.get(setup)["stage"], self.get(setup)["setup"]), ("waiting", "pending"))
         self.assertEqual((self.get(ready)["stage"], self.get(ready)["depends_on"]), ("waiting", [done]))
         self.assertNotIn("paused", self.get(parent))

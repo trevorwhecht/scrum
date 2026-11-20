@@ -131,9 +131,11 @@
                                    items move to manual-checks.md; depends adds {#id} and {needs #id} markers), write report.md
   board.py plan-apply <id> [--fix] turn a bigboy parent's plan.md into waiting child jobs, print {"children"};
                                    --fix adds the one FIX child from bigboy-review.md's ## Fix ticket
-  board.py ready <id>              claim the bigboy parent's startable children (stage -> spec; gated by machine_ok, free RAM
-                                   per batch and the file-overlap rules), print
-                                   {"ready","merged","total","in_progress","all_merged","held"}
+  board.py ready <id> [--specs-done]  claim the bigboy parent's startable children (stage -> spec; gated by machine_ok,
+                                   free RAM per batch and the file-overlap rules), print
+                                   {"ready","merged","total","in_progress","all_merged","held"}; nothing while the
+                                   childSpecs mark from plan-apply/runall-start is under an hour old, unless --specs-done
+                                   (BigBoy step 3) drops it first
   board.py runall-start           make a Run-all parent with every open backlog item as a waiting child (needs become
                                    depends_on; items waiting on an outside job, an {after repo:job} job, the requeue loop
                                    guard or Human setup stay open), print {"id","children"}
@@ -5415,7 +5417,8 @@ def add_child(root, board, parent, t, depends_on, goal, plain=False):
 
 def cmd_plan_apply(root, parent_id, fix=False):
     """Create the children from plan.md (or, with fix, the one FIX child from bigboy-review.md) under the lock.
-    Every check runs before the first job is created, so a refused plan creates nothing."""
+    Every check runs before the first job is created, so a refused plan creates nothing. The parent gets a childSpecs
+    mark (child_specs_pending) until BigBoy step 3's `ready --specs-done`."""
     d = Path(root) / "jobs" / check_id(parent_id)
     read = lambda name: (d / name).read_text(encoding="utf-8", errors="replace") if (d / name).is_file() else ""
     with locked_board(root) as board:
@@ -5441,7 +5444,8 @@ def cmd_plan_apply(root, parent_id, fix=False):
             for t in tickets:
                 find(board, ids[t["ticket"]])["depends_on"] = [ids[x] for x in t["depends"]]
             new = list(ids.values())
-        parent.update(children=kids + new, stage="running", reason=None, updatedAt=now())
+        # childSpecs: no claim until BigBoy step 3's `ready --specs-done` (child_specs_pending)
+        parent.update(children=kids + new, stage="running", reason=None, updatedAt=now(), childSpecs=now())
         parent["files"], parent["diverged"] = job_files(d), diverged(d)
         return {"children": new}
 
@@ -5458,7 +5462,8 @@ def cmd_runall_start(root, match=None):
     one held by an {after repo:job} marker or the requeue loop guard (waiting_on), with every item that needs it. A child
     whose item needs another item claimed here depends_on that sibling's child. An item waiting on Human setup stays
     open, and so does every item that needs it. With match only items match_words accepts are claimed: the rest are held,
-    so a matching item that needs one stays open too. Cool-down refuses it (COOLING_CLAIM)."""
+    so a matching item that needs one stays open too. Cool-down refuses it (COOLING_CLAIM). The parent gets a
+    childSpecs mark, as in cmd_plan_apply."""
     if cooling_down():
         raise SystemExit(COOLING_CLAIM)
     with locked_board(root) as board:
@@ -5491,7 +5496,7 @@ def cmd_runall_start(root, match=None):
             find(board, kid)["depends_on"] = list(dict.fromkeys(k for n in item["needs"] for k in by_id.get(n, [])
                                                                 if k != kid))
         write_backlog(root, lines)
-        parent.update(lane="runall", stage="running", children=kids, updatedAt=now())
+        parent.update(lane="runall", stage="running", children=kids, updatedAt=now(), childSpecs=now())  # as plan-apply
         return {"id": parent_id, "children": kids}
 
 
@@ -5896,6 +5901,16 @@ def big_shared(root):
         return set(BIG_SHARED_FILES)
     return BIG_SHARED_FILES | set(_project_list(text, "Shared files") or [])
 OVERLAP_HOLD_MAX_S = 2 * 3600  # a waiting child held on an overlap longer than this is claimed anyway
+CHILD_SPECS_MAX_S = 3600  # a parent's childSpecs mark older than this holds nothing: it died in BigBoy step 2
+
+
+def child_specs_pending(parent) -> bool:
+    """True while a parent's childSpecs mark (plan-apply, runall-start: BigBoy step 2 is writing the child specs) is
+    at most CHILD_SPECS_MAX_S old; cmd_ready claims none of its children then (job 1275). A malformed mark holds nothing."""
+    try:
+        return time.time() - datetime.fromisoformat(parent["childSpecs"]).timestamp() <= CHILD_SPECS_MAX_S
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def is_test_path(p):
@@ -6046,8 +6061,11 @@ def note_queue_gate(root, job_id, gate):
         pass
 
 
-def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, shop: str | None = None):
+def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, shop: str | None = None,
+              specs_done=False):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
+    While child_specs_pending(parent) (BigBoy step 2 writing the child specs, job 1275) it claims nothing and leaves
+    the parent, as for a paused one; `specs_done` (step 3's `ready --specs-done`, never serve.py) first drops the mark.
     `live` ids count as in progress whatever their stage (see resume_blocker). A sibling or outside job in POST_BUILD
     holds no slot (it still counts in in_progress), and a `Lane: fast` kid (spec.md header, else feature.md) passes
     slot_conflict's `fast`, with every kid's and holder's spec_funcs as its `funcs`. Paused and stalled siblings with readable Likely files keep their
@@ -6099,7 +6117,10 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
         # A legacy needs-human parent (blocked before WAITING_ON existed, or parked on the chain lock) is
         # re-evaluated so existing boards recover.
         legacy = parent["stage"] == "needs-human" and reason.startswith((BLOCKED, RUNALL_BLOCKED, CHAIN_LOCKED))
-        held = bool(parent.get("paused"))  # a paused parent claims nothing and keeps its stage and reason
+        if specs_done:
+            parent.pop("childSpecs", None)
+        # a paused parent, or one still writing its child specs, claims nothing and keeps its stage and reason
+        held = bool(parent.get("paused")) or child_specs_pending(parent)
         blocked = not held and (legacy or (parent["stage"] == "running"
                                            and reason.startswith((WAITING_ON, MACHINE_WAIT))))
         go = not held and (parent["stage"] == "running" or legacy)
@@ -8123,7 +8144,9 @@ def main(argv=None):
     pa = sub.add_parser("plan-apply")
     pa.add_argument("id")
     pa.add_argument("--fix", action="store_true")
-    sub.add_parser("ready").add_argument("id")
+    rd = sub.add_parser("ready")
+    rd.add_argument("id")
+    rd.add_argument("--specs-done", action="store_true")
     sub.add_parser("runall-start").add_argument("--match")
     sub.add_parser("watchdog")
     sub.add_parser("cloud-sync")
@@ -8271,7 +8294,7 @@ def main(argv=None):
     elif a.cmd == "plan-apply":
         print(json.dumps(cmd_plan_apply(a.dir, a.id, a.fix)))
     elif a.cmd == "ready":
-        print(json.dumps(cmd_ready(a.dir, a.id)))
+        print(json.dumps(cmd_ready(a.dir, a.id, specs_done=a.specs_done)))
     elif a.cmd == "runall-start":
         print(json.dumps(cmd_runall_start(a.dir, a.match)))
     elif a.cmd == "watchdog":
