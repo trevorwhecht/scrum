@@ -234,6 +234,7 @@ STOP_TITLES = {
     "MD_CONTRADICTION": "a knowledge-save job found a fact that contradicts the target .md or the code",
     "DIGEST": "a weekly digest proposal, a digest edit that failed to apply, or a pipeline-health finding",
     "TWO_SESSIONS": "two sessions were working the same job at once and the watchdog could not tell which one owns it",
+    "AGENT_MISSING": "a scrum agent could not be loaded (Agent type not found), so the job stopped instead of running a stand-in agent",
 }
 
 # The scrum commands a needs-human question's option may run (shape only: the id need not be the asked job's).
@@ -818,6 +819,34 @@ def take_spec(root, text, job_id):
         os.replace(src, Path(root) / "jobs" / job_id / "spec.md")
 
 
+E2E_FULL_MAIN = "E2E full suite on main"
+
+
+def e2e_full_duplicate(board, jobs_dir, text, job_id):
+    """The id of another live board job (not job_id, nor job_id's parent; stage not done or aborted) whose title or
+    feature.md names a spec path in text, when text starts with E2E_FULL_MAIN (a trailing `:<line>` ignored); else
+    None. The same test as serve.py e2e_full_owned, run at claim time (job 1301). Caller holds the lock."""
+    text = str(text or "").lstrip()
+    if not text.startswith(E2E_FULL_MAIN):
+        return None
+    specs = set(re.findall(r"e2e/\S+?\.spec\.ts", text))
+    if not specs:
+        return None
+    jobs = [j for j in board.get("jobs") or [] if isinstance(j, dict)]
+    parent = next((j.get("parent") for j in jobs if j.get("id") == job_id), None)
+    for job in jobs:
+        if job.get("id") in (job_id, parent) or job.get("stage") in ("done", "aborted"):
+            continue
+        seen = str(job.get("title") or "")
+        try:
+            seen += "\n" + (Path(jobs_dir) / str(job.get("id")) / "feature.md").read_text(errors="replace")
+        except OSError:
+            pass
+        if any(spec in seen for spec in specs):
+            return job.get("id")
+    return None
+
+
 def claim_item(lines, item, job_id):
     """Mark one backlog item claimed by job_id in lines. Caller holds the lock and writes the backlog once."""
     item["done"], item["job"] = True, job_id
@@ -855,6 +884,9 @@ def cmd_next(root, index=None, shop=None):
         take_spec(root, item["text"], job_id)
         claim_item(lines, item, job_id)
         write_backlog(root, lines)
+        if twin := e2e_full_duplicate(board, Path(root) / "jobs", item["text"], job_id):
+            abort_job(root, find(board, job_id), False, f"duplicate of {twin}")  # job 1301: the line stays claimed
+            return {"id": None, "feature": None}
         return {"id": job_id, "feature": item["text"]}
 
 
@@ -1583,6 +1615,7 @@ PROCESSES = (
     ("Same tests", ("stop_same_tests",), ()),
     ("CPU hogs", ("report_hogs",), ()),
     ("E2E lock reaps", ("e2e_lock_reap",), ()),
+    ("Agent links", ("agent_links_tick",), ()),
     ("Digest retry", ("digest_retry_tick",), ()),
     ("Weekly digest", ("weekly_tick",), ()),
     ("Cloud jobs", ("cloud_tick", "cmd_cloud_sync", "cmd_cloud_claim", "shop_tick", "write_shop_room"), ()),
@@ -1967,7 +2000,7 @@ def write_waste(root, digest_id):
 
 
 MODEL_RANK = {"haiku": 0, "sonnet": 1, "opus": 2, "fable": 3}  # write_tokens' pricier-model rule, cheapest first
-TOKENS_FLAG = {"median_x": 2, "top": 3, "agent_share": 0.4, "round_share": 0.8}  # write_tokens' ## Flagged limits
+TOKENS_FLAG = {"median_x": 2, "top": 3, "agent_share": 0.4, "agent_share_min_usd": 1.00, "round_share": 0.8}  # write_tokens' ## Flagged limits
 TOKENS_TRANSCRIPTS = 6  # transcript lines under a flagged job's costliest agent
 
 
@@ -1978,7 +2011,7 @@ def _model_family(model):
 
 def _token_reasons(job, usd, groups, lane_median, top):
     """write_tokens' ## Flagged reasons for one job, in the fixed order: pricier model than the agent's pin, over
-    TOKENS_FLAG median_x its lane median, a top-cost job, one of 2 or more agents over agent_share of the job, a
+    TOKENS_FLAG median_x its lane median, a top-cost job, one of 2 or more agents over agent_share of a job costing at least agent_share_min_usd, a
     reviewer's later round at round_share or more of its round 1. (write_tokens adds _two_sessions and _two_agents after them.)"""
     out, by_agent, by_round = [], {}, {}
     for (agent, rnd, model), (_, a) in groups.items():
@@ -1994,7 +2027,7 @@ def _token_reasons(job, usd, groups, lane_median, top):
     if job in top:
         out.append("top 3 cost")
     for agent, a in sorted(by_agent.items(), key=lambda x: -x[1]):  # a one-agent job is always 100% that agent
-        if usd > 0 and len(by_agent) > 1 and a > TOKENS_FLAG["agent_share"] * usd:
+        if usd >= TOKENS_FLAG["agent_share_min_usd"] and len(by_agent) > 1 and a > TOKENS_FLAG["agent_share"] * usd:
             out.append(f"{agent} {100 * a / usd:.0f}% of job cost")
     for (agent, rnd), a in sorted(by_round.items(), key=lambda x: (x[0][0], x[0][1] or 0)):
         base = by_round.get((agent, 1), 0)
@@ -6497,6 +6530,13 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
                 k.pop("overlap_hold", None)
                 for dep in undone:
                     note_queue_gate(root, k["id"], f"depends_on:{dep}")
+                continue
+            try:
+                feature = (jobs_dir / k["id"] / "feature.md").read_text(errors="replace")
+            except OSError:
+                feature = ""
+            if twin := e2e_full_duplicate(board, jobs_dir, feature, k["id"]):  # job 1301: never claimed, never ready
+                abort_job(root, k, False, f"duplicate of {twin}")
                 continue
             k_slots, k_outside = (held_by(slots), held_by(outside)) if critical(k) else (slots, outside)
             skipped = []

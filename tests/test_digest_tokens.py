@@ -434,6 +434,17 @@ class WriteTokensTest(unittest.TestCase):
                       "scrum-review-ui 60% of job cost\n", text)  # main's 40% is not over agent_share
         self.assertIn("  - peak context: 600,000 tokens\n", text)
 
+    def test_agent_share_skips_jobs_under_min_usd(self):
+        self.assertEqual(board.TOKENS_FLAG["agent_share_min_usd"], 1.00)
+        m = "claude-opus-4-5"
+
+        def groups(main, agent):
+            return {("main", None, m): (1, main), ("scrum-spec-writer", None, m): (1, agent)}
+        cheap = board._token_reasons("1-a", 0.51, groups(0.27, 0.24), None, set())  # job 1302: $0.51, 47% agent
+        self.assertEqual([r for r in cheap if "of job cost" in r], [])
+        dear = board._token_reasons("1-a", 1.00, groups(0.40, 0.60), None, set())  # at the floor: still flagged
+        self.assertEqual([r for r in dear if "of job cost" in r], ["scrum-spec-writer 60% of job cost"])
+
     def test_tokens_no_rows_and_no_added(self):
         self.board_jobs(("1-a", None), ("2-b", None), ("3-c", None), ("4-d", None), ("5-e", None))
         self.jobs_txt("4-d", "5-e", "1-a", "3-c", "2-b")

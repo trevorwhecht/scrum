@@ -49,6 +49,35 @@ class InstallTest(unittest.TestCase):
             self.assertEqual((claude / "agents" / "scrum-builder.md").resolve(), (t / "src" / "agents" / "scrum-builder.md").resolve())
             self.assertEqual((t / "home" / ".codex" / "AGENTS.md").resolve(), (t / "src" / "codex" / "AGENTS.md").resolve())
 
+    def test_install_prunes_dangling_scrum_agent_links(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t) / "home"
+            agents = home / "agents"
+            agents.mkdir(parents=True)
+            outside = Path(t) / "outside.md"
+            outside.write_text("x")
+            (agents / "scrum-gone.md").symlink_to(Path(t) / "nowhere.md")
+            (agents / "scrum-outside.md").symlink_to(outside)
+            (agents / "other-gone.md").symlink_to(Path(t) / "nowhere2.md")
+            (agents / "jev-filter.md").write_text("real")
+            first = self.run_install(home)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertIn(f"removed dangling link {agents / 'scrum-gone.md'}", first.stdout)
+            self.assertFalse((agents / "scrum-gone.md").is_symlink())
+            self.assertTrue((agents / "scrum-outside.md").is_symlink())
+            self.assertTrue((agents / "other-gone.md").is_symlink())
+            self.assertEqual((agents / "jev-filter.md").read_text(), "real")
+            second = self.run_install(home)
+            self.assertNotIn("removed", second.stdout)
+        with tempfile.TemporaryDirectory() as t:  # a refused run changes nothing
+            home = Path(t) / "home"
+            (home / "agents").mkdir(parents=True)
+            (home / "agents" / "scrum-builder.md").write_text("mine")
+            (home / "agents" / "scrum-gone.md").symlink_to(Path(t) / "nowhere.md")
+            refused = self.run_install(home)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertTrue((home / "agents" / "scrum-gone.md").is_symlink())
+
     def test_install_refuses_to_clobber_a_real_file(self):
         with tempfile.TemporaryDirectory() as t:
             home = Path(t)
@@ -262,7 +291,7 @@ class InstallTest(unittest.TestCase):
             home.mkdir()
             bin_dir = Path(t) / "bin"  # every tool install.sh runs, and no go
             bin_dir.mkdir()
-            for tool in ("bash", "git", "python3", "ln", "mkdir", "dirname", "basename"):
+            for tool in ("bash", "git", "python3", "ln", "mkdir", "dirname", "basename", "rm"):
                 (bin_dir / tool).symlink_to(shutil.which(tool))
             result = subprocess.run(["bash", str(ROOT / "install.sh")], capture_output=True, text=True,
                                     env={**os.environ, "PATH": str(bin_dir), "CLAUDE_HOME": str(home),
