@@ -1036,7 +1036,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26800, "newjob.md")  # +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26900, "newjob.md")  # +debug E2E in background, Build queue, job 1250; +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -2787,6 +2787,14 @@ class ContractTest(unittest.TestCase):
                        "<paths>` with Bash timeout 600000"):
             self.assertIn(phrase, lane, phrase)
         self.assertNotIn('"$REPO/<path>"', lane)
+        step1 = next(l for l in lane.splitlines() if l.startswith("1. **Dev server.**"))
+        install = "**Install.** When the lockfile changed between `targets.json` `since` and `head`"
+        for phrase in (install, "run PROJECT's `Install:` command in `REPO` first",
+                       "`git -C \"$REPO\" diff --quiet <since> <head> -- <lockfile>`", "unchanged lockfile skips the install",
+                       "No server of this sweep is running yet",
+                       "A failed install does not stop the sweep: append its output to `SWEEP_DIR/dev.log` and go on to the dev server and its **Probe**"):
+            self.assertIn(phrase, step1, phrase)
+        self.assertLess(step1.index(install), step1.index("**Shared dev server**"))
         review = (SKILL_DIR / "lanes" / "review.md").read_text()
         self.assertIn("When run for a sweep (`lanes/uisweep.md` step 2), `<path>` is the resolved `$REPO/<rest>` path", review)
         self.assertLess(lane.index("render.py"), lane.index("Spawn `scrum-review-ui`"))
@@ -3894,8 +3902,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         # job 1227: a held Build can outlast the 600 s Bash timeout, and its 124 parks on the Check queue
         for phrase in ('--project "$F/project.md"` with the Bash tool\'s `run_in_background` (wait for it to exit)',
                        "A Test, Typecheck, Lint, Build or E2E run that exits 124 timed out on the lock: re-run it once",
-                       "(for `check.lock` or Build, `'waiting on the Check queue'`"):
+                       "for Build, `'waiting on the Build queue'`"):
             self.assertIn(phrase, check, phrase)
+        self.assertNotIn("(for `check.lock` or Build, `'waiting on the Check queue'`", check)  # job 1250: own Build queue
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
         step4 = self.section(builder, "4. Run the focused tests", "5. Commit on your branch")
         self.assertNotIn("--project", step4)
@@ -4031,6 +4040,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "only the spec files the diff adds or changes under the E2E folder",
                        "plus the E2E spec files named in `spec.md` acceptance criteria",
                        "the `e2e.lock` `buildlock.py` wrapper as `npx playwright test --workers=1 <spec files>`",
+                       "with the same `E2E_PORT`, with the Bash tool's `run_in_background` (wait for it to exit)",
                        "a non-zero exit is `CHECK: FAIL`", "with neither, step 3 writes `E2E: skipped, debug lane`"):
             self.assertIn(phrase, rule, phrase)
         self.assertNotIn("`E2E: skipped, fast lane`", rule)

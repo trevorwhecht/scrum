@@ -496,6 +496,7 @@ class BoardTest(unittest.TestCase):
     def test_ask_resume_abort_exempt_asks(self):
         for stage, question in (("merging", "Unpushed commits in repo: x"),
                                 ("check", "waiting on the E2E queue"),
+                                ("check", "waiting on the Build queue"),
                                 ("merging", "GitHub refused to start the checks because of failed account payments.")):
             with self.subTest(question=question):
                 job_id = board.cmd_new(self.root, "x")
@@ -792,7 +793,8 @@ class BoardTest(unittest.TestCase):
                 self.assertNotIn("stalled", job)
 
     def test_ask_e2e_queue_wait_is_waiting_not_stalled(self):
-        for q, want in (("waiting on the E2E queue", "waiting: E2E queue"), ("waiting on the Check queue", "waiting: Check queue")):
+        for q, want in (("waiting on the E2E queue", "waiting: E2E queue"), ("waiting on the Check queue", "waiting: Check queue"),
+                        ("waiting on the Build queue", "waiting: Build queue")):
             with self.subTest(q=q):
                 job_id = board.cmd_new(self.root, "x")
                 board.cmd_set(self.root, job_id, ["stage=check"])
@@ -8131,6 +8133,39 @@ class ReviewPlanTest(unittest.TestCase):
             self.assertEqual(out["spawn"], ["security", "code"])
             self.assertEqual(self.read(1, "ux"), self.UI_SKIP)
 
+    # --- job 1256: no markup in the diff ---
+    NOMARKUP_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no UI file's diff touches markup, styling or copy.\n"
+
+    def test_review_plan_logic_only_tsx_skips_ui_ux(self):
+        self.project("*.tsx")
+        self.commit("src/q.tsx", "export function f(a) {\n  return a + 1;\n}\n")
+        board.cmd_set(self.root, self.job, ["round=2"])
+        self.commit("src/q.tsx", "export function f(a) {\n  return a + 2;\n}\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertNotIn("ui", out["spawn"])
+        self.assertNotIn("ux", out["spawn"])
+        self.assertEqual(self.read(2, "ui"), self.NOMARKUP_SKIP)
+        self.assertEqual(self.read(2, "ux"), self.NOMARKUP_SKIP)
+
+    def test_review_plan_markup_change_keeps_ui_ux(self):
+        self.project("*.tsx *.css")
+        cases = {
+            "jsx tag": "x = <div>{a}</div>;\n",
+            "className": "const c = { className: foo };\n",
+            "copy": "const t = 'Save your changes';\n",
+            "bare jsx text": "Save your changes\n",
+            "css file": "a { color: red; }\n",
+        }
+        for name, line in cases.items():
+            with self.subTest(name):
+                path = "src/m.css" if name == "css file" else f"src/{name.replace(' ', '')}.tsx"
+                self.commit(path, "const a = 1;\n")
+                board.cmd_set(self.root, self.job, ["round=1"])
+                self.commit(path, line)
+                out = board.cmd_review_plan(self.root, self.job)
+                self.assertIn("ui", out["spawn"])
+                self.assertIn("ux", out["spawn"])
+
     # --- job 681: Check gate visual diff ---
     VISUAL_SKIP = ("VERDICT: PASS\nSkipped by orchestrator: visual diff found every captured pair identical and the "
                    "spec says no visual change.\n")
@@ -8402,7 +8437,7 @@ class ReviewPlanTest(unittest.TestCase):
 
     def test_review_plan_runtime_tsx_spawns_ui_ux(self):
         self.project("*.tsx")
-        self.commit("src/x/Foo.tsx", "x\n")
+        self.commit("src/x/Foo.tsx", "export const X = () => <p>x</p>;\n")
         self.assertEqual(board.cmd_review_plan(self.root, self.job)["spawn"], ["ux", "ui", "code"])
 
     def test_review_plan_deletion_skip_boundary_is_90pct(self):
@@ -9464,6 +9499,14 @@ class RouteCheckTest(unittest.TestCase):
 
     def test_route_check_lilguy_31_lines_promotes(self):
         self.assertEqual(self.lilguy({"src/a.py": "x\n" * 31}), "diff over 30 added lines (31)")
+
+    def test_route_check_lilguy_cause_pinned_excludes_test_files(self):
+        files = {"src/a.py": "x\n" * 20, "tests/test_a.py": "y\n" * 40}
+        self.assertIsNone(self.lilguy(files, feature="Bug\nLane: lilguy — bug, cause pinned: x\n"))
+
+    def test_route_check_lilguy_plain_counts_test_files(self):
+        files = {"src/a.py": "x\n" * 20, "tests/test_a.py": "y\n" * 40}
+        self.assertEqual(self.lilguy(files), "diff over 30 added lines (60)")
 
     def test_route_check_lilguy_11_files_promotes(self):
         self.assertEqual(self.lilguy({f"src/f{i}.py": "x\n" for i in range(11)}),
