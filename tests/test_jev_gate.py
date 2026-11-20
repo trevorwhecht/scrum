@@ -175,7 +175,7 @@ class JevGateTest(unittest.TestCase):
     def test_model_complex_no_skips_jev(self):
         (self.job / "feature.md").write_text("# Feature\nComplex: no\n\n## Body\nAdd a button")
         out, f = self.gate("model")
-        self.assertEqual((out, f[1], f[2], f[3], f[4]), ("sonnet", "model", "-", "Complex: no", "sonnet"))
+        self.assertEqual((out, f[1], f[2], f[3], f[4]), ("sonnet", "model", "-", "Complex: no (feature.md)", "sonnet"))
         self.assertEqual(self.sent, [])
 
     def test_model_complex_yes_still_asks(self):
@@ -190,8 +190,37 @@ class JevGateTest(unittest.TestCase):
         self.assertEqual((out, f[4]), ("opus", "opus"))
         self.assertEqual(len(self.sent), 1)
 
+    def test_model_spec_complex_no_skips_jev(self):
+        (self.job / "feature.md").write_text("# Feature\n\n## Body\nAdd a button")
+        (self.job / "spec.md").write_text("# Spec\nComplex: no\n\n## Problem\nx")
+        out, f = self.gate("model")
+        self.assertEqual((out, f[2], f[3], f[4]), ("sonnet", "-", "Complex: no (spec.md)", "sonnet"))
+        self.assertEqual(self.sent, [])
+
+    def test_model_feature_yes_beats_spec_no(self):
+        (self.job / "feature.md").write_text("# Feature\nComplex: yes\n\n## Body\nAdd a button")
+        (self.job / "spec.md").write_text("# Spec\nComplex: no\n\n## Problem\nx")
+        out, f = self.gate("model", ask=lambda s, q, *a: {"q": {"type": "score", "score": 2}})
+        self.assertEqual((out, f[4]), ("opus", "opus"))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_model_spec_complex_yes_still_asks(self):
+        (self.job / "feature.md").write_text("# Feature\n\n## Body\nAdd a button")
+        (self.job / "spec.md").write_text("# Spec\nComplex: yes\n\n## Problem\nx")
+        out, f = self.gate("model", ask=lambda s, q, *a: {"q": {"type": "score", "score": 2}})
+        self.assertEqual((out, f[4]), ("opus", "opus"))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_model_spec_complex_no_below_heading_asks(self):
+        (self.job / "feature.md").write_text("# Feature\n\n## Body\nAdd a button")
+        (self.job / "spec.md").write_text("# Spec\n\n## Problem\nComplex: no\n")
+        out, f = self.gate("model", ask=lambda s, q, *a: {"q": {"type": "score", "score": 2}})
+        self.assertEqual((out, f[4]), ("opus", "opus"))
+        self.assertEqual(len(self.sent), 1)
+
     def test_spec_model_ignores_complex_header(self):
         (self.job / "feature.md").write_text("# Feature\nComplex: no\n\n## Body\nAdd a button")
+        (self.job / "spec.md").write_text("# Spec\nComplex: no\n")
         out, f = self.gate("spec-model", ask=lambda s, q, *a: {"q": {"type": "score", "score": 2}})
         self.assertEqual((out, f[1], f[4]), ("opus", "spec-model", "opus"))
         self.assertEqual(len(self.sent), 1)
