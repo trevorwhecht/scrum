@@ -1300,8 +1300,8 @@ class ProfileCopyTest(SetupCase):
                              f"{m}/Developer/repos/.claude/rules/debugging.md{sep}{m}/.claude/rules/performance.md{sep}"
                              f"{m}/Developer/./repos/CLAUDE.md\n")  # the last one is the first again: copied once
                 self.assertEqual(self.copy(), "copied")
-                self.assertEqual([c[0] for c in self.calls[:2]], [shop.PROBE_CMD, self.calls[1][0]])
-                self.assertIn("project.md", self.calls[1][0])
+                self.assertEqual(self.calls[0][0], shop.PROBE_CMD)
+                self.assertIn('"$d/scrum/project.md.tmp"', self.calls[1][0])  # the profile call, then the auth-less tail
                 self.assertEqual(self.calls[2:], [(CONV_CMDS[0], 60, b"# repos conventions 1245\n"),
                                                   (CONV_CMDS[1], 60, b"# debugging rule 1245\n"),
                                                   (CONV_CMDS[2], 60, b"# performance rule 1245\n")])
@@ -1316,6 +1316,20 @@ class ProfileCopyTest(SetupCase):
                 for argv in self.argv:
                     for word in ("repos conventions 1245", "debugging rule 1245", "performance rule 1245"):
                         self.assertNotIn(word, " ".join(argv))
+        fake = self.sp.side_effect
+
+        def mac_files_gone(argv, **kw):  # every Conventions file was read before the first ssh call
+            for d in ("Developer", ".claude", "code"):
+                shutil.rmtree(m / d, ignore_errors=True)
+            return fake(argv, **kw)
+        self.sp.side_effect = mac_files_gone
+        shop._cache.clear()
+        for d in ("Developer", ".claude"):
+            shutil.rmtree(self.sh / d)
+        self.assertEqual(self.copy(), "copied")
+        self.assertEqual([(self.sh / rel).read_bytes() for rel in ("Developer/repos/CLAUDE.md",
+                                                                   ".claude/rules/performance.md")],
+                         [b"# repos conventions 1245\n", b"# performance rule 1245\n"])
 
     def test_conventions_skipped(self):
         m, outside = self.mac, self.sh.parent  # outside: neither this Mac's home nor the shop's

@@ -16,8 +16,9 @@ ssh's own failure as 255.
 probe() is one cached round trip that prints nothing when the shop Mac sleeps. setup(), ready(), env_copy(),
 profile_copy() and md_sync() never print a secret or remote output. Dispatch (serve.py's shop_tick and cloud_tick) uses
 clone() to clone or fast-forward a project in ~/scrum-work, profile_copy() to give that clone this Mac's project.md and
-Render auth file (and the shop's home the out-of-repo Conventions files that project.md names), start() to launch a headless cloud-job session there (the prompt only on stdin) and ended() to read a
-finished session's log tail. See lanes/shop.md.
+Render auth file (and the shop's home the out-of-repo Conventions files that project.md names), start() to launch a
+headless cloud-job session there (the prompt only on stdin) and ended() to read a finished session's log tail. See
+lanes/shop.md.
 """
 import argparse, io, json, os, posixpath, re, shlex, subprocess, sys, tarfile, time
 from collections import namedtuple
@@ -66,8 +67,8 @@ GH_LOGIN = ("gh auth login --hostname github.com --git-protocol https --with-tok
 # /usr/bin/python3: a bare python3 under PATH_PREFIX is uv's externally-managed one, which refuses pip install --user.
 RUFF_CHECK = "command -v ruff"
 RUFF_INSTALL = 'PYTHONUSERBASE="$HOME/.local" /usr/bin/python3 -m pip install --user -q ruff'
-# Codex CLI for scrum-review-code's second review: this Mac's version (it runs -m gpt-6.1-sol). --prefix: the shop's npm
-# prefix is node's own share dir, so a plain `npm i -g` would put the bin outside ~/.local/bin.
+# Codex CLI for scrum-review-code's second review, at this Mac's version so both Macs run the same Codex. --prefix: the
+# shop's npm prefix is node's own share dir, so a plain `npm i -g` would put the bin outside ~/.local/bin.
 CODEX_VERSION = "0.166.0"
 CODEX_CHECK = "command -v codex"
 CODEX_INSTALL = 'npm install -g --prefix "$HOME/.local" @openai/codex@' + CODEX_VERSION
