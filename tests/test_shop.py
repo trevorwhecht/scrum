@@ -2160,6 +2160,13 @@ class StructureTest(unittest.TestCase):
             self.assertIn(phrase, chrome, phrase)
         self.assertIn("a non-blank `SCRUM_CHROME`", text[text.index("## E2E channel"):text.index("## MD sync")])
         self.assertIn("`SCRUM_PW_CHANNEL=chrome`, `SCRUM_CHROME` (setup's **chrome** binary)", text)
+        self.assertIn("an account or `codex login` that is `not ready` never fails it", setup)
+        self.assertLess(setup.index("- **account main, account owa.**"), setup.index("- **codex.**"))
+        self.assertLess(setup.index("- **codex.**"), setup.index("- **ruff.**"))
+        codex = setup[setup.index("- **codex.**"):setup.index("- **ruff.**")]  # job 1245
+        for phrase in ("- **codex login.**", "`CODEX_VERSION`", '`--prefix "$HOME/.local"`', "`~/.codex/access-token`",
+                       "`codex login --with-access-token`", "`OPTIONAL_STEPS`"):
+            self.assertIn(phrase, codex, phrase)
         jev = setup[setup.index("- **jev key.**"):]  # the last step
         for phrase in ("`[ -s ~/.config/typesafe/key ]`", "no Keychain read here", "goes on stdin to",
                        "so the file is mode 600", 'export TYPESAFE_API_KEY="$(cat F)"'):
@@ -2167,8 +2174,15 @@ class StructureTest(unittest.TestCase):
         copy = text[text.index("## Env copy"):text.index("## E2E channel")]
         for phrase in ("`profile_copy(project, repo)`", "`scrum/` and `.claude/worktrees/`", "`- Render auth:`",
                        "`posixpath.normpath(\".claude/worktrees/scrum-x/\" + <path>)`", "is not under `.claude/`",
-                       "It returns `copied` when", "`none` (no `scrum/project.md` here; no ssh)"):
+                       "It returns `copied` when", "`none` (no `scrum/project.md` here; no ssh)",
+                       "one more 60 s call per Conventions file"):
             self.assertIn(phrase, copy, phrase)
+        self.assertLess(copy.index("- **Conventions.**"), copy.index("- **Result.**"))
+        conventions = copy[copy.index("- **Conventions.**"):copy.index("- **Result.**")]  # job 1245
+        for phrase in ("`- Conventions to read:`", "`CONVENTIONS_DIRS`", "`[A-Za-z0-9._/-]+`",
+                       "outside the repo, both as given and as its realpath", "replaced by the file, not written through"):
+            self.assertIn(phrase, conventions, phrase)
+        self.assertIn("every Conventions call", copy[copy.index("- **Result.**"):])
         self.assertIn("`clone(<repo folder>, <origin URL>)`, `env_copy()` (copied or none), `profile_copy()` (copied or "
                       "none) and `start()`", text[text.index("## Dispatch"):])
         self.assertIn("creates `cooldown-<alias>` beside the cool-down flag", text[text.index("## Dispatch"):],

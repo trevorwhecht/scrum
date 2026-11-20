@@ -36,8 +36,9 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
 - Dashboard: `skills/trevskills-scrum/dashboard.html` is one file served by `serve.py` on :8765. The UI rules in
   `/Users/trevorhecht/Developer/repos/.claude/rules/ui-behaviour.md` apply to it; test at 390 px first.
 - Dashboard: an async fetch or poll that writes into the viewer, a modal or a list returns early when its target changed while it waited (e.g. `if ($("viewer").dataset.key !== job.key) return;`).
-- Routing: `local/routing.json` + `local/route.py`. Codex lives at `/opt/homebrew/bin/codex` only on Trevor's
-  Mac; `route.py codex-review` returns `skip` wherever the binary is missing (cloud sessions).
+- Routing: `local/routing.json` + `local/route.py`. Codex is at `/opt/homebrew/bin/codex` on Trevor's Mac and at
+  `~/.local/bin/codex` on the shop Mac (shop.py setup's codex step); `route.py codex-review` returns `skip`
+  wherever the binary is missing (cloud sessions).
 - Agent, SKILL.md and lane edits merge like any other job, with no agent-rules stop (Trevor's choice, 2026-10-15).
   Batch rule edits; do not mix them into feature jobs.
 
