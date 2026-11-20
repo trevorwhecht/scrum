@@ -702,6 +702,21 @@ class HeavyHoldTest(unittest.TestCase):
             with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400"):
                 self.assertEqual(board.heavy_hold(), self.LOAD, "load is read before swap")
 
+    def test_memory_pressure_reason_matches_machine_ok(self):
+        for level, text in (("2", "memory pressure warn (kernel level 2)"), ("3", "memory pressure warn (kernel level 3)"),
+                            ("4", "memory pressure critical (kernel level 4)")):
+            with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE=level):
+                self.assertEqual((board.heavy_hold(), board.machine_ok(self.tmp), board.vm_pressure_reason()),
+                                 (text, text, text), level)
+        with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="1"):
+            self.assertIsNone(board.heavy_hold())
+        with mock.patch.object(board, "vm_pressure_level", return_value=None):
+            self.assertIsNone(board.heavy_hold(), "an unknown level passes")
+        with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="4", SCRUM_CPU_LOAD_PCT="400"):
+            self.assertEqual(board.heavy_hold(), self.LOAD, "load is read before memory pressure")
+        with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2", SCRUM_SWAP_PCT="40", SCRUM_FREE_RAM="30"):
+            self.assertEqual(board.heavy_hold(), "memory pressure warn (kernel level 2)", "memory before swap")
+
     def test_unknown_and_edge_readings_pass(self):
         no_ram = mock.patch.object(board, "free_ram_pct", side_effect=AssertionError("free RAM read at swap 25"))
         with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="25", SCRUM_FREE_RAM="10"), no_ram:

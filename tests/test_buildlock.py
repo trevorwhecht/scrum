@@ -28,6 +28,7 @@ class BuildLockTest(unittest.TestCase):
                     "SCRUM_REGISTRY": str(self.dir / "none.json"),  # never Trevor's real boards
                     "SCRUM_COOLDOWN": str(self.dir / "no-cooldown"),  # never Trevor's real cool-down flag
                     "SCRUM_CPU_LOAD_PCT": "0", "SCRUM_SWAP_PCT": "0",  # calm: no test holds on this machine's readings
+                    "SCRUM_VM_PRESSURE": "1",  # kernel memory pressure normal: heavy_hold never runs sysctl
                     "SCRUM_HEAVY_STEPS_LOG": str(self.dir / "heavy-steps.log")}  # never the real heavy-steps.log
         self.env.pop("SCRUM_BUILD_LOCK_TIMEOUT", None)
         self.procs = []
@@ -526,14 +527,21 @@ class HeavyHoldTest(unittest.TestCase):
         self.assertEqual(board.calls, 1, "re-read at most every HOLD_POLL s")
         self.assertEqual(list((self.dir / "sub" / "e2e.lock.waiting").glob("*")), [])
 
-    def test_check_lock_never_held(self):
-        for name in ("check.lock", "x.lock"):
-            with self.subTest(lock=name):
-                r = self.run_wrap(sys.executable, "-c", "raise SystemExit(4)", SCRUM_CPU_LOAD_PCT="400",
-                                  SCRUM_BUILD_LOCK=str(self.dir / "sub" / name), SCRUM_BUILD_LOCK_TIMEOUT="1")
-                self.assertEqual((r.returncode, r.stderr), (4, ""))
+    def test_check_lock_held_then_runs(self):
+        """job 1312: check.lock waits on a hot Mac like build.lock, taking no slot, and keeps its 2 slots."""
+        seen = []
+        lock = self.dir / "sub" / "check.lock"
+        got = self.main_inproc(self.board(self.LOAD, None, seen=seen), "check.lock", code=4)
+        self.assertEqual(got, (4, f"buildlock: holding for the machine: {self.LOAD} ({lock})\n", True))
+        self.assertEqual(seen, [(False, False, False), (False, True, False)], "slot free yet untaken, marker written")
+        self.assertEqual(load().slots(lock), 2)
+
+    def test_other_lock_never_held(self):
+        r = self.run_wrap(sys.executable, "-c", "raise SystemExit(4)", SCRUM_CPU_LOAD_PCT="400",
+                          SCRUM_BUILD_LOCK=str(self.dir / "sub" / "x.lock"), SCRUM_BUILD_LOCK_TIMEOUT="1")
+        self.assertEqual((r.returncode, r.stderr), (4, ""))
         board = self.board(self.LOAD)
-        self.assertEqual(self.main_inproc(board, "check.lock", code=4), (4, "", True))
+        self.assertEqual(self.main_inproc(board, "x.lock", code=4), (4, "", True))
         self.assertEqual(board.calls, 0)
 
     def test_board_import_failure_never_holds(self):

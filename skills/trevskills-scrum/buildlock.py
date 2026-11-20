@@ -9,7 +9,7 @@ SCRUM_BUILD_LOCK overrides the lock file; SCRUM_BUILD_LOCK_TIMEOUT the wait in s
 SCRUM_<STEM>_LOCK_SLOTS how many may hold it at once (see slots(); default 2 for check.lock, else 1).
 While board.py's cool-down flag is on, waiters go in board.lock_rank order (nearest the finish line first), then by
 arrival; the waiting marker holds `<cwd>\n<rank>`.
-On a HEAVY_LOCKS lock (build.lock, e2e.lock) it also waits, marker written and no slot taken, while board.heavy_hold()
+On a HEAVY_LOCKS lock (build.lock, check.lock, e2e.lock) it also waits, marker written and no slot taken, while board.heavy_hold()
 gives a reason (machine_hold, re-read every HOLD_POLL s), up to the same timeout.
 Each run that took a slot appends one line to heavy-steps.log (SCRUM_HEAVY_STEPS_LOG overrides it; log_step).
 Exits with the command's exit code, 124 on a lock timeout, 127 when the command is not found.
@@ -18,7 +18,7 @@ import fcntl, math, os, re, subprocess, sys, time
 from pathlib import Path
 
 DEFAULT_TIMEOUT = 1800.0
-HEAVY_LOCKS = ("build", "e2e")  # lock stems held while board.heavy_hold gives a reason (job 1227); never check.lock
+HEAVY_LOCKS = ("build", "check", "e2e")  # lock stems held while board.heavy_hold gives a reason (jobs 1227, 1312); check.lock keeps its 2 slots
 HOLD_POLL = 5  # seconds at least between heavy_hold reads while waiting
 LOG_MAX, LOG_KEEP = 10000, 5000  # heavy-steps.log past LOG_MAX lines is trimmed to its last LOG_KEEP
 
@@ -189,7 +189,7 @@ def main(argv: list[str]) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     asked = time.monotonic()
     heavy = path.stem in HEAVY_LOCKS
-    why = machine_hold(board_module()) if heavy else None  # a hot machine holds Build and E2E even with a slot free
+    why = machine_hold(board_module()) if heavy else None  # a hot machine holds Build, Check and E2E even with a slot free
     f = None if why else take(slot_paths(path))  # only a live flock holds a slot, so a leftover file never blocks
     if f is None:
         print(f"buildlock: holding for the machine: {why} ({path})" if why else

@@ -350,8 +350,10 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     (the longest-held CPU launch) is queued too, noted cpu_queue, so that job starts ahead of new claims and other projects.
     `nice` (the UI sweep's UI_SWEEP_NICE) goes to board.spawn only when given; every other session keeps SESSION_NICE.
     A board job whose session is still alive (board.spawn's LiveSession, job 1275) starts nothing: one stderr line, its
-    queued launch dropped (unqueue), None. A `resume` past the gates first stops a live-idle session (stop_live_idle)."""
-    reason, on_board, queued_at, hold, refused_live = None, False, None, None, None
+    queued launch dropped (unqueue), None. A `start` that board.spawn holds on a hot Mac (board.HeldStart, job 1312) stays
+    queued (marked manual for a click), notes the hot_mac gate, prints one `spawn held` line and returns None.
+    A `resume` past the gates first stops a live-idle session (stop_live_idle)."""
+    reason, on_board, queued_at, hold, refused_live, held = None, False, None, None, None, None
     niced = {} if nice is None else {"nice": nice}
     if action in GATED:
         try:
@@ -389,10 +391,15 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                     proc, log = board.spawn(root, job_id, action, prompt, flags, **niced)
                 except board.LiveSession as e:  # job 1275: a second session would fight the live one
                     refused_live = e
+                except board.HeldStart as e:  # job 1312: a hot Mac queued this start for the shop Mac
+                    proc, held = None, e
+                    note_queue_gate(root, job_id, "hot_mac")
         if refused_live:  # not started and not queued: play_queue_tick would retry it every tick
             print(f"spawn refused: {project}/{job_id} {action}: {refused_live}", file=sys.stderr, flush=True)
             unqueue(root, job)
             return None
+        if held:  # board.spawn queued the launch (queue_start); the block below marks it manual for a click
+            print(f"spawn held: {project}/{job_id} {action}: {held}", file=sys.stderr, flush=True)
         with board.locked_board(root) as b:  # the live job, re-read under the lock
             live = next((j for j in b["jobs"] if j["id"] == job_id), {})  # {}: removed meanwhile, nothing to mark
             if proc is None:  # setdefault: a second click keeps the first time and launch
@@ -430,6 +437,9 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             proc, log = board.spawn(root, job_id, action, prompt, flags, account=account, **niced)
         except board.LiveSession as e:  # job 1275: a board job past the gate (cloud-home) is checked too
             print(f"spawn refused: {project}/{job_id} {action}: {e}", file=sys.stderr, flush=True)
+            return None
+        except board.HeldStart as e:  # job 1312: a job that reached the board meanwhile
+            print(f"spawn held: {project}/{job_id} {action}: {e}", file=sys.stderr, flush=True)
             return None
         if action == "run-all" and not manual:  # a run-all launch (not a board job) is a start too, for pulse_tick
             with PULSE_STARTS_LOCK:
@@ -1315,6 +1325,75 @@ def e2e_full_stop_pid(pid, wait=5.0) -> None:
         print(f"e2e_full_stop_pid: {e}", file=sys.stderr)
 
 
+HOT_STOP_WAIT = 5  # stop_group: seconds between TERM and KILL
+
+
+def stop_group(pid, wait=HOT_STOP_WAIT) -> bool:
+    """SIGTERM the process group of pid, then SIGKILL it when still there after polling every 0.25 s for wait seconds.
+    Never pid 1 or below, never serve's own process group; a group gone or not ours (ProcessLookupError,
+    PermissionError) is ignored. True when TERM was sent (job 1312)."""
+    try:
+        if not isinstance(pid, int) or pid <= 1:
+            return False
+        pgid = os.getpgid(pid)
+        if pgid <= 1 or pgid == os.getpgrp():
+            return False
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return False
+    for _ in range(int(wait / 0.25)):
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError):
+            return True
+        time.sleep(0.25)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    return True
+
+
+def hot_stop_tick() -> list[str]:
+    """While board.heavy_hold() gives a reason, stop the two maintenance runs on a main checkout (job 1312): a running
+    UI sweep session (RUNS `<project>/ui-sweep`, live) and a full E2E in flight (E2E_FULL["pid"], its buildlock child).
+    Each group gets TERM, then KILL after HOT_STOP_WAIT (stop_group). The E2E sets E2E_FULL["hot_stop"] to the reason
+    first, so e2e_full_run records `loaded` and files nothing; the sweep stops the main-checkout listeners started since
+    UI_SWEEP_BEFORE[project] (e2e_full_stop_new_servers) and, only while ui-sweep.json still holds the same running
+    record, rewrites it `loaded` with the reason and no `dir`, so it reruns and files nothing. One processes.log line
+    per stop. Job sessions are never signalled. Returns the `<project>/ui-sweep` and `<project>/e2e-full` names stopped."""
+    why = board.heavy_hold()
+    if not why:
+        return []
+    stopped = []
+    for project, repo in board.projects().items():
+        root = repo / "scrum"
+        with RUNS_LOCK:
+            run = RUNS.get(f"{project}/ui-sweep")
+        proc = (run or {}).get("proc")
+        rec = ui_sweep_record(root)
+        if not (rec and rec.get("result") == "running" and rec.get("dir") and proc is not None
+                and proc.poll() is None):
+            continue
+        if stop_group(proc.pid):
+            e2e_full_stop_new_servers(repo, UI_SWEEP_BEFORE.get(project, []))
+            if ui_sweep_record(root) == rec:  # the live record, re-read once the session is dead
+                write_ui_sweep(root, {"at": rec.get("at"), "head": rec.get("head"), "since": rec.get("since"),
+                                      "result": "loaded", "reason": why})
+            board.log_process("UI sweep", "stopped", repo=str(repo), reason=why)
+            stopped.append(f"{project}/ui-sweep")
+    pid, running = E2E_FULL.get("pid"), E2E_FULL.get("running")
+    if pid and running:
+        E2E_FULL["hot_stop"] = why
+        if stop_group(pid):
+            repo = board.projects().get(running)
+            board.log_process("Full E2E on main", "stopped", repo=str(repo or ""), reason=why)
+            stopped.append(f"{running}/e2e-full")
+        else:
+            E2E_FULL.pop("hot_stop", None)
+    return stopped
+
+
 def e2e_full_lock_block(text):
     """(pid, port, dir) from the PID:, Local: and Dir: lines of text's first E2E_FULL_LOCK block (ANSI stripped; the
     lock line and the 7 after it, so a banner's own `Local:` above it or a later `PID:` is never read), each None when
@@ -1350,21 +1429,25 @@ def e2e_full_lock(repo, output, since):
 
 def e2e_full_exec(repo, cmd, env, log, loads) -> int:
     """One run of cmd in repo through buildlock.py, output to log; appends board.cpu_load_pct to loads after each
-    E2E_FULL_LOAD_SECS of the wait and once at exit. Past E2E_FULL_STALE its process group gets SIGTERM. Returns the
-    exit code."""
+    E2E_FULL_LOAD_SECS of the wait and once at exit. Past E2E_FULL_STALE its process group gets SIGTERM. The child's pid
+    is E2E_FULL["pid"] while it runs (hot_stop_tick, job 1312). Returns the exit code."""
     with open(log, "w") as f:
         proc = subprocess.Popen([sys.executable, str(Path(buildlock.__file__).resolve()), cmd], cwd=repo,
                                 env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
                                 start_new_session=True)
-        for _ in range(int(E2E_FULL_STALE // E2E_FULL_LOAD_SECS)):
-            try:
-                code = proc.wait(timeout=E2E_FULL_LOAD_SECS)
-                break
-            except subprocess.TimeoutExpired:
-                loads.append(board.cpu_load_pct())
-        else:  # E2E_FULL_STALE passed
-            os.killpg(proc.pid, signal.SIGTERM)
-            code = proc.wait()
+        E2E_FULL["pid"] = proc.pid  # hot_stop_tick's target while the child runs
+        try:
+            for _ in range(int(E2E_FULL_STALE // E2E_FULL_LOAD_SECS)):
+                try:
+                    code = proc.wait(timeout=E2E_FULL_LOAD_SECS)
+                    break
+                except subprocess.TimeoutExpired:
+                    loads.append(board.cpu_load_pct())
+            else:  # E2E_FULL_STALE passed
+                os.killpg(proc.pid, signal.SIGTERM)
+                code = proc.wait()
+        finally:
+            E2E_FULL.pop("pid", None)
         loads.append(board.cpu_load_pct())
     return code
 
@@ -1385,6 +1468,9 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
     E2E_FULL_DEV_LOG exists (an earlier run's webServer, which e2e_full_stop_new_servers spared as it was in `before`)
     stops that pid (e2e_full_stop_pid) and runs cmd once more (job 1269); a lock block left (none of that, or the
     second run hit it too) is busy, and the log_process line names its pid and port, or the stopped one's.
+    A run hot_stop_tick stopped (E2E_FULL["hot_stop"], the heavy_hold reason) is loaded with that `reason` whatever
+    the readings: no retry, re-run, flaky line or backlog item, also when the stop came during the one-worker re-run
+    (job 1312).
     An exception before the result is recorded records error (exit None) and re-raises."""
     rec = None
     try:
@@ -1397,6 +1483,9 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
                 loads, started = [], time.time()
                 code = e2e_full_exec(repo, cmd, env, log, loads)
                 output = log.read_text(errors="replace")
+                if E2E_FULL.get("hot_stop"):  # hot_stop_tick ended it: no lock-block retry
+                    lock = None
+                    break
                 lock = e2e_full_lock(repo, output, started) if code and not retried else None
                 pid, port = lock or (None, None)
                 if stopped or not (pid and port and port not in board.KEEP_PORTS
@@ -1409,12 +1498,13 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
         finally:
             e2e_full_stop_new_servers(repo, before)
         test_dir = board._e2e_dir(Path(repo))
-        failed = e2e_full_failures(output, test_dir) if code else []
-        loaded = code != 0 and any((load or 0) > board.MAX_CPU_LOAD_PCT for load in loads)
-        busy = not retried and (lock or E2E_FULL_EARLY in ANSI_RE.sub("", output))
-        result = "pass" if code == 0 else "loaded" if loaded else "fail" if failed else "busy" if busy else "error"
+        hot = E2E_FULL.get("hot_stop")  # hot_stop_tick's reason: stopped under load, whatever the CPU readings
+        failed = e2e_full_failures(output, test_dir) if code and not hot else []
+        loaded = bool(hot) or (code != 0 and any((load or 0) > board.MAX_CPU_LOAD_PCT for load in loads))
+        busy = not hot and not retried and (lock or E2E_FULL_EARLY in ANSI_RE.sub("", output))
+        result = "pass" if code == 0 and not hot else "loaded" if loaded else "fail" if failed else "busy" if busy else "error"
         rec = {"at": at, "head": head, "result": result, "exit": code, "failed": failed,
-               "lastGreen": head if code == 0 else last_green}
+               "lastGreen": head if code == 0 and not hot else last_green, **({"reason": hot} if hot else {})}
         write_e2e_full(root, rec)
         named = lock or stopped
         board.log_process("Full E2E on main", result, repo=str(repo), head=head, exit=code, failed=len(failed),
@@ -1423,6 +1513,9 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
             owned = e2e_full_owned(root, {f["spec"] for f in failed})
             mine = [f for f in failed if f["spec"] not in owned]
             again, output = e2e_full_rerun(repo, root, cmd, env, mine, test_dir) if mine else (None, "")
+            if again is None and E2E_FULL.get("hot_stop"):  # stopped during the re-run: loaded, nothing filed
+                rec = {**rec, "result": "loaded", "reason": E2E_FULL["hot_stop"]}
+                write_e2e_full(root, rec)
             if again is not None:
                 flaky = [s for s in dict.fromkeys(f["spec"] for f in mine) if s not in {f["spec"] for f in again}]
                 if flaky:
@@ -1440,6 +1533,7 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
         raise
     finally:
         E2E_FULL["running"] = None
+        E2E_FULL.pop("hot_stop", None)
 
 
 def e2e_full_owned(root, specs) -> set:
@@ -1461,7 +1555,7 @@ def e2e_full_rerun(repo, root, cmd, env, failed, test_dir):
     """Run the specs of failed once more, together, with one worker, through e2e_full_exec (root/e2e-full-rerun.log).
     cmd gets ` -- --workers=1 <specs>` when it ends in `npm run <script>`, else ` --workers=1 <specs>`. Returns
     (the failures of the re-run, its output); (None, output) when the re-run is loaded (board.MAX_CPU_LOAD_PCT) or
-    fails with no parsed failure (a lock timeout), so nothing is filed or called flaky."""
+    fails with no parsed failure (a lock timeout) or hot_stop_tick stopped it, so nothing is filed or called flaky."""
     specs = " ".join(shlex.quote(s) for s in dict.fromkeys(f["spec"] for f in failed))
     rerun = f"{cmd} -- --workers=1 {specs}" if re.search(r"\bnpm run \S+$", cmd) else f"{cmd} --workers=1 {specs}"
     log, loads, before = root / "e2e-full-rerun.log", [], board.listeners()
@@ -1472,6 +1566,8 @@ def e2e_full_rerun(repo, root, cmd, env, failed, test_dir):
         return None, str(e)
     finally:
         e2e_full_stop_new_servers(repo, before)
+    if E2E_FULL.get("hot_stop"):  # hot_stop_tick ended it (job 1312): nothing is filed or called flaky
+        return None, output
     again = e2e_full_failures(output, test_dir) if code else []
     if code and (not again or any((load or 0) > board.MAX_CPU_LOAD_PCT for load in loads)):
         return None, output
@@ -1509,6 +1605,7 @@ def e2e_full_backlog(repo, root, failed, last_green, head, timeouts_only=False):
         board.cmd_backlog_add(root, [text])
 
 
+UI_SWEEP_BEFORE: dict[str, list] = {}  # project -> board.listeners() ui_sweep_tick took before its spawn (hot_stop_tick)
 UI_SWEEP_NICE = 19  # ui_sweep_tick's session runs below every job session (board.SESSION_NICE 10), job 1244
 
 
@@ -1555,7 +1652,7 @@ def ui_sweep_tick(project, repo, root) -> None:
     head = board._git(repo, "rev-parse", "HEAD").decode().strip()
     if not e2e_full_due(record, head, merges_since(repo, record), now):
         return
-    since = str((record or {}).get("since" if (record or {}).get("result") in ("running", "error") else "head") or "")
+    since = str((record or {}).get("since" if (record or {}).get("result") in ("running", "error", "loaded") else "head") or "")
     if not since or since.startswith("-"):
         try:
             since = board._git(repo, "rev-parse", "--verify", "HEAD~5").decode().strip()
@@ -1569,6 +1666,7 @@ def ui_sweep_tick(project, repo, root) -> None:
     d.mkdir(parents=True, exist_ok=True)
     (d / "targets.json").write_text(json.dumps(out, indent=1) + "\n")
     write_ui_sweep(root, {"at": now, "head": head, "since": since, "result": "running", "dir": str(d)})
+    UI_SWEEP_BEFORE[project] = board.listeners()
     spawn(project, root, "ui-sweep", "ui-sweep",
           f"Read $HOME/.claude/skills/trevskills-scrum/lanes/uisweep.md and follow it.\n"
           f"SWEEP_DIR={d}\nPROJECT={root}/project.md\nREPO={repo}", nice=UI_SWEEP_NICE)
@@ -2044,13 +2142,8 @@ def write_shop_room():
 
 def hold_start(root, job_id):
     """A fresh shop_tick claim (stage spec, no shop field) waits as held work: a queued `start` launch that this Mac's
-    play_queue_tick or a later shop tick takes."""
-    with board.locked_board(root) as b:
-        live = next((j for j in b["jobs"] if j["id"] == job_id), {})
-        if live.get("stage") == "spec" and not live.get("shop"):
-            live.setdefault("play_queued", board.now())
-            live.setdefault("queued_launch", {"action": "start", "prompt": f"/trevskills-scrum start {job_id}",
-                                              "stage": "spec"})
+    play_queue_tick or a later shop tick takes (board.queue_start)."""
+    board.queue_start(root, job_id)
 
 
 def shop_tick(project, repo, root) -> bool:
@@ -3660,7 +3753,9 @@ def watchdog_tick():
     6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard.
     Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard, then runs e2e_lock_reap,
     then write_shop_room (shop-room.json, which cmd_ready reads), written again after a shop_tick that dispatched,
-    then agent_links_tick (re-runs install.sh when a scrum agent link is bad, in its own guard)."""
+    then agent_links_tick (re-runs install.sh when a scrum agent link is bad, in its own guard), then hot_stop_tick once,
+    before the per-project loop (stops a running UI sweep or full E2E while board.heavy_hold gives a reason, in its own
+    guard; job 1312)."""
     global RESUME_ROOM, E2E_RESUMED
     try:
         board.record_cpu_sample()  # cpu_busy_pct's reading; first, so this tick's machine_ok sees it
@@ -3678,6 +3773,10 @@ def watchdog_tick():
         agent_links_tick()  # relinks ~/.claude/agents/scrum-*.md when one dangles, points outside the checkout or is missing
     except Exception as e:
         print(f"watchdog: agent links: {e}", file=sys.stderr, flush=True)
+    try:
+        hot_stop_tick()
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: hot stop: {e}", file=sys.stderr, flush=True)
     busy, alive, seen, candidates, idle = {}, once(lambda: board.session_alive_fn()), [], [], []
     pending = disk_short = False
     RESUME_ROOM, E2E_RESUMED = board.ram_room(), False
@@ -7181,7 +7280,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise SystemExit("backlog item text is empty")
                     job_id = board.cmd_new(root, board.short_title(text))
                     (root / "jobs" / job_id / "feature.md").write_text(board.feature_text(text))
-                    spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
+                    spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}", manual=True)
                     return 202, {"id": job_id, "feature": text}
                 top = urgency == "next"
                 if body.get("async") is True:  # answer now; a drain thread runs backlog_op under the board lock
@@ -7225,7 +7324,7 @@ class Handler(BaseHTTPRequestHandler):
                                                           f"/trevskills-scrum start {out['id']} askme {askme}"),
                                            "Askme opened in a new Terminal window.")])
                 return code, {"id": out["id"], **obj} if code == 200 else obj
-            spawn(project, root, out["id"], "start", f"/trevskills-scrum start {out['id']}")
+            spawn(project, root, out["id"], "start", f"/trevskills-scrum start {out['id']}", manual=True)
             return 202, out
         if rest == "/backlog/run-all":  # interactive, like askme: triage, then every open item as a job
             match = body.get("match")  # Run all matching: unquoted at the end of the command line, so a fixed charset
@@ -7267,7 +7366,7 @@ class Handler(BaseHTTPRequestHandler):
             return setup_done(project, root, job_id)
         if action == "reopen":
             new_id = board.cmd_reopen(root, job_id, body.get("note") or "")
-            started = spawn(project, root, new_id, "start", f"/trevskills-scrum start {new_id}")
+            started = spawn(project, root, new_id, "start", f"/trevskills-scrum start {new_id}", manual=True)
             return 202, {"id": new_id, "reopened_from": job_id, **queued(started)}
         jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
         job = next((j for j in jobs if j["id"] == job_id), None)

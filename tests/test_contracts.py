@@ -530,7 +530,7 @@ class ContractTest(unittest.TestCase):
         check = self.section(skill_text(), "## Check gate", "## Review (WAIT FOR ALL)")
         for phrase in (
             "run_in_background",
-            "600 s",
+            "buildlock.py\" '<command>'` with the Bash tool's `run_in_background` (wait: SKILL.md rule)",
             "never replace it with one module or a subset",
             "builder's own run",
         ):
@@ -2438,6 +2438,9 @@ class ContractTest(unittest.TestCase):
         self.assertIn('Test, Typecheck and Lint each run as `SCRUM_BUILD_LOCK="$HOME/.claude/trevskills-scrum/'
                       'check.lock" python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" \'<command>\'`', step2)
         self.assertIn("'waiting on the Check queue'", step2)
+        self.assertIn("buildlock.py\" '<command>'` with the Bash tool's `run_in_background` (wait: SKILL.md rule)", step2)
+        self.assertIn("Every other lane runs the `Test:` command in full as `project.md` states it; never replace it", step2)
+        self.assertNotIn("when it can outlast the 600 s Bash timeout", step2)
         self.assertIn("`npx eslint --cache <changed .js/.jsx/.ts/.tsx/.mjs/.cjs files>`", step2)
         self.assertIn("`eslint.config.*` or `.eslintrc*`", step2)
         self.assertIn("`Lint: skipped, no lintable file in diff`", step2)
@@ -4122,6 +4125,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn('SCRUM_BUILD_LOCK="$HOME/.claude/trevskills-scrum/check.lock" python3 '
                       '"$HOME/.claude/skills/trevskills-scrum/buildlock.py" \'<command>\'', limits)
         self.assertIn('python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" --project <PROJECT>', limits)
+        lock_line = next(l for l in limits.splitlines() if "or full `Test` only as" in l)
+        self.assertTrue(lock_line.endswith("the Check gate's locks, each with the Bash tool's "
+                                           "`run_in_background`, waiting for it to exit."), lock_line)
 
     def test_load_never_gates_tests_or_stops(self):
         spec_writer = (ROOT / "agents" / "scrum-spec-writer.md").read_text()

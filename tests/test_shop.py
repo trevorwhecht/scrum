@@ -2173,6 +2173,9 @@ class StructureTest(unittest.TestCase):
                        "a checksum mismatch installs nothing", "not in `OPTIONAL_STEPS`"):
             self.assertIn(phrase, chrome, phrase)
         self.assertIn("a non-blank `SCRUM_CHROME`", text[text.index("## E2E channel"):text.index("## MD sync")])
+        pool = text[text.index("- **Pool.**"):]
+        self.assertIn("A hand start (Run now, Start now, a chat `board.spawn` start) that `board.hand_hold` holds on this "
+                      "Mac is such a queued `start` launch (`board.queue_start`, job 1312).", pool.split("\n")[0])
         self.assertIn("`SCRUM_PW_CHANNEL=chrome`, `SCRUM_CHROME` (setup's **chrome** binary)", text)
         self.assertIn("an account or `codex login` that is `not ready` never fails it", setup)
         self.assertLess(setup.index("- **account main, account owa.**"), setup.index("- **codex.**"))
