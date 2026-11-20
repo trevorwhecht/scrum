@@ -10545,6 +10545,24 @@ class IdleClaimTest(unittest.TestCase):
         self.assertEqual(self.started(spawn), [("003-small", "start", True)])
         self.assertNotIn("ic", s.IDLE_SINCE)
 
+    def test_child_of_a_parent_writing_child_specs_is_not_held_work(self):
+        """Job 1275 path 2: while the parent's fresh childSpecs mark stands, its waiting children are no held work, so
+        idle_claim neither claims one nor spends the tick's room on it; a mark over 60 min old holds nothing."""
+        s = self.serve
+        jobs = self.write()
+        jobs[0]["childSpecs"] = self.board.now()
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.assertEqual(s.held_work("ic", self.jobs()), [])
+        with mock.patch.object(s, "take_room", return_value=True) as room:
+            got, spawn = self.claim()
+        self.assertEqual((got, spawn.call_args_list, room.call_args_list), (False, [], []))
+        self.assertEqual([self.stage(k) for k in ("002-big", "003-small")], ["waiting", "waiting"])
+        jobs[0]["childSpecs"] = (datetime.now(timezone.utc) - timedelta(minutes=61)).isoformat(timespec="seconds")
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.assertEqual([j["id"] for j in s.held_work("ic", self.jobs())], ["002-big", "003-small"])
+        got, spawn = self.claim()
+        self.assertEqual((got, self.started(spawn)), (True, [("003-small", "start", True)]))
+
     def test_idle_claim_claims_the_cpu_first_head(self):
         """Job 1222: a light waiting child at the head of cpu_first (a current vm_pressure hold) is claimed even when
         another held child has fewer Likely files, so the head is never a job no path starts."""

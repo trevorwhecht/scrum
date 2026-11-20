@@ -1244,7 +1244,8 @@ class BoardTest(unittest.TestCase):
         p = self.child(parent)
         self.assertEqual((p["stage"], p["children"]), ("running", kids + ["005-fix-big"]))
         self.assertIn("Wire the missing button.", (self.root / "jobs" / "005-fix-big" / "feature.md").read_text())
-        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], ["005-fix-big"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])  # job 1275: step 2 writes its spec first
+        self.assertEqual(board.cmd_ready(self.root, parent, specs_done=True)["ready"], ["005-fix-big"])
 
     def test_plan_apply_fix_refused_twice(self):
         parent, kids = self.three()
@@ -1255,6 +1256,55 @@ class BoardTest(unittest.TestCase):
         self.gaps(parent)
         self.assertIn("already", self.assert_refused(parent, fix=True))
         self.assertEqual(len(self.jobs()), 5)
+
+    def raw_set(self, job_id, **fields):
+        """Write fields straight into board.json, past cmd_set's checks."""
+        path = self.root / "board.json"
+        data = json.loads(path.read_text())
+        next(j for j in data["jobs"] if j["id"] == job_id).update(fields)
+        path.write_text(json.dumps(data))
+
+    def test_ready_claims_nothing_while_parent_writes_child_specs(self):
+        """Job 1275 path 2: plan-apply marks the parent (childSpecs) while BigBoy step 2 writes the child specs; a plain
+        ready (serve.py's start_ready and idle_claim) claims nothing and leaves the parent, and specs_done claims."""
+        parent = self.plan(self.ticket(1), self.ticket(2, deps="T1", exposure="yes"))
+        c1, c2 = board.cmd_plan_apply(self.root, parent)["children"]
+        mark = self.child(parent)["childSpecs"]
+        self.assertLess(abs(time.time() - datetime.fromisoformat(mark).timestamp()), 60, mark)
+        before = self.child(parent)
+        self.assertEqual(board.cmd_ready(self.root, parent),
+                         {"ready": [], "merged": 0, "total": 2, "in_progress": 0, "all_merged": False, "held": None})
+        self.assertEqual(self.child(parent), before)  # stage, reason and the mark as they were
+        self.assertEqual([self.child(k)["stage"] for k in (c1, c2)], ["waiting", "waiting"])
+        self.assertEqual(board.cmd_ready(self.root, parent, specs_done=True)["ready"], [c1])
+        self.assertNotIn("childSpecs", self.child(parent))
+        self.assertEqual((self.child(c1)["stage"], self.child(parent)["stage"]), ("spec", "running"))
+
+    def test_ready_ignores_a_child_specs_mark_over_an_hour_old(self):
+        """A parent that died in step 2 never strands its children: a mark over 60 min old, or unreadable, holds nothing."""
+        parent = self.plan(self.ticket(1), self.ticket(2, deps="T1", exposure="yes"))
+        c1, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        ago = lambda m: (datetime.now(timezone.utc) - timedelta(minutes=m)).isoformat(timespec="seconds")
+        self.raw_set(parent, childSpecs=ago(59))
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        self.raw_set(parent, childSpecs=ago(61))
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+        self.raw_set(c1, stage="waiting")
+        self.raw_set(parent, childSpecs="not a time")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+
+    def test_runall_start_marks_child_specs_until_ready_specs_done(self):
+        """runall-start marks its parent too, and the CLI's `ready <id> --specs-done` (BigBoy step 3) drops the mark."""
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Add CSV export\n")
+        made = board.cmd_runall_start(self.root)
+        self.assertIn("childSpecs", self.child(made["id"]))
+        self.assertEqual(board.cmd_ready(self.root, made["id"])["ready"], [])
+        out = run_board("--dir", str(self.root), "ready", made["id"], "--specs-done")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout)["ready"], ["002-add-csv-export"])
+        self.assertNotIn("childSpecs", self.child(made["id"]))
+        self.assertEqual(self.child("002-add-csv-export")["stage"], "spec")
 
     def test_ready_waits_for_dependencies(self):
         parent = self.plan(self.ticket(1), self.ticket(2, deps="T1"), self.ticket(3, deps="T1, T2", exposure="yes"))
