@@ -1289,8 +1289,9 @@ def ui_sweep_tick(project, repo, root) -> None:
     has UI globs and a Dev command, no sweep runs anywhere, no full E2E run is in flight (E2E_FULL; its next dev holds
     the dev lock), the E2E lock is free (an orphaned full run holds it), the tracked tree is clean,
     board.machine_ok(claim=True) passes, check.lock and build.lock have no holder or waiter (a job's Check or Build
-    goes first; a last record E2E_FULL_EVERY old, or none, starts anyway, job 1244) and e2e_full_due holds. It sweeps since the last record's head (its since after a running or error record, so a dead sweep's range is
-    kept; HEAD~5 or the root commit with no record). No changed screen records a pass and starts nothing."""
+    goes first; a last record E2E_FULL_EVERY old, or none, starts anyway, job 1244) and e2e_full_due holds. It sweeps
+    since the last record's head (its since after a running or error record, so a dead sweep's range is kept; HEAD~5
+    or the root commit with no record). No changed screen records a pass and starts nothing."""
     if E2E_FULL["running"] or not board.ui_globs(root) or e2e_command(root, "Dev command").lower() in ("", "none"):
         return
     now = time.time()
