@@ -89,6 +89,9 @@
   board.py digest-trevor <NNN>     write digests/<NNN>/trevor.md (Trevor's Jev-ranked chat messages, feature.md quotes,
                                    new (Trevor …) backlog tags, answer notes since the last digest), print
                                    {"id","chat","quotes","backlog","notes"}; a failed source is a one-line note
+  board.py digest-questions <NNN>  write digests/<NNN>/questions.md: the ## Repeated questions lines and ## Stops table
+                                   computed from questions.log's last 7 days, runs/ names and trevor.md's Since: line
+                                   (run after digest-trevor), print {"id","questions","stops"}
   board.py process-health <NNN>    write and print digests/<NNN>/health.json {"digest","previous","metrics"}: 10 fixed
                                    metrics for the listed jobs, each with the previous digest's value, its limit and a
                                    flag ("worse", "over twice" or null) (Digest step 1)
@@ -179,7 +182,7 @@ from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
 import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shlex, shutil, signal, socket, string, subprocess, sys, tempfile, time
 from concurrent.futures import ThreadPoolExecutor
-from collections import namedtuple
+from collections import Counter, namedtuple
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2604,6 +2607,178 @@ def cmd_digest_trevor(root, digest_id) -> dict:
         text = "".join(f"{l}\n" for l in kept) + marker
     (d / "trevor.md").write_text(text)
     return {"id": str(digest_id), **counts}
+
+
+# --- digest-questions: questions.md's ## Repeated questions and ## Stops, computed from questions.log (Digest step 1)
+QUESTIONS_WINDOW_DAYS = 7  # only lines dated within this many days of the log's newest date count
+
+
+def _trevor_since(d):
+    """(value, epoch) of digests/<NNN>/trevor.md's `Since:` line, or (None, None) when the file, the line or a value
+    _epoch parses is missing."""
+    try:
+        text = (d / "trevor.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None, None
+    value = next((l[len("Since:"):].strip() for l in text.splitlines() if l.startswith("Since:")), None)
+    at = _epoch(value)
+    return (value, at) if at is not None else (None, None)
+
+
+QUESTION_NORM_RES = tuple(re.compile(p) for p in (r"\b\d{3,}-[a-z0-9-]+",  # job ids
+                                                  r"\S*/\S*",  # whitespace-free tokens holding `/`: paths, branches
+                                                  r"\b[\w-]+\.[a-z0-9]{1,5}\b",  # file names
+                                                  r"\b(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b",  # commit hashes
+                                                  r"\d+"))  # the remaining digits
+
+
+def question_norm(text: str) -> str:
+    """text lowercased, then job ids, tokens holding `/`, file names, commit hashes and digits removed in that order,
+    whitespace collapsed: the key that groups one question asked about different jobs."""
+    text = text.lower()
+    for pattern in QUESTION_NORM_RES:
+        text = pattern.sub("", text)
+    return " ".join(text.split())
+
+
+STOP_CAUSE_CUT_RE = re.compile(r"\. |[(,;]| — | (?=\d)")
+STOP_CAUSE_WORDS = 6
+
+
+def stop_cause(text: str) -> str:
+    """A stop's cause from its reason (else question): `can't resume yet` read as `cannot resume yet`, cut at the first
+    `. `, `(`, `,`, `;`, ` — ` or space before a digit, the first STOP_CAUSE_WORDS words, trailing spaces and colons
+    stripped; `(no reason)` when nothing is left."""
+    text = STOP_CAUSE_CUT_RE.split(text.replace("can't resume yet", "cannot resume yet"), maxsplit=1)[0]
+    return " ".join(text.split()[:STOP_CAUSE_WORDS]).rstrip(" :") or "(no reason)"
+
+
+def _join_picks(keys, picks, jobs):
+    """{ask index: pick index}: each ask (keys maps its line index to its question or cause key) takes the next pick
+    line (an index in picks) of its job (jobs[i]) after it, unless that job asks a different key first. An ask with no
+    such pick is left out: unanswered."""
+    pending, joined = {}, {}
+    for i in sorted([*keys, *picks]):
+        job = jobs[i]
+        if i not in keys:
+            joined.update(dict.fromkeys(pending.pop(job, (None, []))[1], i))
+        elif job in pending and pending[job][0] == keys[i]:
+            pending[job][1].append(i)
+        else:
+            pending[job] = (keys[i], [i])
+    return joined
+
+
+RESUME_RUN_RE = re.compile(r"(\d{8}-\d{6})-resume-(.+)\.log")
+
+
+def _resume_runs(root):
+    """{job id: newest UTC stamp (epoch)} of runs/<YYYYMMDD-HHMMSS>-resume-<job>.log names, read in one pass; {} when
+    runs/ is missing."""
+    newest = {}
+    try:
+        names = os.listdir(Path(root) / "runs")
+    except OSError:
+        return newest
+    for name in names:
+        if not (m := RESUME_RUN_RE.fullmatch(name)):
+            continue
+        try:
+            at = datetime.strptime(m[1], "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+        newest[m[2]] = max(at, newest.get(m[2], at))
+    return newest
+
+
+def _pick_counts(labels):
+    """`<label> <n>` entries joined by `, `: highest count first, then by label."""
+    return ", ".join(f"{l} {n}" for l, n in sorted(Counter(labels).items(), key=lambda c: (-c[1], c[0])))
+
+
+def cmd_digest_questions(root, digest_id) -> dict:
+    """Write digests/<NNN>/questions.md, the `## Repeated questions` lines and `## Stops` table the digest reader copies
+    as written, from this project's questions.log (only lines dated within QUESTIONS_WINDOW_DAYS of its newest date),
+    runs/ file names and trevor.md's `Since:` line (missing or unparseable: any date counts as after it). Same inputs,
+    same bytes. Returns {"id", "questions": entries listed, "stops": table rows}."""
+    root = Path(root)
+    d = root / "digests" / str(digest_id)
+    if not DIGEST_RE.fullmatch(str(digest_id)) or not d.is_dir():
+        raise SystemExit(f"no digest {digest_id!r}")
+    since_text, since = _trevor_since(d)
+    dated = [(at, q) for q in _json_lines(root / "questions.log") if (at := _epoch(q.get("date"))) is not None]
+    newest = max((at for at, _ in dated), default=None)
+    cutoff = None if newest is None else newest - QUESTIONS_WINDOW_DAYS * 86400
+    log = [(at, q) for at, q in dated if at >= cutoff]  # file order
+    jobs = [str(q.get("job")) for _, q in log]
+    batch_open = TERMINAL_BATCH_QUESTION.split(":", 1)[0] + ":"  # `project .claude edits:`
+    asks = [i for i, (_, q) in enumerate(log) if q.get("pick") is None and isinstance(q.get("question"), str)
+            and q["question"].strip()]
+    batch = {i for i in asks if log[i][1]["question"].startswith(batch_open)}
+    counted = {i: question_norm(log[i][1]["question"]) for i in asks if i not in batch
+               and log[i][1].get("auto") is not True and log[i][1].get("kind") not in ("stall", "machine", "refused")}
+    picks = [i for i, (_, q) in enumerate(log) if q.get("pick") is not None and q.get("auto") is not True]
+    # a Terminal batch ask's pick is dropped with it, so first join the batch asks along with the counted ones
+    joined = _join_picks({**counted, **{i: question_norm(log[i][1]["question"]) for i in batch}}, picks, jobs)
+    batch_picks = {joined[i] for i in batch if i in joined}
+    picks = [i for i in picks if i not in batch_picks]
+
+    def label(i):
+        return str(log[i][1]["pick"]).strip().lower()
+
+    def after_since(idx):
+        return any(since is None or log[i][0] > since for i in idx)
+
+    joined = _join_picks(counted, picks, jobs)
+    groups = {}
+    for i, text in counted.items():
+        groups.setdefault(text, []).append(i)
+    entries = []
+    for text, idx in groups.items():
+        if len(idx) < 3 or not after_since(idx):
+            continue
+        labels = [label(joined[i]) if i in joined else "unanswered" for i in idx]
+        line = (f'- {len(idx)} × "{text}" — picks: {_pick_counts(labels)} — jobs: '
+                f'{", ".join(dict.fromkeys(jobs[i] for i in idx))}')
+        won = sorted(((n, l) for l, n in Counter(labels).items() if l != "unanswered"), reverse=True)
+        if won and won[0][0] >= 3 and (len(won) == 1 or won[1][0] < won[0][0]):
+            line += f" — DEFAULT: {won[0][1]}" + (" (unanimous)" if won[0][0] == len(idx) else "")
+        entries.append((-len(idx), text, line))
+    repeated = [line for *_, line in sorted(entries)]
+
+    def cell(text):
+        return text.replace("|", "/")  # a `|` would split the table cell
+
+    causes = {}
+    for i, (_, q) in enumerate(log):
+        if q.get("pick") is None and i not in batch and (
+                q.get("kind") in HEALTH_STOP_KINDS or (q.get("kind") is None and q.get("question") is not None)):
+            causes[i] = stop_cause(next((t for t in (q.get("reason"), q.get("question")) if isinstance(t, str)
+                                         and t.strip()), ""))
+    joined = _join_picks({i: c.casefold() for i, c in causes.items()}, picks, jobs)
+    resumed = _resume_runs(root) if causes else {}
+    rows = {}
+    for i, cause in causes.items():
+        rows.setdefault(cause.casefold(), []).append(i)
+    table = []
+    for idx in rows.values():
+        cause, stopped = causes[idx[0]], [log[i][1] for i in idx]
+        labels = [label(joined[i]) if i in joined else "resume" if resumed.get(jobs[i], log[i][0]) > log[i][0]
+                  else "unanswered" for i in idx]
+        recent = list(dict.fromkeys(jobs[i] for i in reversed(idx)))[:3][::-1]
+        automate = (len(idx) >= 2 and "unanswered" not in labels and len(set(labels)) == 1 and after_since(idx)
+                    and not all(q.get("kind") == "refused" for q in stopped)
+                    and not all(q.get("auto") is True for q in stopped))
+        table.append((-len(idx), cause, f"| {cell(cause)} | {len(idx)} | {cell(', '.join(recent))} | "
+                                        f"{cell(_pick_counts(labels))} | {'yes' if automate else 'no'} |"))
+    stops = [line for *_, line in sorted(table)]
+    body = [f"# Questions: digest {digest_id}", f"Since: {since_text or 'none'}",
+            f"Window: {_iso(cutoff)} to {_iso(newest)}" if newest is not None else "Window: none",
+            "## Repeated questions", *(repeated or ["None"]),
+            "## Stops", *(["| Cause | Count | Jobs | Picks | Automate |", "|---|---|---|---|---|", *stops] if stops
+                          else ["None"])]
+    (d / "questions.md").write_text("".join(f"{l}\n" for l in body), encoding="utf-8")
+    return {"id": str(digest_id), "questions": len(repeated), "stops": len(stops)}
 
 
 # --- process-health: 10 fixed metrics per digest, each compared with the previous digest's (Digest step 1). ---
@@ -8280,6 +8455,7 @@ def main(argv=None):
     sub.add_parser("digest-trim").add_argument("digest")
     sub.add_parser("pipeline-fit").add_argument("digest")
     sub.add_parser("digest-trevor").add_argument("digest")
+    sub.add_parser("digest-questions").add_argument("digest")
     sub.add_parser("process-health").add_argument("digest")
     sub.add_parser("window-report")
     sub.add_parser("move-ratio").add_argument("id")
@@ -8428,6 +8604,8 @@ def main(argv=None):
         print(json.dumps(cmd_pipeline_fit(a.dir, a.digest)))
     elif a.cmd == "digest-trevor":
         print(json.dumps(cmd_digest_trevor(a.dir, a.digest)))
+    elif a.cmd == "digest-questions":
+        print(json.dumps(cmd_digest_questions(a.dir, a.digest)))
     elif a.cmd == "process-health":
         print(json.dumps(cmd_process_health(a.dir, a.digest)))
     elif a.cmd == "window-report":
