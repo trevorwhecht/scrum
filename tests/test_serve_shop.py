@@ -1027,11 +1027,9 @@ class ShopTickTest(unittest.TestCase):
             proc.poll.return_value = None
             self.serve.RUNS["mm/run-all"] = {"action": "run-all", "started": time.time(), "proc": proc, "log": "x"}
 
-        check = {"id": "010-x", "stage": "check", "reason": "waiting: Check queue (held)"}
         cases = {  # why: (profile, backlog line, other board's jobs, setup)
             "no Auto continue line": ("# Project\n- Test: x\n", "Polish the knob", [], None),
             "its run-all session runs": (AUTO, "Polish the knob", [], run_all),
-            "finish_first: a job waits on the Check queue": (AUTO, "Polish the knob", [check], None),
             "only a Human setup item": (AUTO, "Polish the knob {setup: buy a knob}", [], None),
         }
         for why, (profile, line, other, setup) in cases.items():
@@ -1053,6 +1051,17 @@ class ShopTickTest(unittest.TestCase):
             self.backlog(root, "Polish the knob")
             self.project("aa", [])
             self.assertIs(self.tick()[0], True)
+
+    def test_new_work_ignores_this_macs_queue_wait(self):
+        """Job 1310: a job at `waiting: E2E queue` or Check queue on this Mac does not hold the shop's claim."""
+        for reason in ("waiting: E2E queue (held)", "waiting: Check queue (held)"):
+            with self.subTest(reason):
+                self.serve.RUNS.clear()
+                root = self.project("mm", [], AUTO)
+                self.backlog(root, "Polish the knob")
+                self.project("aa", [{"id": "010-x", "stage": "check", "reason": reason}])
+                self.assertIs(self.tick()[0], True)
+                self.assertEqual((root / "backlog.md").read_text(), "# Backlog\n- [x] Polish the knob → 001-polish-the-knob\n")
 
     def test_new_work_skips_items_the_shop_never_takes(self):
         root = self.project("mm", [], AUTO)
