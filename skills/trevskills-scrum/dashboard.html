@@ -1405,13 +1405,19 @@ function renderManual() {
   $("blManualList").innerHTML = open.map(it => `<li><label><input type="checkbox" data-i="${it.index}"><span>${esc(it.text)}</span></label></li>`).join("");
 }
 
-// "waits on: …" after an item's text: each needs id as that item's text from the project's backlog (open or done), cut to
-// 40 chars, or #<id> when no item has it. Muted once nothing it needs still waits. Empty for an item with no needs.
+// "waits on: …" after an item's text: each needs id as that item's text from the project's backlog (open or done), or
+// #<id> when no item has it, then each {after repo:job} marker as "<repo> job <job>", each cut to 40 chars; then "an edit"
+// while board.py requeue_loop holds the item (its last 3 claims were requeue aborts within 24 h), until Trevor edits it.
+// The title has every name in full. Muted once nothing still waits. Empty for an item with none of these.
 function needsTag(it, all) {
-  if (!it.needs?.length) return "";
-  const names = it.needs.map(id => all.find(i => i.id === id)?.text || `#${id}`);
+  const loop = (it.waits || []).includes("requeue loop");
+  if (!it.needs?.length && !it.after?.length && !loop) return "";
+  const names = (it.needs || []).map(id => all.find(i => i.id === id)?.text || `#${id}`)
+    .concat((it.after || []).map(a => a.replace(":", " job ")));
   const cut = t => t.length > 40 ? t.slice(0, 39) + "…" : t;
-  return `<span class="needs${it.waits?.length ? "" : " met"}" title="${esc(names.join("; "))}">waits on: ${esc(names.map(cut).join(", "))}</span>`;
+  const shown = names.map(cut).concat(loop ? ["an edit (3 requeues in 24 h)"] : []);
+  const full = names.concat(loop ? ["an edit: its last 3 claims were requeue aborts within 24 h"] : []);
+  return `<span class="needs${it.waits?.length ? "" : " met"}" title="${esc(full.join("; "))}">waits on: ${esc(shown.join(", "))}</span>`;
 }
 
 // Importance chip (priority 1-5, from the {p:N} marker): .badge (warning) for 4-5, .lanechip (muted) for 1-3. Nothing otherwise.

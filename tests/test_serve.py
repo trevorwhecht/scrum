@@ -12318,6 +12318,19 @@ def e2e_timeout_output(second):
     return E2E_TIMEOUT_DETAIL.replace("{second}", second) + E2E_LIST_OUTPUT.split("\n", 2)[2]
 
 
+def next_dev_lock_output(pid="62501", port="61566", repo="/repo", early=True):
+    """Job 1269: a webServer `next dev` refused by Next 16's dev lock (next/dist/build/lockfile.js), as
+    /tmp/e2e-next-dev-63923.log held it on 2026-11-19: its own banner (port 63923) first, then the lock block naming
+    the holder's PID and port; then Playwright's early-exit line unless early is False."""
+    return ("\x1b[1m▲ Next.js 16.3.3\x1b[22m (Turbopack)\n- Local:         http://localhost:63923\n"
+            "\x1b[31m\x1b[1m⨯\x1b[22m\x1b[39m Another \x1b[36mnext dev\x1b[39m server is already running.\n\n"
+            f"- Local:        \x1b[36mhttp://localhost:{port}\x1b[39m\n- PID:          {pid}\n"
+            f"- Dir:          {repo}\n- Log:          .next/dev/logs/next-development.log\n\n"
+            f"You can access the existing server at \x1b[36mhttp://localhost:{port}\x1b[39m,\n"
+            f"or run \x1b[36mkill {pid}\x1b[39m to stop it and start a new one.\n"
+            + ("\x1b[31mError: Process from config.webServer exited early.\x1b[39m\n" if early else ""))
+
+
 class RestartBlockersTest(unittest.TestCase):
     """Job 622: serve.restart_blockers() names the jobs (and full E2E runs) that keep a restart unsafe."""
 
@@ -12388,9 +12401,135 @@ class E2eFullTest(unittest.TestCase):
         p = mock.patch.object(serve.board, "listeners", return_value=[])  # e2e_full_run never signals a real process
         p.start()
         self.addCleanup(p.stop)
+        p = mock.patch.object(serve, "E2E_FULL_DEV_LOG", str(base / "e2e-next-dev-{}.log"))  # never the real /tmp logs
+        p.start()
+        self.addCleanup(p.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def dev_log(self, port):
+        """The webServer dev log of port, under the temp dir setUp points E2E_FULL_DEV_LOG at."""
+        return Path(self.tmp.name) / f"e2e-next-dev-{port}.log"
+
+    def run_attempts(self, outs, codes, alive=False, kill_err=None, retried=False, dev=None):
+        """e2e_full_run on a command whose nth run prints outs[n-1] and exits codes[n-1]; dev[n-1], when given and not
+        None, is also written to port 63923's dev log during that run, as the webServer's tee does. os.kill is mocked:
+        alive makes os.kill(pid, 0) succeed (the pid outlived SIGTERM), else it raises ProcessLookupError; kill_err is
+        raised for SIGTERM. Returns (rec, the number of runs, the os.kill calls other than signal 0, the seconds slept
+        in 0.25 s polls, the processes.log lines)."""
+        for n, (out, code) in enumerate(zip(outs, codes), 1):
+            (self.repo / f"out{n}.txt").write_text(out)
+            (self.repo / f"code{n}.txt").write_text(str(code))
+            (self.repo / f"dev{n}.txt").unlink(missing_ok=True)
+            if dev and dev[n - 1] is not None:
+                (self.repo / f"dev{n}.txt").write_text(dev[n - 1])
+        (self.repo / "runs.txt").unlink(missing_ok=True)
+        (self.repo / "run-e2e.sh").write_text(
+            'echo run >> runs.txt; n=$(wc -l < runs.txt | tr -d " "); cat out$n.txt; '
+            f'[ -f dev$n.txt ] && cp dev$n.txt "{self.dev_log(63923)}"; exit $(cat code$n.txt)\n')
+        calls, slept = [], []
+
+        def kill(pid, sig):
+            if sig:
+                calls.append((pid, sig))
+            if sig == signal.SIGTERM and kill_err:
+                raise kill_err
+            if sig == 0 and not alive:
+                raise ProcessLookupError
+
+        with mock.patch.object(self.serve.os, "kill", side_effect=kill), \
+                mock.patch.object(self.serve.time, "sleep", side_effect=slept.append):
+            rec, lines = processes_logged(lambda: self.serve.e2e_full_run(
+                self.repo, self.root, "sh run-e2e.sh", self.base, 123.0, None, retried=retried))
+        runs = len((self.repo / "runs.txt").read_text().splitlines())
+        return rec, runs, calls, sum(s for s in slept if s == 0.25), lines
+
+    def test_stale_dev_lock_stops_pid_and_retries(self):
+        """Job 1269: a leftover E2E `next dev` (pid 62501, port 61566) from an earlier run held the main checkout's dev
+        lock; it sat in the pre-run listeners snapshot, so e2e_full_stop_new_servers spared it and runs ended error."""
+        self.dev_log(61566).write_text("an earlier run's webServer log\n")
+        lock = next_dev_lock_output(repo=os.path.realpath(self.repo))
+        rec, runs, calls, polled, lines = self.run_attempts([lock, "5 passed (9s)\n"], [1, 0], alive=True)
+        self.assertEqual((rec["result"], rec["exit"], rec["lastGreen"]), ("pass", 0, self.base))
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
+        self.assertEqual(runs, 2)
+        self.assertEqual(calls, [(62501, signal.SIGTERM), (62501, signal.SIGKILL)], "KILL once 5 s of polls pass")
+        self.assertEqual(polled, 5.0)
+        self.assertEqual([{k: line.get(k) for k in ("result", "pid", "port")} for line in lines],
+                         [{"result": "pass", "pid": 62501, "port": 61566}])
+        rec, runs, calls, _, _ = self.run_attempts([lock, "5 passed (9s)\n"], [1, 0])
+        self.assertEqual((rec["result"], runs, calls), ("pass", 2, [(62501, signal.SIGTERM)]), "gone after TERM")
+
+    def test_stale_dev_lock_twice_is_busy(self):
+        self.dev_log(61566).write_text("x\n")
+        lock = next_dev_lock_output()
+        rec, runs, calls, _, lines = self.run_attempts([lock, lock], [1, 1])
+        self.assertEqual((rec["result"], rec["exit"], rec["failed"]), ("busy", 1, []))
+        self.assertEqual(runs, 2)
+        self.assertEqual(calls, [(62501, signal.SIGTERM)], "the retry is never retried")
+        self.assertEqual([{k: line.get(k) for k in ("result", "pid", "port")} for line in lines],
+                         [{"result": "busy", "pid": 62501, "port": 61566}])
+        self.assertEqual(self.open_items(), [])
+        self.assertTrue(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + 1))
+        # the next tick on this head (retried=True) neither stops nor retries the lock: error, as an early exit is
+        rec, runs, calls, _, _ = self.run_attempts([lock], [1], retried=True)
+        self.assertEqual((rec["result"], runs, calls), ("error", 1, []))
+
+    def test_stale_dev_lock_kept_port_or_no_log_is_busy(self):
+        for port in (3001, 8765, 61567):
+            self.dev_log(port).write_text("x\n")
+        fallback = ("\x1b[31m⨯\x1b[39m Another \x1b[36mnext dev\x1b[39m server is already running in this directory.\n"
+                    "Stop the other server before starting a new one.\n"
+                    "Error: Process from config.webServer exited early.\n")
+        cases = [(next_dev_lock_output(port="3001"), 62501, 3001), (next_dev_lock_output(port="8765"), 62501, 8765),
+                 (next_dev_lock_output(), 62501, 61566),  # no e2e-next-dev-61566.log: not an E2E webServer's
+                 # criterion 5: no parsable PID or port
+                 (next_dev_lock_output(pid="?", port="61567"), None, 61567),
+                 (next_dev_lock_output(pid="1", port="61567"), None, 61567),
+                 (next_dev_lock_output(port="x"), 62501, None), (fallback, None, None)]
+        for out, pid, port in cases:
+            rec, runs, calls, _, lines = self.run_attempts([out, "5 passed (9s)\n"], [1, 0])
+            self.assertEqual((rec["result"], rec["exit"], runs, calls), ("busy", 1, 1, []), (pid, port))
+            self.assertEqual([{k: line.get(k, "absent") for k in ("result", "pid", "port")} for line in lines],
+                             [{"result": "busy", "pid": pid, "port": port}], (pid, port))
+
+    def test_stale_dev_lock_kill_failure_is_safe(self):
+        self.dev_log(61566).write_text("x\n")
+        lock = next_dev_lock_output()
+        for err in (ProcessLookupError(), PermissionError()):
+            rec, runs, calls, _, _ = self.run_attempts([lock, "5 passed (9s)\n"], [1, 0], kill_err=err)
+            self.assertEqual((rec["result"], runs, calls), ("pass", 2, [(62501, signal.SIGTERM)]), err)
+            rec, runs, calls, _, _ = self.run_attempts([lock, lock], [1, 1], kill_err=err)
+            self.assertEqual((rec["result"], runs, calls), ("busy", 2, [(62501, signal.SIGTERM)]), err)
+        for err in (OSError("EINVAL"), OverflowError("signed integer is greater than maximum")):
+            with mock.patch.object(self.serve.os, "kill", side_effect=err), mock.patch.object(self.serve.time, "sleep"):
+                self.assertIsNone(self.serve.e2e_full_stop_pid(62501), err)
+        with mock.patch.object(self.serve.os, "kill") as kill:
+            for pid in (0, 1, os.getpid()):
+                self.serve.e2e_full_stop_pid(pid)
+        self.assertEqual(kill.call_args_list, [], "never pid 0 or 1, never serve itself")
+
+    def test_stale_dev_lock_read_from_dev_server_log(self):
+        """onewitharts tees `next dev 2>&1` to /tmp/e2e-next-dev-<port>.log and Playwright drops a webServer's stdout,
+        so its e2e-full.log (2026-11-19 20:09) held only `webServer exited early`: the block is read from the run's dev
+        log, one written since the run started whose Dir: is this checkout."""
+        repo = os.path.realpath(self.repo)
+        self.dev_log(61566).write_text("x\n")
+        old = self.dev_log(60000)
+        old.write_text(next_dev_lock_output(pid="555", repo=repo, early=False))
+        os.utime(old, (1, 1))  # an earlier run's dev log
+        early = "\x1b[31mError: Process from config.webServer exited early.\x1b[39m\n"
+        rec, runs, calls, _, lines = self.run_attempts(
+            [early, "5 passed (9s)\n"], [1, 0], dev=[next_dev_lock_output(repo=repo, early=False), None])
+        self.assertEqual((rec["result"], runs, calls), ("pass", 2, [(62501, signal.SIGTERM)]))
+        self.assertEqual((lines[0]["pid"], lines[0]["port"]), (62501, 61566))
+        rec, runs, calls, _, lines = self.run_attempts(  # another checkout's lock (a job worktree's) is never stopped
+            [early, "5 passed (9s)\n"], [1, 0], dev=[next_dev_lock_output(repo=repo + "-other", early=False), None])
+        self.assertEqual((rec["result"], runs, calls, "pid" in lines[0]), ("busy", 1, [], False))
+        rec, runs, calls, _, _ = self.run_attempts(  # an exit that is not early never reads the dev logs
+            ["Running 231 tests using 4 workers\n"], [1], dev=[next_dev_lock_output(repo=repo, early=False)])
+        self.assertEqual((rec["result"], runs, calls), ("error", 1, []))
 
     def stop_new(self, before, after, alive=True):
         """e2e_full_stop_new_servers(repo, before) with board.listeners() giving after; returns the os.kill calls.
@@ -12722,7 +12861,15 @@ class E2eFullTest(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
         self.assertEqual(self.open_items(), [])
         self.assertTrue(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + 1))
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="350"):
+        real_popen = subprocess.Popen
+
+        def calm_child(*args, **kwargs):
+            """Job 1269: the buildlock.py child got serve's env, read 350 and held ~1900 s; it keeps the calm pin."""
+            if kwargs.get("env"):
+                kwargs["env"] = {**kwargs["env"], "SCRUM_CPU_LOAD_PCT": "1"}
+            return real_popen(*args, **kwargs)
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="350"), \
+                mock.patch.object(self.serve.subprocess, "Popen", side_effect=calm_child):
             self.assertEqual(self.run_suite(out, 1)["result"], "loaded")
 
     def test_second_early_exit_on_same_head_is_error(self):
