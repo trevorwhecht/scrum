@@ -3570,6 +3570,44 @@ class ServeTest(unittest.TestCase):
         job = self.stage_of(job_id)
         self.assertEqual([k for k in ("play_queued", "queued_launch", "runlog") if k in job], [])
 
+    def test_live_idle_resume_stops_the_old_session_before_spawn(self):
+        """Job 1275: a resume of a job the watchdog flagged live-idle (its reason ends on "(session alive but idle)")
+        whose recorded pid is still a live claude process SIGTERMs that pid, waits up to 10 s, SIGKILLs it when it is
+        still there, and only then launches. A pid that is no claude process, or a stall without the live-idle mark,
+        is never signalled."""
+        live_idle = "Stalled: no board or job-dir change for 4 h (session alive but idle)"
+        claude = [(4242, 1, 0.0, "claude -p /trevskills-scrum start x")]
+
+        def run(reason, procs, exits):
+            job_id = self.job("idle session", "stage=build")
+            self.patch_board(job_id, pid=4242, stalled=True, reason=reason)
+            calls, err = [], io.StringIO()
+
+            def kill(pid, sig):
+                calls.append((pid, sig))
+                if sig == 0 and exits:
+                    raise ProcessLookupError(pid)
+            with mock.patch.object(self.serve, "process_scan", return_value=procs), \
+                    mock.patch.object(self.serve.os, "kill", side_effect=kill), \
+                    mock.patch.object(self.serve.time, "sleep") as sleep, \
+                    mock.patch.object(self.serve.board, "session_alive_fn", return_value=lambda job: False), \
+                    mock.patch.object(self.serve.subprocess, "Popen",
+                                      side_effect=lambda *a, **k: calls.append("popen") or mock.MagicMock()), \
+                    contextlib.redirect_stderr(err):
+                self.assertIsNotNone(self.serve.spawn("repo", self.root, job_id, "resume", "x"))
+            self.addCleanup(self.serve.RUNS.pop, f"repo/{job_id}", None)
+            return job_id, [c for c in calls if c == "popen" or c[1] != 0], sum(c.args[0] for c in sleep.call_args_list), err.getvalue()
+
+        job_id, signals, waited, err = run(live_idle, claude, exits=True)
+        self.assertEqual(signals, [(4242, signal.SIGTERM), "popen"])
+        self.assertEqual(err.splitlines(), [f"live-idle: stopping repo/{job_id} pid 4242 before its resume"])
+        _, signals, waited, _ = run(live_idle, claude, exits=False)
+        self.assertEqual((signals, waited), ([(4242, signal.SIGTERM), (4242, signal.SIGKILL), "popen"], 10.0))
+        _, signals, _, _ = run(live_idle, [(4242, 1, 0.0, "node server.js")], exits=True)
+        self.assertEqual(signals, ["popen"], "a reused pid that is no claude process is never signalled")
+        _, signals, _, _ = run("Stalled: no board update for 30 min and no live session", claude, exits=True)
+        self.assertEqual(signals, ["popen"], "only a live-idle stall is stopped")
+
     def test_spawn_clears_stale_tty(self):
         job_id = self.job("was interactive", "tty=ttys004")
         with mock.patch.object(self.serve.subprocess, "Popen"), \
