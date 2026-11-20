@@ -4535,20 +4535,21 @@ def held_windows(usage, now):
             and w["used_percentage"] >= USAGE_HOLD_PCT]
 
 
-def usage_allowance(usage, now, live):
+def usage_allowance(usage, now, live, windows=WINDOWS):
     """How many live headless sessions automated claims may run under the 5h and 7d budgets (an Allowance), or None
     for no taper. Each window's remaining % picks a rung of USAGE_STEPS; a reset within USAGE_RELAX_SECS relaxes
     one rung, a reset beyond USAGE_TIGHTEN_SECS tightens one. The stricter window wins (five_hour on a tie). Stale,
     missing or malformed data, or a window whose reset already passed, limits nothing. `live` (an int or a list)
     only feeds the reason text. Trevor's own Play/Resume never call this, nor pick_account for a primary with a backup. Pace: a five_hour or seven_day window whose used % runs
     PACE_LEAD_PCT or more points ahead of its elapsed % (0..100) gives Allowance(0, "pace 5h ..." or "pace 7d ...", five_hour first) before the ladder.
-    Hold: a window at USAGE_HOLD_PCT used or more gives Allowance(0, "hold 5h ..." or "hold 7d ...") after pace, before the ladder, with no relax near its reset."""
+    Hold: a window at USAGE_HOLD_PCT used or more gives Allowance(0, "hold 5h ..." or "hold 7d ...") after pace, before the ladder, with no relax near its reset.
+    `windows` (a slice of WINDOWS) limits pace, hold and ladder to those windows: pick_account passes five_hour only for a backup."""
     if not isinstance(usage, dict) or not isinstance(usage.get("rate_limits"), dict):
         return None
     at = usage.get("written_at")
     if not is_num(at) or now - at > USAGE_STALE_SECS:
         return None
-    for key, label in WINDOWS:  # five_hour first, so its reason wins when both are over the lead
+    for key, label in windows:  # five_hour first, so its reason wins when both are over the lead
         w = usage["rate_limits"].get(key)
         if isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) and w["resets_at"] > now:
             span = WINDOW_SECS[key]
@@ -4557,11 +4558,13 @@ def usage_allowance(usage, now, live):
                 return Allowance(0, f"pace {label} {round(w['used_percentage'])}% used at {round(elapsed)}% elapsed, "
                                     f"resets {datetime.fromtimestamp(w['resets_at']):%H:%M} (lead {PACE_LEAD_PCT}+ points)")
     for key, label, w in held_windows(usage, now):
+        if (key, label) not in windows:
+            continue
         return Allowance(0, f"hold {label} {round(w['used_percentage'])}% used ({USAGE_HOLD_PCT}% cap), "
                             f"resets {datetime.fromtimestamp(w['resets_at']):%H:%M}")
     rungs = (None,) + USAGE_STEPS
     best = None
-    for key, label in WINDOWS:
+    for key, label in windows:
         w = usage["rate_limits"].get(key)
         if not isinstance(w, dict) or not is_num(w.get("used_percentage")) or not is_num(w.get("resets_at")):
             continue
@@ -4654,7 +4657,8 @@ def pick_account(now, live=0, prefer=None):
     first (no future 7d window last, ACCOUNTS order within ties), else (None, Allowance(0, reason)) naming every account and why. Room: no limit_until marker ahead, usage_allowance None or above the live
     count (`live` an int or a list), and no
     reserve window reached (reserve_hit). With a backup listed, the primary (primary_account) skips usage_allowance
-    (job 1182: no pace, hold or taper), so it stops only on its limit marker, PRIMARY_RESERVE (job 1208) or a used-up window (job 1216); a lone account keeps them. allowance is the claims cap across every account with room (job 1130):
+    (job 1182: no pace, hold or taper), so it stops only on its limit marker, PRIMARY_RESERVE (job 1208) or a used-up window (job 1216); a lone account keeps them.
+    A backup gets five_hour pace, hold and taper only (job 1242): the primary's fresh week arrives before the backup's reset, so its 7d budget needs no pacing; its reserve still holds it. allowance is the claims cap across every account with room (job 1130):
     None when any of them has no taper, else the largest of their allowances."""
     accs = accounts()
     why, room = [], []
@@ -4673,7 +4677,7 @@ def pick_account(now, live=0, prefer=None):
             why.append(f"{acc.name} limited until {datetime.fromtimestamp(until):%H:%M}")
             continue
         usage = usages[acc.name]
-        allow = None if acc.name == primary else usage_allowance(usage, now, live)
+        allow = None if acc.name == primary else usage_allowance(usage, now, live, WINDOWS[:1] if primary else WINDOWS)
         if allow is not None and allow <= (live if isinstance(live, int) else len(live)):  # no slot left
             why.append(f"{acc.name} {allow.reason}")
             continue

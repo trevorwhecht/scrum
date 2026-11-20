@@ -10092,7 +10092,7 @@ class AutoContinueTest(unittest.TestCase):
             self.assertEqual(self.tick(), self.started("a"), "no usage.json: no taper")
             self.project("b", n=2); self.project("c", n=3)
             answers = iter([None, self.board.Allowance(0, "usage 5h 99% used"), None])
-            with mock.patch.object(self.board, "usage_allowance", side_effect=lambda u, now, live: next(answers)):
+            with mock.patch.object(self.board, "usage_allowance", side_effect=lambda *a: next(answers)):
                 self.assertEqual(self.tick(), self.started("a"), "b held: neither b nor c starts")
 
     def test_auto_continue_stops_at_session_ceiling(self):
