@@ -8899,6 +8899,80 @@ E2E_CMD = ("E2E_PORT=$(python3 -c 'import socket;s=socket.socket();s.bind((\"\",
            "npm run test:e2e")
 
 
+class E2eDuplicateTest(unittest.TestCase):
+    """cmd_next and cmd_ready abort an `E2E full suite on main` item another live job already names (job 1301)."""
+
+    ITEM = "E2E full suite on main fails: e2e/a.spec.ts:174 timeout"
+    ticket = staticmethod(BoardTest.ticket)
+    plan, write, jobs, child = BoardTest.plan, BoardTest.write, BoardTest.jobs, BoardTest.child
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        self.root.mkdir(parents=True)
+        for patch in (mock.patch.object(board, "merge_refusal", return_value=None),
+                      mock.patch.dict(os.environ, {"SCRUM_USAGE": str(Path(self.tmp.name) / "no-usage.json")})):
+            patch.start()
+            self.addCleanup(patch.stop)
+        no_claude_pid(self)
+
+    def owner(self, stage="build", text="Fix e2e/a.spec.ts flake"):
+        job = board.cmd_new(self.root, "Other work")
+        board.cmd_set(self.root, job, [f"stage={stage}"])
+        self.write(f"{job}/feature.md", text)
+        return job
+
+    def backlog(self, *items):
+        (self.root / "backlog.md").write_text("# Backlog\n" + "".join(f"- [ ] {i}\n" for i in items))
+
+    def test_next_aborts_duplicate(self):
+        for index in (None, 0):
+            with self.subTest(index=index):
+                self.setUp()
+                owner = self.owner()
+                self.backlog(self.ITEM)
+                self.assertEqual(board.cmd_next(self.root, index), {"id": None, "feature": None})
+                dup = next(j for j in self.jobs() if j["id"] != owner)
+                self.assertEqual((dup["stage"], dup["reason"]), ("aborted", f"duplicate of {owner}"))
+                self.assertIn(f"- [x] {self.ITEM} \u2192 {dup['id']}", (self.root / "backlog.md").read_text())
+
+    def test_next_claims_when_unowned(self):
+        for stage in (None, "done", "aborted"):
+            with self.subTest(stage=stage):
+                self.setUp()
+                if stage:
+                    self.owner(stage)
+                self.backlog(self.ITEM)
+                out = board.cmd_next(self.root)
+                self.assertEqual(out["feature"], self.ITEM)
+                self.assertEqual(self.child(out["id"])["stage"], "spec")
+
+    def test_next_ignores_other_items(self):
+        self.owner()
+        self.backlog("Fix the flaky e2e/a.spec.ts test")
+        out = board.cmd_next(self.root)
+        self.assertEqual(out["feature"], "Fix the flaky e2e/a.spec.ts test")
+        self.assertEqual(self.child(out["id"])["stage"], "spec")
+
+    def test_ready_aborts_duplicate(self):
+        owner = self.owner()
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
+        c1, c2, _ = plan_applied(self.root, parent)["children"]
+        self.write(f"{c1}/feature.md", self.ITEM + "\n")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2])
+        dup = self.child(c1)
+        self.assertEqual((dup["stage"], dup["reason"]), ("aborted", f"duplicate of {owner}"))
+        self.assertEqual(self.child(c2)["stage"], "spec")
+
+    def test_never_matches_itself(self):
+        self.write("001-x/feature.md", self.ITEM)
+        data = {"jobs": [{"id": "001-x", "title": self.ITEM, "stage": "spec"}]}
+        self.assertIsNone(board.e2e_full_duplicate(data, self.root / "jobs", self.ITEM, "001-x"))
+        self.assertEqual(board.e2e_full_duplicate(data, self.root / "jobs", self.ITEM, "002-y"), "001-x")
+        self.assertIsNone(board.e2e_full_duplicate(data, self.root / "jobs", "Fix e2e/a.spec.ts", "002-y"))
+
+
 class E2eSpecsTest(unittest.TestCase):
     """board.py e2e-specs: the diff's UI files mapped to the E2E specs that cover their routes (job 613)."""
 
