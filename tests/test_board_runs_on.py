@@ -346,6 +346,17 @@ class RunsOnTest(unittest.TestCase):
         bigboy = self.held_job("050-a", fit=True, parent="049-p", play_queued=self.ago(3600))
         self.assertFalse(board.shop_excluded(self.root, bigboy, [{"id": "049-p", "lane": "bigboy"}, bigboy]),
                          "a fit BigBoy child is not lilguy's, held or not")
+        with self.subTest("with room, cmd_ready leaves a lilguy child held 3 h to the shop and claims one held 1 h"):
+            (self.root.parent / "src").mkdir()
+            self.runall(self.kid("060-a", "a", lane="lilguy", play_queued=three_h),
+                        self.kid("061-b", "b", lane="lilguy", play_queued=self.ago(3600)))
+            for job_id in ("060-a", "061-b"):
+                (self.root / "jobs" / job_id / "queue-gates.txt").write_text("cpu_load(804%)\n")
+            self.room()
+            self.jev(False)
+            self.assertEqual(self.ready(), ["061-b"])
+            self.assertEqual(self.job("060-a")["stage"], "waiting")
+            self.assertIn("shop_first_since", self.job("060-a"))
         self.assertEqual(board.SHOP_LILGUY_HELD_SECS, 7200)
 
     def test_ready_claims_after_shop_first_max(self):

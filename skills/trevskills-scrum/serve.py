@@ -1807,9 +1807,9 @@ def shop_tick(project, repo, root) -> bool:
     this Mac's machine guard (machine_ok, cpu_hot) is holding it; this Mac keeps launching its own work, and the claim
     (cmd_ready shop= for a child, the stage-cloud mark with expect= for a launch) stops both taking one job
     (held_work: a queued `start` launch or a waiting child; never paused, board.shop_excluded (lilguy: board lane,
-    `Lane: lilguy` anywhere in feature.md, or lilguy-fit.json fit true with no parent or a Run-all parent; or naming a
-    digest proposals.json), setup pending, nor any job of a board.shop_project_excluded project (a `- Base branch:` line
-    or docker in project.md), nor a launch whose files are not clear_of_busy(busy_files), checked only when the pool
+    `Lane: lilguy` anywhere in feature.md, or lilguy-fit.json fit true with no parent or a Run-all parent, unless this
+    Mac's gates have held it over 2 h, board.SHOP_LILGUY_HELD_SECS; or naming a digest proposals.json), setup pending,
+    nor any job of a board.shop_project_excluded project (a `- Base branch:` line or docker in project.md), nor a launch whose files are not clear_of_busy(busy_files), checked only when the pool
     holds a launch) to the first shop_worker() worker (out of backoff, room, ready, an account; later workers are not
     probed). This Mac's cool-down does not stop the shop; a worker's own does (shop_worker).
     A job tagged Runs on main (board.tag_runs_on; Jev is asked, if at all, only here, with a worker free) is never sent: it is skipped and the next one is tried (job 1155). A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
