@@ -12722,7 +12722,15 @@ class E2eFullTest(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
         self.assertEqual(self.open_items(), [])
         self.assertTrue(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + 1))
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="350"):
+        real_popen = subprocess.Popen
+
+        def calm_child(*args, **kwargs):
+            """Job 1269: the buildlock.py child got serve's env, read 350 and held ~1900 s; it keeps the calm pin."""
+            if kwargs.get("env"):
+                kwargs["env"] = {**kwargs["env"], "SCRUM_CPU_LOAD_PCT": "1"}
+            return real_popen(*args, **kwargs)
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="350"), \
+                mock.patch.object(self.serve.subprocess, "Popen", side_effect=calm_child):
             self.assertEqual(self.run_suite(out, 1)["result"], "loaded")
 
     def test_second_early_exit_on_same_head_is_error(self):
