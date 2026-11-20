@@ -24,7 +24,8 @@ Find each name with `grep -n '<name>'`; never trust a line number. Every serve.p
 - `digest_auto(root, digest_id)` (the `--digest-auto` CLI) moves every pending one to applied, queued or skipped, then the digest is trimmed:
   - skill: `digest_queue_skill` queues a backlog item (`queued`, reason `new skill`), or `skipped` when the target is not creatable or exists.
   - settings or hooks target (`digest_denied`): `skipped`.
-  - target inside a registered repo (`repo_of`): grouped per repo into `digest_apply`.
+  - a git-ignored `.md` file under a registered repo's `scrum/` (`digest_scrum_target`: `repo_of`, then `git check-ignore`): `digest_write_in_place` (backed up by `ai_backup`, written in place; no job, no commit).
+  - any other target inside a registered repo (`repo_of`): grouped per repo into `digest_apply`.
   - any other target: `digest_write_global` (only an editable AI-Settings item, backed up by `ai_backup`, written in place).
 - `digest_apply(root, digest_id, props, title, feature, mark_applied)`:
   - refuses the whole repo when `digest_apply_ready` gives a reason (not a checkout, detached HEAD, dirty outside scrum/, no tests/test_contracts.py);
@@ -42,7 +43,7 @@ Find each name with `grep -n '<name>'`; never trust a line number. Every serve.p
 - `DIGEST_LOCK` is one `threading.Lock` in serve.py.
 - `digest_set_statuses(root, digest_id, updates, from_status="pending")` changes only entries still at `from_status`, writes tmp + `os.replace`, and trims once nothing is pending. The caller holds `DIGEST_LOCK`.
 - `digest_mark_applied` takes the lock and sets pending to applied.
-- `digest_revert(root, digest_id, pid)`: only an `applied` proposal; swaps old and new and re-applies through `digest_apply` (repo, `mark_applied=False`, its own `Revert digest` job) or `digest_write_global`; then sets `reverted` from `applied` under the lock.
+- `digest_revert(root, digest_id, pid)`: only an `applied` proposal; swaps old and new and re-applies through `digest_apply` (repo, `mark_applied=False`, its own `Revert digest` job), `digest_write_in_place` (a `digest_scrum_target` file) or `digest_write_global`; then sets `reverted` from `applied` under the lock.
 - Any read-modify-write you add re-checks the live status under `DIGEST_LOCK` right before writing.
 
 ## Weekly

@@ -6013,8 +6013,9 @@ def ai_research(item_id):
 
 
 # --- Digest: scrum/digests/<NNN>/proposals.json is agent-written, so it's untrusted. A target is written only when it is
-# an editable AI-Settings item outside every registered repo, or a repo file digest_apply commits after its contract tests;
-# any other repo edit becomes a backlog item instead, so main stays clean.
+# an editable AI-Settings item outside every registered repo, a git-ignored scrum/*.md file in a registered repo (written in
+# place after a backup, like a global file), or a repo file digest_apply commits after its contract tests; any other repo
+# edit becomes a backlog item instead, so main stays clean.
 DIGEST_LOCK = threading.Lock()
 PROPOSAL_KEYS = ("id", "target", "why", "old", "new")
 PROPOSAL_STATUSES = ("pending", "applied", "queued", "rejected", "skipped", "reverted")
@@ -6109,6 +6110,18 @@ def digest_skill_target(target):
     parts = Path(repo[1]).parts
     ok = parts[-1:] == ("SKILL.md",) and parts[:-2] in (("skills",), (".claude", "skills")) and SKILL_NAME_RE.fullmatch(parts[-2])
     return repo[1] if ok else None
+
+
+def digest_scrum_target(target: str) -> str | None:
+    """target when it is an absolute path to a .md file under a registered repo's scrum/ (not scrum/ itself) that git
+    reports ignored, so no commit can carry it and digest_write_in_place writes it; else None."""
+    repo = os.path.isabs(target) and repo_of(target)
+    if not repo:
+        return None
+    rel = Path(repo[1])
+    if rel.parts[:1] != ("scrum",) or len(rel.parts) < 2 or rel.suffix != ".md":
+        return None
+    return target if git_run(repo[0], "check-ignore", "-q", "--", repo[1]).returncode == 0 else None
 
 
 def editable_path(target):
@@ -6209,6 +6222,12 @@ def digest_write_global(prop: dict) -> str | None:
     target = editable_path(prop["target"]) if os.path.isabs(prop["target"]) else None
     if not target:
         return "target is not editable"
+    return digest_write_in_place(target, prop)
+
+
+def digest_write_in_place(target: str, prop: dict) -> str | None:
+    """Swap prop's old text for its new text in target, written in place (keeps a symlink) after an ai_backup: None when
+    written, else why it wasn't. The caller has already checked target may be edited."""
     try:
         text = Path(target).read_bytes().decode()
     except (OSError, UnicodeDecodeError):
@@ -6469,7 +6488,8 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
 
 def digest_revert(root: Path, digest_id: str, pid: str) -> tuple[int, dict]:
     """Undo one applied edit proposal through the path that applied it: a repo file by digest_apply (its own lilguy job
-    and commit, which also swaps back the stored companion test file), any other file by digest_write_global (after a backup). Any failure is a 409 and leaves it applied."""
+    and commit, which also swaps back the stored companion test file), a git-ignored scrum/*.md file (digest_scrum_target)
+    by digest_write_in_place and any other file by digest_write_global (both after a backup). Any failure is a 409 and leaves it applied."""
     entry = None
     with DIGEST_LOCK:
         if board.DIGEST_RE.fullmatch(digest_id):
@@ -6484,7 +6504,8 @@ def digest_revert(root: Path, digest_id: str, pid: str) -> tuple[int, dict]:
     if digest_denied(entry["target"]):  # proposals.json is untrusted: never edit a settings or hooks file
         return 409, {"error": "target is not editable"}
     rev = entry | {"old": entry["new"], "new": entry["old"]}
-    if repo := repo_of(entry["target"]):
+    scrum_file = digest_scrum_target(entry["target"])
+    if not scrum_file and (repo := repo_of(entry["target"])):
         title = f"Revert digest {digest_id} {pid}"
         feature = f"{title}:\n\n- digest {digest_id} {pid} → {repo[1]}: {board.clean(entry['why'])}\n"
         applied, not_applied, _ = digest_apply(root, digest_id, [rev], title=title, feature=feature, mark_applied=False)
@@ -6500,7 +6521,7 @@ def digest_revert(root: Path, digest_id: str, pid: str) -> tuple[int, dict]:
                 return 404, {"error": "no such proposal"}
             if live["status"] != "applied":
                 return 409, {"error": f"proposal is {live['status']}, not applied"}
-            if not (why := digest_write_global(rev)):
+            if not (why := digest_write_in_place(scrum_file, rev) if scrum_file else digest_write_global(rev)):
                 digest_set_statuses(root, digest_id, {pid: ("reverted", None)}, from_status="applied")
     if why and why.startswith("write failed"):  # an OSError names local paths: log it, never send it
         return server_error("couldn't write the file", why)
@@ -6514,9 +6535,9 @@ PIPELINE_LINE_RE = re.compile(r"board\.py|serve\.py|dashboard", re.I)  # a backl
 
 def digest_auto(root, digest_id):
     """Apply, queue or skip every pending proposal, so none is left pending and the digest is trimmed. A repo edit is
-    applied and committed (digest_apply) or queued as a backlog item when it can't be; a file outside every repo is
-    written in place after a backup; a new skill is queued; a settings or hooks file, an uneditable target or stale old
-    text is skipped with its reason."""
+    applied and committed (digest_apply) or queued as a backlog item when it can't be; a file outside every repo, or a
+    git-ignored scrum/*.md file in one (digest_scrum_target), is written in place after a backup; a new skill is queued;
+    a settings or hooks file, an uneditable target or stale old text is skipped with its reason."""
     out = {"applied": [], "queued": [], "skipped": [], "job": None}
     if not board.DIGEST_RE.fullmatch(digest_id):
         return out
@@ -6574,6 +6595,12 @@ def digest_auto(root, digest_id):
                 queue(p, "new skill")
         elif digest_denied(p["target"]):
             skip(p, "settings or hooks file")
+        elif scrum_file := digest_scrum_target(p["target"]):
+            if why := digest_write_in_place(scrum_file, p):
+                skip(p, why)
+            else:
+                out["applied"].append({"id": p["id"], "target": p["target"], "why": p["why"]})
+                updates[p["id"]] = ("applied", None)
         elif repo := repo_of(p["target"]):
             by_repo.setdefault(repo[0], []).append(p)
             where[p["id"]] = repo
