@@ -1610,8 +1610,8 @@ PROCESSES = (
                         "start_ready", "wake_waiting", "sweep_parents", "main_ff_tick", "terminal_batch_tick"), ()),
     ("Stalls and exits", ("cmd_watchdog", "respawn_exited", "record_outcomes", "cmd_migrate_paused", "claude_migrate"),
      ("questions.log",)),
-    ("Full E2E on main", ("e2e_full_tick", "e2e_full_run"), ("e2e-full.json", "e2e-full.log", "e2e-full-rerun.log")),
-    ("UI sweep", ("ui_sweep_tick", "cmd_ui_sweep_record"), ("ui-sweep.json", "ui-sweep/*/review.md")),
+    ("Full E2E on main", ("e2e_full_tick", "e2e_full_run", "hot_stop_tick"), ("e2e-full.json", "e2e-full.log", "e2e-full-rerun.log")),
+    ("UI sweep", ("ui_sweep_tick", "cmd_ui_sweep_record", "hot_stop_tick"), ("ui-sweep.json", "ui-sweep/*/review.md")),
     ("Prod error sweep", ("prod_errors_tick",), ("prod-errors.json",)),
     ("Actions alerts", ("actions_alert",), ()),
     ("Disk reclaim", ("reclaim_disk",), ()),
@@ -6129,6 +6129,15 @@ def swap_grew(swap):
     return grew
 
 
+def vm_pressure_reason() -> str | None:
+    """Why the kernel memory pressure level (vm_pressure_level) refuses new work: level 2 or more, else None (level 1 or
+    an unknown reading). Shared by machine_ok and heavy_hold (job 1312)."""
+    level = vm_pressure_level()
+    if level is not None and level >= 2:
+        return f"memory pressure {'critical' if level >= 4 else 'warn'} (kernel level {level})"
+    return None
+
+
 def swap_pressing(ram, swap, limit):
     """True when swap is past `limit` and either free RAM is under SWAP_FREE_RAM_PCT or swap grew over the window."""
     return swap is not None and swap > limit and ((ram is not None and ram < SWAP_FREE_RAM_PCT) or swap_grew(swap))
@@ -6150,9 +6159,8 @@ def machine_ok(path, manual=False, claim=False, own_load=False):
     ram = free_ram_pct()
     if ram is not None and ram < MIN_FREE_RAM_PCT:
         return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
-    level = vm_pressure_level()
-    if level is not None and level >= 2:
-        return f"memory pressure {'critical' if level >= 4 else 'warn'} (kernel level {level})"
+    if mem := vm_pressure_reason():
+        return mem
     swap = swap_used_pct()
     if swap_pressing(ram, swap, MAX_SWAP_PCT):
         return f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
@@ -6172,16 +6180,26 @@ def machine_ok(path, manual=False, claim=False, own_load=False):
 
 
 def heavy_hold() -> str | None:
-    """machine_ok's CPU load reason, else its swap reason, else None: gates running jobs' Build, E2E and render.py
-    starts (buildlock.py on build.lock and e2e.lock, render.py; job 1227). No cool-down, RAM, disk, busy or session
-    check; free RAM is read only when swap is over MAX_SWAP_PCT. An unknown reading passes."""
+    """machine_ok's CPU load reason, else its memory pressure reason (vm_pressure_reason, kernel level 2+), else its swap
+    reason, else None: gates running jobs' Build, Test/Typecheck/Lint, E2E and render.py starts (buildlock.py on
+    build.lock, check.lock and e2e.lock, render.py; jobs 1227, 1312) and the hot stop of a UI sweep or full E2E on main
+    (serve.py hot_stop_tick). No cool-down, disk, busy or session check; free RAM is read only when swap is over
+    MAX_SWAP_PCT. An unknown reading passes."""
     load = cpu_load_pct()
     if load is not None and load > MAX_CPU_LOAD_PCT:
         return f"CPU load {load:.0f}% of {os.cpu_count()} cores (> {MAX_CPU_LOAD_PCT}%)"
+    if mem := vm_pressure_reason():
+        return mem
     swap = swap_used_pct()
     if swap is not None and swap > MAX_SWAP_PCT and swap_pressing(free_ram_pct(), swap, MAX_SWAP_PCT):
         return f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
     return None
+
+
+def hand_hold(root) -> str | None:
+    """Why Trevor's hand start (Run now, Start now, a chat hand-off) of a not-yet-started job waits: heavy_hold, else
+    machine_ok(root, manual=True) (memory, swap, disk; no CPU checks), else None (job 1312)."""
+    return heavy_hold() or machine_ok(root, manual=True)
 
 
 LIGHT_LANES = ("fast", "lilguy")  # light_job: lanes that run no E2E, so ram_room sizes them at LIGHT_SESSION_RAM_PCT
@@ -8783,7 +8801,7 @@ def main(argv=None):
     elif a.cmd == "prod-ok":
         print(cmd_prod_ok(a.dir, a.id, a.bullet))
     elif a.cmd == "spawn":
-        proc, log = spawn(a.dir, a.id, a.action, a.prompt, model=a.model, caller=caller_claude_pid())
+        proc, log = spawn(a.dir, a.id, a.action, a.prompt, model=a.model, caller=caller_claude_pid(), hot_hold=False)
         print(json.dumps({"log": log, "pid": proc.pid}))
     elif a.cmd == "backlog-spec":
         out = cmd_backlog_spec(a.dir, a.id)
@@ -9016,9 +9034,28 @@ class LiveSession(SystemExit):
     """spawn's refusal (job 1275): the job already has a live session, so a second one would fight it."""
 
 
+class HeldStart(SystemExit):
+    """spawn's hold (job 1312): a hand start of a not-yet-started job while this Mac is hot is queued as a `start` launch
+    for the shop Mac (or this one once its guard clears) instead of launching."""
+
+
+def queue_start(root, job_id: str, prompt: str | None = None) -> bool:
+    """Leave a spec-stage job with no `shop` field queued as a `start` launch (play_queued, queued_launch), under one
+    locked_board that re-reads the job; an earlier play_queued is kept. True when it is left queued, False when the job
+    is gone, past spec or already shop-bound. serve.py hold_start and spawn's hold call it."""
+    prompt = prompt if prompt is not None else f"/trevskills-scrum start {job_id}"
+    with locked_board(root) as b:
+        live = next((j for j in b["jobs"] if j["id"] == job_id), {})
+        if live.get("stage") != "spec" or live.get("shop"):
+            return False
+        live.setdefault("play_queued", now())
+        live.setdefault("queued_launch", {"action": "start", "prompt": prompt, "stage": "spec"})
+        return True
+
+
 def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags=("--permission-mode", "acceptEdits"),
           model: str | None = None, account: str | None = None, nice: int = SESSION_NICE,
-          caller: int | None = None) -> tuple[subprocess.Popen, str]:
+          caller: int | None = None, hot_hold: bool = True) -> tuple[subprocess.Popen, str]:
     """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/, and set the job's runlog and account.
     A job on the board whose session reads alive (session_alive_fn, ps unreadable counting as alive) launches nothing:
     LiveSession (a SystemExit) names it. `caller` (`B spawn`'s caller_claude_pid) is left out of that scan, so the job's
@@ -9028,7 +9065,9 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     (the recorded account on a tie), else the first (Trevor's Play and Resume are never refused on usage). Any account but the first runs with
     CLAUDE_CONFIG_DIR=<its dir>; the first runs with CLAUDE_CONFIG_DIR removed. The session runs at `nice` (SESSION_NICE;
     the UI sweep passes 19). `flags` without their own get --strict-mcp-config and --settings spawn_settings(...); a job
-    whose job_lane is not lilguy runs with CLAUDE_CODE_DISABLE_CLAUDE_MDS=1. Returns (proc, log path relative to root)."""
+    whose job_lane is not lilguy runs with CLAUDE_CODE_DISABLE_CLAUDE_MDS=1. With `hot_hold` (the `B spawn` CLI passes
+    False), a `start` of a board job at stage spec with no `shop` field launches nothing while hand_hold(root) gives a
+    reason: queue_start queues it and HeldStart (a SystemExit) says so (job 1312). Returns (proc, log path relative to root)."""
     root = Path(root)  # a chat hand-off passes a str
     if not SPAWN_ID_RE.fullmatch(job_id):
         raise SystemExit(f"bad spawn id {job_id!r}")
@@ -9047,6 +9086,10 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     if job and session_alive_fn(skip=caller)(job):  # job 1275: two sessions on one job fight over its worktree
         pid = job.get("pid") if job.get("pid") != caller else None  # the caller's own pid is not the live one
         raise LiveSession(f"job {job_id} already has a live session (pid {pid or 'unknown'})")
+    if hot_hold and action == "start" and job.get("stage") == "spec" and not job.get("shop") and (why := hand_hold(root)) \
+            and queue_start(root, job_id, prompt):
+        raise HeldStart(f"job {job_id} queued, not started on this Mac: {why}; the shop Mac takes it when a worker has "
+                        "room, else it starts here once this Mac's guard clears")
     if account is None:
         recorded = job.get("account")
         if recorded and str(job.get("reset") or "").isdigit() and time.time() >= int(job["reset"]):

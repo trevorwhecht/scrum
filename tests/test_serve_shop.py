@@ -158,6 +158,27 @@ class ShopTickTest(unittest.TestCase):
         self.assertEqual(out, "shop: mm: 043-a: started on shopmac (pid 4242, account owa)\n")
         self.assertEqual(self.job(root, "043-a")["stage"], "cloud")
 
+    def test_hot_hand_start_goes_to_shop(self):
+        """Job 1312: Trevor's Run now on a hot Mac queues a start launch (board.HeldStart), which shop_tick sends to a
+        worker with room whatever this Mac's readings say."""
+        root = self.project("mm", [{"id": "050-q", "stage": "spec"}])
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="100", SCRUM_CPU_LOAD_PCT="400", SCRUM_SWAP_PCT="0"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertIsNone(self.serve.spawn("mm", root, "050-q", "start", "/trevskills-scrum start 050-q",
+                                                   manual=True))
+            self.assertTrue(err.getvalue().startswith("spawn held: mm/050-q start: job 050-q queued, not started on this "
+                                                      "Mac: CPU load 400%"), err.getvalue())
+            job = self.job(root, "050-q")
+            self.assertEqual(job["queued_launch"]["action"], "start")
+            self.assertTrue(job["play_queued_manual"])
+            self.assertEqual((root / "jobs" / "050-q" / "queue-gates.txt").read_text(), "hot_mac\n")
+            self.assertEqual([j["id"] for j in self.serve.held_work("mm", self.board.read_board(root)["jobs"])], ["050-q"])
+            got, out, err = self.tick()
+        self.assertEqual((got, err), (True, ""))
+        self.assertEqual(out, "shop: mm: 050-q: started on shopmac (pid 4242, account owa)\n")
+        self.assertEqual(self.job(root, "050-q")["stage"], "cloud")
+
     def test_dispatch_through_cooldown(self):
         root = self.project("mm", self.runall({"id": "043-a"}))
         flag = self.base / "cooldown"

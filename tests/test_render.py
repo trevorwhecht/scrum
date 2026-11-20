@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_SWAP_PCT"] = "0"  # no swap: main()'s hold (job 1227) never reads this machine's swap
 os.environ["SCRUM_CPU_LOAD_PCT"] = "0"  # no load: main()'s hold never waits on this machine's load
+os.environ["SCRUM_VM_PRESSURE"] = "1"  # kernel memory pressure normal: main()'s hold never runs sysctl
 import render  # noqa: E402
 
 PAGE = b"<!doctype html><title>t</title><h1>hi</h1><script>console.error('boom')</script>"

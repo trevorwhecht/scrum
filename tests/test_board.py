@@ -7423,6 +7423,91 @@ print("stub err", file=sys.stderr)
         self.assertEqual([c.args for c in prio.call_args_list],
                          [(os.PRIO_PROCESS, default.pid, 10), (os.PRIO_PROCESS, low.pid, 19)])
 
+    def hot_job(self, job_id="912-hand", **fields):
+        if not getattr(self, "_dead", None):  # no live session reads alive for these ids
+            self._dead = mock.patch.object(board, "session_alive_fn", return_value=lambda job: False)
+            self._dead.start()
+            self.addCleanup(self._dead.stop)
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": job_id, "stage": "spec", **fields}]}))
+        (self.root / "jobs" / job_id).mkdir(parents=True, exist_ok=True)
+        return job_id
+
+    def job_row(self, job_id):
+        return json.loads((self.root / "board.json").read_text())["jobs"][0]
+
+    def test_spawn_start_held_on_hot_mac(self):
+        """Job 1312: a chat hand-off start of a spec-stage job with no shop field queues a start launch on a hot Mac."""
+        job_id = self.hot_job()
+        for env, why in ((dict(SCRUM_CPU_LOAD_PCT="400"), f"CPU load 400% of {os.cpu_count()} cores (> 300%)"),
+                         (dict(SCRUM_VM_PRESSURE="2"), "memory pressure warn (kernel level 2)")):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                with self.assertRaises(board.HeldStart) as cm:
+                    board.spawn(self.root, job_id, "start", "/p start")
+                self.assertEqual(str(cm.exception), f"job {job_id} queued, not started on this Mac: {why}; the shop Mac "
+                                 "takes it when a worker has room, else it starts here once this Mac's guard clears")
+                self.assertIsInstance(cm.exception, SystemExit)
+        row = self.job_row(job_id)
+        self.assertEqual(row["queued_launch"], {"action": "start", "prompt": "/p start", "stage": "spec"})
+        first = row["play_queued"]
+        self.assertFalse(self.out.exists(), "the stub claude never ran")
+        self.assertFalse((self.root / "runs").exists() and list((self.root / "runs").iterdir()))
+        self.assertNotIn("runlog", row)
+        self.assertNotIn("account", row)
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400"), mock.patch.object(board, "now", return_value="later"):
+            with self.assertRaises(board.HeldStart):
+                board.spawn(self.root, job_id, "start")
+        self.assertEqual(self.job_row(job_id)["play_queued"], first, "a second held call keeps the first time")
+
+    def test_queue_start_rechecks_under_lock(self):
+        job_id = self.hot_job(shop="mini")
+        self.assertFalse(board.queue_start(self.root, job_id))
+        self.assertFalse(board.queue_start(self.root, "no-such-job"))
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": job_id, "stage": "running"}]}))
+        self.assertFalse(board.queue_start(self.root, job_id))
+        self.assertNotIn("queued_launch", self.job_row(job_id))
+        # the stage moved on between spawn's read and the lock: the spawn launches as today
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": job_id, "stage": "spec"}]}))
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400"), mock.patch.object(board, "queue_start", return_value=False):
+            proc, _ = board.spawn(self.root, job_id, "start", "/p", model="sonnet")
+        proc.wait(timeout=10)
+        self.assertEqual(len(self.records()), 1)
+
+    def test_spawn_hold_only_spec_starts(self):
+        """Job 1312: everything but a spec-stage start with no shop field launches as today on a hot reading."""
+        hot = mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400")
+        cases = [("hot_hold off", self.hot_job(), "start", dict(hot_hold=False)),
+                 ("resume", self.hot_job(), "resume", {}),
+                 ("other stage", self.hot_job(stage="check"), "start", {}),
+                 ("shop field", self.hot_job(shop="mini"), "start", {}),
+                 ("not on the board", "913-gone", "start", {})]
+        for name, job_id, action, kw in cases:
+            with self.subTest(name):
+                self.out.unlink(missing_ok=True)
+                if name != "not on the board":
+                    self.hot_job(job_id, **({"stage": "check"} if name == "other stage" else
+                                            {"shop": "mini"} if name == "shop field" else {}))
+                else:
+                    (self.root / "board.json").write_text(json.dumps({"jobs": []}))
+                with hot:
+                    proc, _ = board.spawn(self.root, job_id, action, "/p", model="sonnet", **kw)
+                proc.wait(timeout=10)
+                self.assertEqual(len(self.records()), 1)
+        job_id = self.hot_job("914-calm")
+        self.out.unlink(missing_ok=True)
+        with mock.patch.object(board, "hand_hold", return_value=None):
+            proc, _ = board.spawn(self.root, job_id, "start", "/p", model="sonnet")
+        proc.wait(timeout=10)
+        self.assertEqual(len(self.records()), 1)
+        self.assertNotIn("queued_launch", self.job_row(job_id))
+
+    def test_spawn_cli_never_holds(self):
+        job_id = self.hot_job()
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400"):
+            out = self.cli(job_id, "start")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(len(self.records()), 1)
+        self.assertNotIn("queued_launch", self.job_row(job_id))
+
     def test_spawn_log_name_is_utc(self):
         before = datetime.now(timezone.utc).replace(microsecond=0)
         line = json.loads(self.cli("123-some-job", "start").stdout)

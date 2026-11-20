@@ -13223,6 +13223,351 @@ class E2eFullTest(unittest.TestCase):
         self.assertIsNone(self.serve.E2E_FULL["running"])
 
 
+class HotStopTest(unittest.TestCase):
+    """serve.py hot_stop_tick and stop_group (job 1312): a hot Mac stops a running UI sweep and a full E2E on main, and
+    nothing else. SCRUM_CPU_LOAD_PCT=400 is the hot reading; the groups are real `sleep`/python processes."""
+    HOT = f"CPU load 400% of {os.cpu_count()} cores (> 300%)"
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.repo = Path(os.path.realpath(base / "repo"))
+        self.root = self.repo / "scrum"
+        self.root.mkdir(parents=True)
+        (base / "projects.json").write_text(json.dumps([str(self.repo)]))
+        for p in (mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "projects.json")}),
+                  mock.patch.object(serve, "HOT_STOP_WAIT", 1),
+                  mock.patch.object(serve.board, "listeners", return_value=[])):
+            p.start()
+            self.addCleanup(p.stop)
+        serve.RUNS.clear()
+        serve.UI_SWEEP_BEFORE.clear()
+        serve.E2E_FULL.clear()
+        serve.E2E_FULL["running"] = None
+        for d in (serve.RUNS, serve.UI_SWEEP_BEFORE):
+            self.addCleanup(d.clear)
+        self.addCleanup(lambda: (serve.E2E_FULL.clear(), serve.E2E_FULL.update(running=None)))
+        self.procs = []
+        self.addCleanup(self.reap)
+
+    def reap(self):
+        for p in self.procs:
+            if p.poll() is None:
+                p.kill()
+            p.wait()
+
+    def group(self, ignore_term=False):
+        """A live process group leader (its own session), reaped by a thread as serve's run watcher would."""
+        code = ("import signal,time,sys\n" + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_term else "")
+                + "print('ready', flush=True)\ntime.sleep(60)\n")
+        p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, start_new_session=True, text=True)
+        self.procs.append(p)
+        self.assertEqual(p.stdout.readline().strip(), "ready")
+        threading.Thread(target=p.wait, daemon=True).start()
+        return p
+
+    def sweep(self, proc, **extra):
+        d = self.root / "ui-sweep" / "20261120T000000Z"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "targets.json").write_text(json.dumps({"since": "s0", "head": "h1", "targets": [{"path": "/leads"}]}))
+        rec = {"at": 100.0, "head": "h1", "since": "s0", "result": "running", "dir": str(d), **extra}
+        (self.root / "ui-sweep.json").write_text(json.dumps(rec))
+        self.serve.RUNS["repo/ui-sweep"] = {"action": "ui-sweep", "started": time.time(), "proc": proc, "log": "x"}
+        return d, rec
+
+    def tick(self, **env):
+        with mock.patch.dict(os.environ, env):
+            return processes_logged(self.serve.hot_stop_tick)
+
+    def test_hot_stop_ends_ui_sweep(self):
+        proc = self.group(ignore_term=True)  # outlives TERM, so only the KILL after HOT_STOP_WAIT ends it
+        d, rec = self.sweep(proc)
+        before = [(7, 3000, str(self.repo))]
+        self.serve.UI_SWEEP_BEFORE["repo"] = before
+        with mock.patch.object(self.serve, "e2e_full_stop_new_servers", return_value=[]) as servers:
+            started = time.time()
+            stopped, lines = self.tick(SCRUM_CPU_LOAD_PCT="400")
+        self.assertEqual(stopped, ["repo/ui-sweep"])
+        self.assertGreaterEqual(time.time() - started, 0.9, "TERM was ignored: KILL came after HOT_STOP_WAIT")
+        self.assertEqual(proc.wait(timeout=5), -signal.SIGKILL)
+        servers.assert_called_once_with(self.repo, before)
+        self.assertEqual(json.loads((self.root / "ui-sweep.json").read_text()),
+                         {"at": 100.0, "head": "h1", "since": "s0", "result": "loaded", "reason": self.HOT})
+        self.assertEqual(lines, [{"process": "UI sweep", "result": "stopped", "repo": str(self.repo), "reason": self.HOT}])
+
+    def test_hot_stop_term_is_enough(self):
+        proc = self.group()
+        self.sweep(proc)
+        started = time.time()
+        stopped, _ = self.tick(SCRUM_CPU_LOAD_PCT="400")
+        self.assertEqual(stopped, ["repo/ui-sweep"])
+        self.assertLess(time.time() - started, 0.9, "TERM ended it: no wait for the KILL")
+        self.assertEqual(proc.wait(timeout=5), -signal.SIGTERM)
+
+    def test_stopped_sweep_files_nothing(self):
+        proc = self.group()
+        d, rec = self.sweep(proc)
+        review = d / "review.md"
+        review.write_text("# Review\n- [blocking] src/app/page.tsx — overflows — a.png\n")
+        self.tick(SCRUM_CPU_LOAD_PCT="400")
+        with self.assertRaises(SystemExit) as cm:
+            self.serve.board.cmd_ui_sweep_record(self.root, str(review))
+        self.assertIn("not the current UI sweep", str(cm.exception))
+        self.assertFalse((self.root / "backlog.md").exists())
+        loaded = json.loads((self.root / "ui-sweep.json").read_text())
+        self.assertTrue(self.serve.e2e_full_due(loaded, "h1", 0, loaded["at"] + 1))
+        self.assertNotIn("dir", loaded)
+
+    def test_changed_record_is_left_alone(self):
+        """The record no longer holds the running one the tick read (a late B ui-sweep-record): it is kept."""
+        proc = self.group()
+        self.sweep(proc)
+        real = self.serve.e2e_full_stop_new_servers
+        newer = {"at": 100.0, "head": "h1", "since": "s0", "result": "fail", "findings": 2}
+
+        def servers(repo, before, wait=5.0):
+            (self.root / "ui-sweep.json").write_text(json.dumps(newer))
+            return []
+        with mock.patch.object(self.serve, "e2e_full_stop_new_servers", side_effect=servers):
+            self.tick(SCRUM_CPU_LOAD_PCT="400")
+        self.assertEqual(json.loads((self.root / "ui-sweep.json").read_text()), newer)
+
+    def e2e_child(self, ignore_term=False):
+        proc = self.group(ignore_term)
+        self.serve.E2E_FULL.update(running="repo", pid=proc.pid)
+        return proc
+
+    def test_hot_stop_ends_full_e2e(self):
+        proc = self.e2e_child()
+        stopped, lines = self.tick(SCRUM_VM_PRESSURE="2")  # memory pressure alone, calm CPU
+        why = "memory pressure warn (kernel level 2)"
+        self.assertEqual(stopped, ["repo/e2e-full"])
+        self.assertEqual(self.serve.E2E_FULL["hot_stop"], why)
+        self.assertEqual(proc.wait(timeout=5), -signal.SIGTERM)
+        self.assertEqual(lines, [{"process": "Full E2E on main", "result": "stopped", "repo": str(self.repo), "reason": why}])
+
+    def test_full_run_records_loaded_when_stopped(self):
+        """e2e_full_run on a hot stop: loaded with the reason, whatever the CPU readings, and nothing retried or filed."""
+        (self.repo / "run-e2e.sh").write_text("echo run >> runs.txt; sleep 60\n")
+        (self.root / "project.md").write_text("# Project\n- E2E: sh run-e2e.sh\n")
+        result = {}
+
+        def run():
+            result["rec"] = self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", "h1", 123.0, "lg")
+        self.serve.E2E_FULL["running"] = "repo"
+        with mock.patch.dict(os.environ, {"HOME": self.tmp.name}):
+            t = threading.Thread(target=run)
+            t.start()
+            for _ in range(200):
+                if self.serve.E2E_FULL.get("pid") and (self.repo / "runs.txt").exists():
+                    break
+                time.sleep(0.05)
+            self.assertTrue(self.serve.E2E_FULL.get("pid"), "e2e_full_exec keeps its child's pid")
+            with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="3"):
+                self.assertEqual(self.serve.hot_stop_tick(), ["repo/e2e-full"])
+            t.join(30)
+        rec = result["rec"]
+        self.assertEqual((rec["result"], rec["reason"], rec["lastGreen"], rec["failed"]),
+                         ("loaded", "memory pressure warn (kernel level 3)", "lg", []))
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
+        self.assertEqual((self.repo / "runs.txt").read_text(), "run\n", "no lock-block retry")
+        self.assertFalse((self.root / "backlog.md").exists())
+        self.assertNotIn("pid", self.serve.E2E_FULL)
+        self.assertNotIn("hot_stop", self.serve.E2E_FULL)
+
+    def test_hot_stop_during_rerun_files_nothing(self):
+        """The first run fails two specs; the one-worker re-run is stopped: the final record is loaded, nothing filed."""
+        failed = [{"spec": "e2e/a.spec.ts", "line": 3, "title": "a"}]
+        stop = {"hot_stop": "CPU load 400% of 8 cores (> 300%)"}
+
+        def rerun(*a):
+            self.serve.E2E_FULL.update(stop)
+            return None, "out"
+        with mock.patch.object(self.serve, "e2e_full_exec", return_value=1), \
+                mock.patch.object(self.serve, "e2e_full_failures", return_value=failed), \
+                mock.patch.object(self.serve, "e2e_full_rerun", side_effect=rerun), \
+                mock.patch.object(self.serve, "e2e_full_backlog") as backlog, \
+                mock.patch.object(self.serve, "e2e_full_owned", return_value=set()), \
+                mock.patch.object(self.serve.board, "_e2e_dir", return_value="e2e"):
+            (self.repo / "o").write_text("")
+            (self.root / "e2e-full.log").write_text("")
+            rec = self.serve.e2e_full_run(self.repo, self.root, "true", "h1", 123.0, "lg")
+        backlog.assert_not_called()
+        self.assertEqual((rec["result"], rec["reason"]), ("loaded", stop["hot_stop"]))
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text())["result"], "loaded")
+        self.assertNotIn("hot_stop", self.serve.E2E_FULL)
+
+    def test_rerun_stopped_returns_none(self):
+        (self.root / "e2e-full-rerun.log").write_text("")
+        self.serve.E2E_FULL["hot_stop"] = "x"
+        out = "1 failed\n  e2e/a.spec.ts:3:5 › a\n"
+        with mock.patch.object(self.serve, "e2e_full_exec", return_value=1), \
+                mock.patch.object(Path, "read_text", return_value=out):
+            got = self.serve.e2e_full_rerun(self.repo, self.root, "cmd", {}, [{"spec": "e2e/a.spec.ts"}], "e2e")
+        self.assertEqual(got, (None, out))
+
+    def test_cool_mac_stops_nothing(self):
+        proc = self.group()
+        d, rec = self.sweep(proc)
+        e2e = self.e2e_child()
+        stopped, lines = self.tick()  # the module's calm readings
+        self.assertEqual((stopped, lines), ([], []))
+        self.assertIsNone(proc.poll())
+        self.assertIsNone(e2e.poll())
+        self.assertEqual(json.loads((self.root / "ui-sweep.json").read_text()), rec)
+        self.assertNotIn("hot_stop", self.serve.E2E_FULL)
+        with mock.patch.object(self.serve.os, "killpg", side_effect=AssertionError("signalled")):
+            self.assertEqual(self.serve.hot_stop_tick(), [])
+
+    def test_job_sessions_never_stopped(self):
+        job = self.group()
+        self.serve.RUNS["repo/001-x"] = {"action": "start", "started": time.time(), "proc": job, "log": "x"}
+        sweep, e2e = self.group(), self.e2e_child()
+        self.sweep(sweep)
+        stopped, _ = self.tick(SCRUM_CPU_LOAD_PCT="400")
+        self.assertEqual(sorted(stopped), ["repo/e2e-full", "repo/ui-sweep"])
+        sweep.wait(timeout=5)
+        e2e.wait(timeout=5)
+        self.assertIsNone(job.poll(), "a board job's session keeps running")
+
+    def test_stop_group_guards(self):
+        stop = self.serve.stop_group
+        with mock.patch.object(self.serve.os, "killpg", side_effect=AssertionError("signalled")):
+            for pid in (1, 0, -5, None, os.getpid()):  # never pid 1 or below, never serve's own group
+                self.assertFalse(stop(pid, 0), pid)
+        for err in (ProcessLookupError, PermissionError):
+            with mock.patch.object(self.serve.os, "getpgid", return_value=4242), \
+                    mock.patch.object(self.serve.os, "killpg", side_effect=err):
+                self.assertFalse(stop(4242, 0))
+        self.assertFalse(stop(2 ** 22 - 3, 0), "no such pid")
+
+    def test_hot_stop_error_never_stops_the_tick(self):
+        err = io.StringIO()
+        with mock.patch.object(self.serve, "hot_stop_tick", side_effect=RuntimeError("boom")), \
+                mock.patch.object(self.serve.board, "projects", return_value={}), \
+                mock.patch.object(self.serve.board, "record_cpu_sample"), \
+                mock.patch.object(self.serve, "e2e_lock_reap"), mock.patch.object(self.serve, "write_shop_room"), \
+                mock.patch.object(self.serve, "agent_links_tick"), \
+                mock.patch.object(self.serve.board, "ram_room", return_value=0) as room, \
+                contextlib.redirect_stderr(err):
+            try:
+                self.serve.watchdog_tick()
+            except Exception:
+                pass  # the rest of the tick may need more fakes; only the order matters here
+        self.assertIn("watchdog: hot stop: boom", err.getvalue())
+        room.assert_called()  # the tick went on past the failed hot stop
+        self.assertIn("hot_stop_tick once", self.serve.watchdog_tick.__doc__)
+
+
+class HandStartHoldTest(unittest.TestCase):
+    """Job 1312: Run now and Start now on a hot Mac queue the job for the shop Mac (board.HeldStart), and
+    play_queue_tick keeps a manual queued start while this Mac is hot."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        base = Path(cls.tmp.name)
+        cls.stub_log = base / "calls.jsonl"
+        stub = base / "claude"
+        stub.write_text(STUB)
+        stub.chmod(0o755)
+        os.environ.update(SCRUM_CLAUDE=str(stub), STUB_LOG=str(cls.stub_log), SCRUM_REGISTRY=str(base / "projects.json"),
+                          SCRUM_ROUTE="cloud")
+        import serve
+        serve.CLAUDE = serve.board.CLAUDE = str(stub)
+        cls.serve = serve
+        cls.root = base / "repo" / "scrum"
+        (cls.root / "jobs").mkdir(parents=True)
+        serve.board.cmd_register(base / "repo")
+        cls.server = serve.make_server(0)
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        os.environ["SCRUM_REGISTRY"] = DEFAULT_REGISTRY
+        os.environ.pop("SCRUM_ROUTE", None)
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        self.stub_log.unlink(missing_ok=True)
+        (self.root / "board.json").write_text('{"jobs": []}')
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] CSV export\n")
+        for p in (mock.patch.object(self.serve.board, "session_alive_fn", return_value=lambda job: False),
+                  mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400")):
+            p.start()
+            self.addCleanup(p.stop)
+        self.serve.RUNS.clear()
+        self.addCleanup(self.serve.RUNS.clear)
+
+    def post(self, path, body):
+        r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/p/repo{path}", method="POST",
+                                   headers={"Content-Type": "application/json"}, data=json.dumps(body).encode())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with urllib.request.urlopen(r) as res:
+                return res.status, json.loads(res.read()), err.getvalue()
+
+    def job(self, job_id):
+        return self.serve.board.find(self.serve.board.read_board(self.root), job_id)
+
+    def assert_held(self, job_id, err):
+        job = self.job(job_id)
+        self.assertEqual(job["queued_launch"]["action"], "start")
+        self.assertTrue(job["play_queued_manual"])
+        self.assertIn("hot_mac", (self.root / "jobs" / job_id / "queue-gates.txt").read_text().split())
+        self.assertIn(f"spawn held: repo/{job_id} start: job {job_id} queued, not started on this Mac: CPU load 400%", err)
+        time.sleep(0.2)
+        self.assertFalse(self.stub_log.exists(), "the stub claude never ran")
+
+    def test_run_now_on_hot_mac_queues(self):
+        code, out, err = self.post("/backlog/run", {"index": 0})
+        self.assertEqual(code, 202)
+        self.assert_held(out["id"], err)
+
+    def test_start_now_on_hot_mac_stays_queued(self):
+        job_id = self.serve.board.cmd_new(self.root, "Held start")
+        self.serve.board.cmd_set(self.root, job_id, ["stage=spec"])
+        with self.serve.board.locked_board(self.root) as b:
+            live = self.serve.board.find(b, job_id)
+            live["play_queued"] = self.serve.board.now()
+            live["queued_launch"] = {"action": "start", "prompt": f"/trevskills-scrum start {job_id}", "stage": "spec"}
+        code, out, err = self.post(f"/jobs/{job_id}/resume", {"manual": True})
+        self.assertEqual(code, 202)
+        self.assertEqual(out["id"], job_id)
+        self.assert_held(job_id, err)
+
+    def test_off_board_spawn_swallows_held_start(self):
+        with mock.patch.object(self.serve.board, "spawn", side_effect=self.serve.board.HeldStart("x")), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(self.serve.spawn("repo", self.root, "999-gone", "start", "/p"))
+        self.assertIn("spawn held: repo/999-gone start: x", err.getvalue())
+
+    def test_play_queue_tick_holds_manual_start_while_hot(self):
+        job_id = self.serve.board.cmd_new(self.root, "Held start")
+        self.serve.board.cmd_set(self.root, job_id, ["stage=spec"])
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(self.serve.spawn("repo", self.root, job_id, "start", f"/trevskills-scrum start {job_id}",
+                                               manual=True))
+            jobs = self.serve.board.read_board(self.root)["jobs"]
+            self.serve.play_queue_tick("repo", self.root, jobs)
+        self.assertFalse(self.stub_log.exists())
+        self.assertEqual(self.job(job_id)["queued_launch"]["action"], "start", "still queued while hot")
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="1"):
+            jobs = self.serve.board.read_board(self.root)["jobs"]
+            self.assertTrue(self.serve.play_queue_tick("repo", self.root, jobs))
+        for _ in range(100):
+            if self.stub_log.exists():
+                break
+            time.sleep(0.05)
+        self.assertIn(f"/trevskills-scrum start {job_id}", self.stub_log.read_text())
+        self.assertNotIn("queued_launch", self.job(job_id))
+
+
 class UiSweepTickTest(unittest.TestCase):
     """serve.py ui_sweep_tick: a later visual re-check of the screens merged on main, on e2e_full_due's schedule
     (job 894). board._git, board.machine_ok and serve.spawn are mocked."""
@@ -13415,6 +13760,29 @@ class UiSweepTickTest(unittest.TestCase):
             self.record(**rec)
             self.count = count
             self.assertEqual(self.tick()[1].call_count, 1, rec)
+
+    def test_loaded_record_keeps_since(self):
+        """Job 1312: a stopped sweep (`loaded`) leaves its range to the next one, as a running or error record does."""
+        self.due_with_targets(86400)
+        self.record(at=time.time() - 86400, head="older", result="loaded", since="s0", reason="CPU load")
+        spawn, _ = self.tick()
+        self.assertEqual(spawn.call_count, 1)
+        self.assertEqual(self.read()["since"], "s0")
+
+    def test_spawn_snapshots_listeners_first(self):
+        self.due_with_targets(86400)
+        seen = []
+        with mock.patch.object(self.serve.board, "listeners", return_value=[(1, 3000, "/x")]):
+            self.serve.UI_SWEEP_BEFORE.clear()
+            self.addCleanup(self.serve.UI_SWEEP_BEFORE.clear)
+            with mock.patch.object(self.serve, "spawn", side_effect=lambda *a, **k: seen.append(
+                    dict(self.serve.UI_SWEEP_BEFORE))), \
+                    mock.patch.object(self.serve.board, "_git", side_effect=self.git), \
+                    mock.patch.object(self.serve, "e2e_queue_free", return_value=True), \
+                    mock.patch.object(self.serve.board, "machine_ok", return_value=None), \
+                    mock.patch.object(self.serve.board, "ui_sweep_targets", return_value=self.targets):
+                self.serve.ui_sweep_tick("p", self.repo, self.root)
+        self.assertEqual(seen, [{"p": [(1, 3000, "/x")]}])
 
     def test_no_targets_records_head(self):
         spawn, targets = self.tick()
