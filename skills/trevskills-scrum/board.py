@@ -1973,7 +1973,7 @@ def _model_family(model):
 def _token_reasons(job, usd, groups, lane_median, top):
     """write_tokens' ## Flagged reasons for one job, in the fixed order: pricier model than the agent's pin, over
     TOKENS_FLAG median_x its lane median, a top-cost job, one of 2 or more agents over agent_share of the job, a
-    reviewer's later round at round_share or more of its round 1. (write_tokens adds _two_sessions after them.)"""
+    reviewer's later round at round_share or more of its round 1. (write_tokens adds _two_sessions and _two_agents after them.)"""
     out, by_agent, by_round = [], {}, {}
     for (agent, rnd, model), (_, a) in groups.items():
         by_agent[agent] = by_agent.get(agent, 0) + a
@@ -2017,6 +2017,32 @@ def _two_sessions(rows):
             if agent2 == agent and a["parent"] != b["parent"] and a["lo"] < b["hi"] and b["lo"] < a["hi"]:
                 short = min(a, b, key=lambda x: (x["hi"] - x["lo"], x["usd"]))
                 out.append(f"two sessions: {agent} {hm(a['lo'])}-{hm(a['hi'])} and {hm(b['lo'])}-{hm(b['hi'])}, "
+                           f"wasted ${short['usd']:.2f}")
+    return out
+
+
+def _two_agents(rows):
+    """write_tokens' `two agents` reasons for one job's rows: every pair of subagent transcripts of the same agent type
+    under the SAME parent session, naming the same job in their own first prompt (row `prompt_job`), whose spans overlap.
+    Runs with no prompt job or the unknown agent `subagent` are skipped. Reads `two agents: <agent> HH:MM-HH:MM and
+    HH:MM-HH:MM, wasted $x`, the USD being the shorter run's (local time)."""
+    runs = {}
+    for r in rows:
+        p = Path(r["transcript"])
+        pj = r.get("prompt_job")
+        if p.parent.name != "subagents" or r["agent"] == "subagent" or not isinstance(pj, str) or not pj:
+            continue
+        run = runs.setdefault((r["agent"], str(p)), {"parent": p.parent.parent, "job": pj, "lo": r["ts"],
+                                                     "hi": r["ts"], "usd": 0})
+        run["lo"], run["hi"], run["usd"] = min(run["lo"], r["ts"]), max(run["hi"], r["ts"]), run["usd"] + row_cost(r)
+    out, hm = [], lambda t: datetime.fromtimestamp(t).strftime("%H:%M")
+    items = sorted(runs.items(), key=lambda kv: (kv[0][0], kv[1]["lo"], kv[0][1]))
+    for i, ((agent, _), a) in enumerate(items):
+        for (agent2, _), b in items[i + 1:]:
+            if agent2 == agent and a["parent"] == b["parent"] and a["job"] == b["job"] \
+                    and a["lo"] < b["hi"] and b["lo"] < a["hi"]:
+                short = min(a, b, key=lambda x: (x["hi"] - x["lo"], x["usd"]))
+                out.append(f"two agents: {agent} {hm(a['lo'])}-{hm(a['hi'])} and {hm(b['lo'])}-{hm(b['hi'])}, "
                            f"wasted ${short['usd']:.2f}")
     return out
 
@@ -2114,7 +2140,8 @@ def write_tokens(root, digest_id):
         medians[ln] = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
     out += ["", "## Flagged"]
     for j in ranked:
-        reasons = _token_reasons(j, costs[j][1], groups[j], medians[lane[j]], top) + _two_sessions(by_job[j])
+        reasons = _token_reasons(j, costs[j][1], groups[j], medians[lane[j]], top) + _two_sessions(by_job[j]) \
+            + _two_agents(by_job[j])
         if reasons:
             out.append(f"- {j} · ${costs[j][1]:.2f} · " + "; ".join(reasons))
             out += _costliest_detail(by_job[j])
@@ -4857,7 +4884,8 @@ def read_transcript(path):
 def transcript_tokens(start, end, projects_dir=None):
     """One row per Claude Code assistant message stamped in [start, end) (epoch seconds), sorted by ts: token counts,
     model, the project, job, agent and skill it is attributed to, its `round` (prompt_round of that file's own first
-    prompt; a subagent never inherits its parent's) and its `transcript` path as a str. Reads <dir>/*/*.jsonl (main sessions) and
+    prompt; a subagent never inherits its parent's), `prompt_job` (the job that file's own first prompt names, else None,
+    before a subagent falls back to its parent's job) and its `transcript` path as a str. Reads <dir>/*/*.jsonl (main sessions) and
     <dir>/*/<session>/subagents/agent-*.jsonl; files last written before start are never opened. Read-only."""
     root = Path(projects_dir) if projects_dir else transcripts_dir()
     repos = sorted(((n, p.resolve()) for n, p in projects().items()), key=lambda r: -len(r[1].parts))
@@ -4894,6 +4922,7 @@ def transcript_tokens(start, end, projects_dir=None):
         seen.add(real)
         rows, first = read_transcript(path)
         job, skill = first_prompt_tags(first)
+        prompt_job = job or None
         rnd = prompt_round(first)
         if path.parent.name == "subagents":
             pjob, skill = tags.get(path.parent.parent.with_suffix(".jsonl"), (None, None))
@@ -4910,7 +4939,7 @@ def transcript_tokens(start, end, projects_dir=None):
             if start <= row["ts"] < end:
                 project, wt = place(row.pop("cwd"))
                 out.append({**row, "project": project, "job": wt or job, "agent": agent, "skill": skill,
-                            "round": rnd, "transcript": str(path)})
+                            "round": rnd, "prompt_job": prompt_job, "transcript": str(path)})
     return sorted(out, key=lambda r: r["ts"])
 
 

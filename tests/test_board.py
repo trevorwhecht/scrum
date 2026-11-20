@@ -12498,10 +12498,10 @@ class TranscriptTokensTest(unittest.TestCase):
         self.assertEqual(self.rows(), [
             {"ts": T0 + 1.0, "input_tokens": 3, "output_tokens": 40, "cache_read_input_tokens": 500,
              "cache_creation_input_tokens": 60, "model": "claude-y", "project": None, "job": None,
-             "agent": "main", "skill": None, "round": 3, "transcript": str(path)},
+             "agent": "main", "skill": None, "round": 3, "prompt_job": None, "transcript": str(path)},
             {"ts": T0 + 2.0, "input_tokens": 7, "output_tokens": 0, "cache_read_input_tokens": 0,
              "cache_creation_input_tokens": 0, "model": "claude-x", "project": None, "job": None,
-             "agent": "main", "skill": None, "round": 3, "transcript": str(path)}])
+             "agent": "main", "skill": None, "round": 3, "prompt_job": None, "transcript": str(path)}])
 
     def test_transcript_tokens_window_bounds(self):
         self.write("p/s1.jsonl", [reply(T0 - 1, "a", input_tokens=1), reply(T0, "b", input_tokens=2),
@@ -12559,6 +12559,8 @@ class TranscriptTokensTest(unittest.TestCase):
         (sub / "agent-dd.meta.json").write_text(json.dumps(["scrum-builder"]))
         self.write("q/orphan/subagents/agent-ee.jsonl", [reply(T0 + 5, "v", input_tokens=6)])
         got = [(r["input_tokens"], r["agent"], r["job"], r["skill"]) for r in self.rows()]
+        self.assertEqual({r["input_tokens"]: r["prompt_job"] for r in self.rows()},
+                         {1: "125-z", 2: "200-own", 3: None, 4: None, 5: None, 6: None})
         self.assertEqual(got, [(1, "main", "125-z", "trevskills-scrum"),
                                (2, "scrum-builder", "200-own", "trevskills-scrum"),
                                (3, "subagent", "125-z", "trevskills-scrum"),

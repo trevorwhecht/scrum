@@ -179,10 +179,12 @@ class WriteTokensTest(unittest.TestCase):
     def main(self, sid, job, lines, extra=""):
         return write_lines(self.dir / "p" / f"{sid}.jsonl", [prompt(f"JOB_DIR=/x/scrum/jobs/{job}{extra}")] + lines)
 
-    def sub(self, sid, aid, agent, job, rnd, lines):
-        p = write_lines(self.dir / "p" / sid / "subagents" / f"agent-{aid}.jsonl",
-                        [prompt(f"JOB_DIR=/x/scrum/jobs/{job}\nROUND={rnd}")] + lines)
-        p.with_name(f"agent-{aid}.meta.json").write_text(json.dumps({"agentType": agent}))
+    def sub(self, sid, aid, agent, job, rnd, lines, meta=True):
+        """job None writes a prompt with no JOB_DIR=; meta False writes no meta.json."""
+        text = f"JOB_DIR=/x/scrum/jobs/{job}\nROUND={rnd}" if job else "do a thing"
+        p = write_lines(self.dir / "p" / sid / "subagents" / f"agent-{aid}.jsonl", [prompt(text)] + lines)
+        if meta:
+            p.with_name(f"agent-{aid}.meta.json").write_text(json.dumps({"agentType": agent}))
         return p
 
     def tokens(self, digest="001"):
@@ -313,6 +315,45 @@ class WriteTokensTest(unittest.TestCase):
         self.assertEqual(self.two_sessions(("s1", 0, 600, 3), ("s2", 900, 1200, 1)), [])  # no overlap
         self.assertEqual(self.two_sessions(("s1", 0, 600, 3), ("s1", 300, 1200, 1)), [])  # one parent session
         self.assertEqual(len(self.two_sessions(("s1", 0, 600, 3), ("s2", 300, 1200, 1), agent="scrum-review-ui")), 1)
+
+    def two_agents(self, runs, jobs=("1-a",)):
+        """runs: (parent, agent, job, t0, t1, usd[, meta]) tuples; returns the `two agents` lines of ## Flagged."""
+        self.board_jobs(*[(j, None) for j in jobs])
+        self.jobs_txt(*jobs)
+        for old in (self.dir / "p").glob("s*"):
+            shutil.rmtree(old, ignore_errors=True)
+        for i, (sid, agent, job, t0, t1, usd, *meta) in enumerate(runs):
+            self.sub(sid, f"y{i}", agent, job, 0, self.span(t0, t1, usd, f"r{i}_"), meta=not meta)
+        text = self.tokens()
+        flagged = text[text.index("## Flagged\n"):] if "## Flagged\n" in text else ""
+        return [l for l in flagged.splitlines() if "two agents" in l]
+
+    def test_two_agents_flag(self):
+        hm = lambda t: datetime.fromtimestamp(self.t + t).strftime("%H:%M")
+        runs = [("s1", "scrum-builder", "1-a", 0, 600, 3), ("s1", "scrum-builder", "1-a", 300, 1200, 1)]
+        got = self.two_agents(runs)
+        self.assertEqual(len(got), 1)
+        self.assertIn(f"two agents: scrum-builder {hm(0)}-{hm(600)} and {hm(300)}-{hm(1200)}, wasted $3.00", got[0])
+        text = self.tokens()
+        self.assertIn("1-a", text[text.index("## Flagged\n"):])
+        got = self.two_agents([(a, "scrum-review-ui", *r) for a, _, *r in runs])
+        self.assertEqual(len(got), 1)
+        self.assertIn("two agents: scrum-review-ui ", got[0])
+
+    def test_two_agents_not_flagged_without_overlap_other_parent_or_other_agent(self):
+        b = "scrum-builder"
+        self.assertEqual(self.two_agents([("s1", b, "1-a", 0, 600, 3), ("s1", b, "1-a", 900, 1200, 1)]), [])
+        self.assertEqual(self.two_agents([("s1", b, "1-a", 0, 600, 3), ("s2", b, "1-a", 300, 1200, 1)]), [])
+        self.assertEqual(self.two_agents([("s1", "scrum-review-code", "1-a", 0, 600, 3),
+                                          ("s1", "scrum-review-ui", "1-a", 300, 1200, 1)]), [])
+
+    def test_two_agents_keyed_on_prompt_job(self):
+        w = "scrum-spec-writer"
+        self.assertEqual(self.two_agents([("s1", w, "1-a", 0, 600, 3), ("s1", w, "2-b", 300, 1200, 1)],
+                                         jobs=("1-a", "2-b")), [])
+        self.assertEqual(self.two_agents([("s1", w, None, 0, 600, 3), ("s1", w, None, 300, 1200, 1)]), [])
+        self.assertEqual(self.two_agents([("s1", w, "1-a", 0, 600, 3, "nometa"),
+                                          ("s1", w, "1-a", 300, 1200, 1, "nometa")]), [])
 
     def test_empty_and_missing_inputs(self):
         self.board_jobs(("1-a", None))
