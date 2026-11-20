@@ -1,4 +1,4 @@
-import json, os, shutil, subprocess, sys, tempfile, threading, unittest
+import hashlib, json, os, shutil, subprocess, sys, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -12,7 +12,12 @@ BACKLOG = ("# Backlog\n"
            "- [x] Finished prerequisite {#done} → 002-done\n"
            "- [ ] Plain item\n"
            "- [ ] Waiting item {needs #base #gone}\n"
-           "- [ ] Met item {needs #done}\n")
+           "- [ ] Met item {needs #done}\n"
+           "- [ ] Cross repo item {after needs-repo:1600}\n"  # job 1232: a job this registered repo's board lacks blocks
+           "- [ ] Looping item\n")  # ... and three requeue aborts in a row hold it (board.py requeue_loop)
+LOOPS = [{"id": f"00{n}-looping-item", "title": "Looping item", "stage": "aborted", "files": [],
+          "reason": "requeue: shop session ended without a PR", "updatedAt": f"2026-11-19T1{n}:00:00+00:00"} for n in (3, 4, 5)]
+LOOPS[-1]["requeued"] = hashlib.sha1(b"Looping item").hexdigest()[:12]
 
 # Drives the real dashboard in headless Chromium against a real serve.py. Prints one JSON line: {"skip": why} when
 # Playwright or Chromium is missing, else what WIDTH measured in the Backlog dialog.
@@ -68,7 +73,7 @@ class DashboardBacklogNeedsBrowserTest(unittest.TestCase):
         (self.repo / "scrum" / "backlog.md").write_text(BACKLOG)
         (self.repo / "scrum" / "board.json").write_text(json.dumps({"jobs": [
             {"id": "001-base", "title": "Base", "stage": "build", "files": []},
-            {"id": "002-done", "title": "Done", "stage": "done", "files": []}]}))
+            {"id": "002-done", "title": "Done", "stage": "done", "files": []}, *LOOPS]}))
         registry = Path(self.tmp.name) / "projects.json"
         registry.write_text(json.dumps([str(self.repo)]))
         patcher = mock.patch.dict(os.environ, CLAUDE_HOME=str(user), CLAUDE_MANAGED_DIR=str(managed), SCRUM_REGISTRY=str(registry))
@@ -102,7 +107,7 @@ class DashboardBacklogNeedsBrowserTest(unittest.TestCase):
 
     def check(self, got):
         rows = {r["i"]: r for r in got["rows"]}
-        self.assertEqual(sorted(rows), ["2", "3", "4"], got)
+        self.assertEqual(sorted(rows), ["2", "3", "4", "5", "6"], got)
         plain = rows["2"]
         self.assertIsNone(plain["needs"], got)
         self.assertEqual(plain["tags"], ["SPAN.grip", "SELECT.pts", "TEXTAREA", "BUTTON.btn", "BUTTON.btn", "BUTTON.btn", "BUTTON.btn"], got)
@@ -114,6 +119,12 @@ class DashboardBacklogNeedsBrowserTest(unittest.TestCase):
         met = rows["4"]["needs"]
         self.assertEqual(met["text"], "waits on: Finished prerequisite", got)
         self.assertTrue(met["muted"], got)
+        cross = rows["5"]["needs"]
+        self.assertEqual((cross["text"], cross["title"], cross["muted"]),
+                         ("waits on: needs-repo job 1600", "needs-repo job 1600", False), got)
+        loop = rows["6"]["needs"]
+        self.assertEqual((loop["text"], loop["title"], loop["muted"]), (
+            "waits on: an edit (3 requeues in 24 h)", "an edit: its last 3 claims were requeue aborts within 24 h", False), got)
         self.assertEqual(got["blError"], "backlog item 3 waits on #base", got)
         self.assertTrue(got["dialogOpen"], got)
         self.spawn.assert_not_called()

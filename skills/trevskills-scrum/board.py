@@ -25,10 +25,13 @@
   board.py followup <id> "<fix>"   a Prod check stop's follow-up answer: add "<fix> (from <id>)" to the backlog (once),
                                    then set the job stage=done
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
-  board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite and
-                                   no {setup: …} Human setup, and no trailing "(from <id>)" job still open, as a new job, print {"id","feature"}
-  board.py cloud-claim <N>         claim up to N open backlog items for the Cloud lane, skipping any that waits
-                                   (prerequisite or Human setup), has no pre-written spec with Likely files, or shares a
+  board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite,
+                                   no {after repo:job} job of another registered repo that is not done, no {setup: …} Human
+                                   setup, no trailing "(from <id>)" job still open, and is not held by the requeue loop
+                                   guard (its last 3 claims were requeue aborts within 24 h, until Trevor edits it), as a
+                                   new job, print {"id","feature"}
+  board.py cloud-claim <N>         claim up to N open backlog items for the Cloud lane, skipping any that waits (as next
+                                   skips it: prerequisite, after, loop guard or Human setup), has no pre-written spec with Likely files, or shares a
                                    Likely file with an earlier pick or a cloud/build job; print {"claimed": [{"id","feature"}, ...]}
   board.py backlog-add [--setup "<step>; <step>"] [--priority N | --top] [--trevor | --back] [--critical] "<item>"...
                                    append "- [ ] <item>" lines to backlog.md
@@ -132,7 +135,8 @@
                                    per batch and the file-overlap rules), print
                                    {"ready","merged","total","in_progress","all_merged","held"}
   board.py runall-start           make a Run-all parent with every open backlog item as a waiting child (needs become
-                                   depends_on; items waiting on an outside job or on Human setup stay open), print {"id","children"}
+                                   depends_on; items waiting on an outside job, an {after repo:job} job, the requeue loop
+                                   guard or Human setup stay open), print {"id","children"}
                                    (id null = nothing to claim); `ready <id>` then schedules them
   board.py runall-start --match <words>  the same for only the open items whose text holds every word (case-insensitive);
                                    the rest stay open, and so does a matching item that needs one of them
@@ -400,13 +404,15 @@ def cmd_new(root, title, job_id=None, unique=False, started_by="hand"):
         return add_job(root, board, title, job_id, started_by)
 
 
-# --- backlog.md: "- [ ] [5] Text {#k3f9} {p:4} {needs #a1b2} {setup: step; step} {by:t} → 003-id <!-- why -->"; points, the id,
-# priority (1-5, highest claimed first), needs, setup and source markers, the job and the estimate's reason are optional.
-# The source marker is {by:t} (Trevor's item) or {by:back} (Trevor's, back of the backlog); no marker means an agent item.
-# An item's text excludes the markers, so its spec_path never changes. A setup marker is a Human setup checklist: next and runall-start skip the item until Setup done. ---
+# --- backlog.md: "- [ ] [5] Text {#k3f9} {p:4} {needs #a1b2} {setup: step; step} {after repo:1600} {by:t} → 003-id <!-- why -->";
+# points, the id, priority (1-5, highest claimed first), needs, setup, after and source markers, the job and the estimate's
+# reason are optional. The source marker is {by:t} (Trevor's item) or {by:back} (Trevor's, back of the backlog); no marker means an agent item.
+# An item's text excludes the markers, so its spec_path never changes. A setup marker is a Human setup checklist: next and runall-start skip the item until Setup done.
+# An after marker names jobs on other registered repos' boards (repo:job, space-separated): next, cloud-claim and runall-start skip the item until each is done. ---
 FIB = (1, 2, 3, 5, 8, 13)
+AFTER_REF = r"[\w./-]+:\d+(?:-[a-z0-9-]+)?"  # one {after} ref: a registered repo's folder or dashboard name, then a job number or id
 ITEM_RE = re.compile(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*?)(?: \{#([a-z0-9]{4})\})?(?: \{p:([1-5])\})?(?: \{needs((?: #[a-z0-9]{4})+)\})?"
-                     r"(?: \{setup: ([^{}]*)\})?(?: \{by:(t|back)\})?(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
+                     r"(?: \{setup: ([^{}]*)\})?(?: \{after((?: " + AFTER_REF + r")+)\})?(?: \{by:(t|back)\})?(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
 ID_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
 KEEP = object()
 ITEM_MAX = 2000  # backlog item text; long enough that a triage merge keeps every original requirement
@@ -416,14 +422,14 @@ def clean(text, limit=300):
     return re.sub(r"\s+", " ", str(text).replace("<!--", "").replace("-->", "")).strip()[:limit]
 
 
-LOOSE_MARK_RE = re.compile(r" \{(?:#[a-z0-9]{4}|p:[1-5]|needs(?: #[a-z0-9]{4})+|setup: [^{}]*|by:(?:t|back))\}| → \d{3,}-[a-z0-9-]+")
+LOOSE_MARK_RE = re.compile(r" \{(?:#[a-z0-9]{4}|p:[1-5]|needs(?: #[a-z0-9]{4})+|setup: [^{}]*|after(?: " + AFTER_REF + r")+|by:(?:t|back))\}| → \d{3,}-[a-z0-9-]+")
 LOOSE_WHY_RE = re.compile(r" <!-- (.*?) -->")
 
 
 def loose_item(line):
     """ITEM_RE's groups for a backlog line, with the markers in any order: the text ends at the first well-formed marker
     (or the trailing estimate comment) when only markers follow it, else ITEM_RE decides, so prose that mentions marker
-    syntax stays text. A repeated {p:N} keeps the lowest N. None when it is not an item line."""
+    syntax stays text. A repeated {p:N} keeps the lowest N; repeated needs or after markers join. None when it is not an item line."""
     m = re.match(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*)$", line)
     if not m:
         return None
@@ -438,8 +444,9 @@ def loose_item(line):
     one = lambda pat: (re.search(pat, tail) or [None, None])[1]
     prios = re.findall(r" \{p:([1-5])\}", tail)
     needs = "".join(re.findall(r" \{needs((?: #[a-z0-9]{4})+)\}", tail))
+    after = "".join(re.findall(r" \{after((?: " + AFTER_REF + r")+)\}", tail))
     return (m[1], m[2], text, one(r" \{#([a-z0-9]{4})\}"), min(prios) if prios else None, needs or None,
-            one(r" \{setup: ([^{}]*)\}"), one(r" \{by:(t|back)\}"), (re.search(r" → (\d{3,}-[a-z0-9-]+)", re.sub(r" \{setup: [^{}]*\}", "", tail)) or [None, None])[1], why[1] if why else None)
+            one(r" \{setup: ([^{}]*)\}"), after or None, one(r" \{by:(t|back)\}"), (re.search(r" → (\d{3,}-[a-z0-9-]+)", re.sub(r" \{setup: [^{}]*\}", "", tail)) or [None, None])[1], why[1] if why else None)
 
 
 def read_backlog(root):
@@ -449,11 +456,12 @@ def read_backlog(root):
     items = []
     for n, line in enumerate(lines):
         if g := loose_item(line):
-            done, pts, text, item_id, prio, needs, setup, by, job, why = g
+            done, pts, text, item_id, prio, needs, setup, after, by, job, why = g
             items.append({"index": len(items), "line": n, "done": done == "x",
                           "points": int(pts) if pts and pts.isdigit() else None, "text": text.strip(), "why": why, "job": job,
                           "id": item_id, "priority": int(prio) if prio else None, "needs": needs.replace("#", "").split() if needs else [],
-                          "setup": [s.strip() for s in setup.split(";") if s.strip()] if setup else [], "by": by})
+                          "setup": [s.strip() for s in setup.split(";") if s.strip()] if setup else [],
+                          "after": list(dict.fromkeys(after.split())) if after else [], "by": by})
     return lines, items
 
 
@@ -463,6 +471,7 @@ def format_item(item):
             + (f" {{p:{item['priority']}}}" if item.get("priority") else "")
             + (" {needs " + " ".join(f"#{n}" for n in item["needs"]) + "}" if item.get("needs") else "")
             + (" {setup: " + "; ".join(item["setup"]) + "}" if item.get("setup") else "")
+            + (" {after " + " ".join(item["after"]) + "}" if item.get("after") else "")
             + (f" {{by:{item['by']}}}" if item.get("by") else "")
             + (f" → {item['job']}" if item["job"] else "") + (f" <!-- {item['why']} -->" if item["why"] else ""))
 
@@ -476,14 +485,67 @@ def new_item_id(items):
 
 
 def waiting_on(item, items, board):
-    """The ids in item's needs that still block it: a line with that id is open, or is claimed by a job whose board
-    stage is not done or aborted. An id no line carries, a closed line with no job, or a job missing from the board
-    does not block."""
-    if not item["needs"]:
-        return []  # most items: skip building the board's stage map
-    stage = {j.get("id"): j.get("stage") for j in board.get("jobs") or []}
-    blocks = lambda i: not i["done"] or (i["job"] in stage and stage[i["job"]] not in ("done", "aborted"))
-    return [n for n in item["needs"] if any(i["id"] == n and blocks(i) for i in items)]
+    """What still blocks item, in this order. First the ids in its needs whose line is open, or is claimed by a job whose
+    board stage is not done or aborted (an id no line carries, a closed line with no job, or a job missing from the board
+    does not block). Then each {after repo:job} ref that after_blocks, as written. Then REQUEUE_LOOP while requeue_loop
+    holds it. wait_label names each one."""
+    out = []
+    if item["needs"]:  # most items: skip building the board's stage map
+        stage = {j.get("id"): j.get("stage") for j in board.get("jobs") or []}
+        blocks = lambda i: not i["done"] or (i["job"] in stage and stage[i["job"]] not in ("done", "aborted"))
+        out = [n for n in item["needs"] if any(i["id"] == n and blocks(i) for i in items)]
+    return out + [a for a in item.get("after") or [] if after_blocks(a)] + requeue_loop(item, board)
+
+
+def after_blocks(ref):
+    """False only once the job a cross-repo {after repo:job} ref names is done on its own board. repo is a registered
+    project's folder or dashboard name (projects(), any case); job is its full id, or a number equal to the id's leading
+    number. An unregistered repo, an unreadable board, a job that board does not list, or one in any other stage (aborted
+    too: what the item waits on never landed) blocks, so a typo shows on the dashboard instead of claiming early."""
+    repo, _, job = ref.rpartition(":")
+    path = next((p for name, p in projects().items() if repo.casefold() in (name.casefold(), p.name.casefold())), None)
+    if path is None:
+        return True
+    try:
+        jobs = read_board(path / "scrum").get("jobs") or []
+    except (SystemExit, OSError, AttributeError):  # read_board exits on bad JSON; a non-dict board has no .get
+        return True
+    num = lambda i: int(m[1]) if (m := re.match(r"(\d+)(?:-|$)", str(i))) else None
+    same = (lambda i: i == job) if "-" in job else (lambda i: num(i) == int(job))
+    return not any(isinstance(j, dict) and same(j.get("id")) and j.get("stage") == "done" for j in jobs)
+
+
+LOOP_CLAIMS, LOOP_HOURS = 3, 24  # requeue_loop: this many requeue aborts in a row, spanning at most this many hours, hold an item
+REQUEUE_LOOP = "requeue loop"  # requeue_loop's waits entry; wait_label and the dashboard's needsTag name it
+
+
+def requeue_loop(item, board):
+    """[REQUEUE_LOOP] while an open item's last LOOP_CLAIMS claims were all requeue aborts within LOOP_HOURS, else [].
+    Its claims are the board jobs titled short_title of its text, in board order. All of them must be aborted with a
+    "requeue:" reason, their updatedAt span at most LOOP_HOURS, and the newest must have put back this very line (its
+    `requeued` equals item_key(item)). There is no expiry: it holds until Trevor edits the text or adds a needs or after
+    marker, which changes item_key. A newest job from before requeue_job recorded `requeued` never holds."""
+    if item["done"]:
+        return []
+    title = short_title(item["text"])
+    last = [j for j in board.get("jobs") or [] if isinstance(j, dict) and j.get("title") == title][-LOOP_CLAIMS:]
+    if len(last) < LOOP_CLAIMS or last[-1].get("requeued") != item_key(item) \
+            or not all(j.get("stage") == "aborted" and str(j.get("reason") or "").startswith("requeue:") for j in last):
+        return []
+    try:
+        at = [datetime.fromisoformat(j["updatedAt"]) for j in last]
+        return [REQUEUE_LOOP] if max(at) - min(at) <= timedelta(hours=LOOP_HOURS) else []
+    except (KeyError, TypeError, ValueError):  # a missing or unreadable time, or naive and aware ones mixed
+        return []
+
+
+def wait_label(wait):
+    """One waiting_on entry as words: #<id> for a needs id, "<repo> job <job>" for an after ref, and what to do for
+    REQUEUE_LOOP."""
+    if wait == REQUEUE_LOOP:
+        return f"an edit: its last {LOOP_CLAIMS} claims were requeue aborts within {LOOP_HOURS} h"
+    repo, colon, job = wait.rpartition(":")
+    return f"{repo} job {job}" if colon else f"#{wait}"
 
 
 def origin_open(item, board):
@@ -717,9 +779,20 @@ def cmd_rank_backlog(root, all_items=False) -> dict:
     return {"rated": written, "unrated": len(todo) - written, "skipped": len(items) - len(todo)}
 
 
+def text_key(text):
+    """The first 12 hex chars of text's sha1: spec_path's file name and item_key's value."""
+    return hashlib.sha1(text.encode()).hexdigest()[:12]
+
+
+def item_key(item):
+    """text_key of a backlog item's text plus its needs and after markers: what Trevor's edit changes, while an
+    estimate, a priority or Setup done does not. requeue_job records it as `requeued`; requeue_loop compares it."""
+    return text_key(" ".join([item["text"], *(f"#{n}" for n in item.get("needs") or []), *(item.get("after") or [])]))
+
+
 def spec_path(root, text):
     """Where a backlog item's pre-written spec waits, keyed by its stored text."""
-    return Path(root) / "backlog-specs" / (hashlib.sha1(text.encode()).hexdigest()[:12] + ".md")
+    return Path(root) / "backlog-specs" / (text_key(text) + ".md")
 
 
 def drop_spec(root, text, items):
@@ -765,7 +838,7 @@ def cmd_next(root, index=None, shop=None):
             if item["setup"]:
                 raise SystemExit(f"backlog item {index} waits on Human setup")
             if waits := waiting_on(item, items, board):
-                raise SystemExit(f"backlog item {index} waits on " + ", ".join(f"#{n}" for n in waits))
+                raise SystemExit(f"backlog item {index} waits on " + ", ".join(map(wait_label, waits)))
             if origin := origin_open(item, board):
                 raise SystemExit(f"backlog item {index} waits on job {origin}")
         job_id = add_job(root, board, short_title(item["text"]),
@@ -778,7 +851,8 @@ def cmd_next(root, index=None, shop=None):
 
 def cmd_cloud_claim(root, n) -> dict:
     """Claim up to n open backlog items for cloud sessions, in priority order (priority_key), under one lock and one backlog write.
-    An item is skipped (left open) when it waits on a prerequisite or Human setup, has no pre-written spec with readable Likely files,
+    An item is skipped (left open) when it waits (waiting_on: a needs or after marker, or the requeue loop guard) or on Human
+    setup, has no pre-written spec with readable Likely files,
     or shares a Likely file with an item claimed in this call or with a board job in stage cloud or build, or in stage spec
     carrying cloudClaim (claimed here, not yet moved to cloud). Such a job with no readable Likely files may touch
     anything, so it blocks every item."""
@@ -861,18 +935,25 @@ def abort_job(root, job, requeue, reason):
 
 
 def requeue_job(root, job, folder, feature):
+    """Put an aborted job's item back on the backlog: its claimed line reopened in place when there is no feature.md,
+    else a new line with feature.md's text (the title with neither). Caller holds the lock. job["requeued"] records the
+    item_key of the line put back, as the next read parses it, for requeue_loop."""
     lines, items = read_backlog(root)
     claimed = next((i for i in items if i["job"] == job["id"]), None)
     if claimed and not feature.exists():
         claimed.update(done=False, job=None)
-        lines[claimed["line"]] = format_item(claimed)
+        at = claimed["line"]
+        lines[at] = format_item(claimed)
         if (folder / "spec.md").is_file():
             spec_path(root, claimed["text"]).parent.mkdir(exist_ok=True)
             os.replace(folder / "spec.md", spec_path(root, claimed["text"]))
     else:
         text = clean(feature.read_text() if feature.exists() else job["title"], ITEM_MAX) or job["title"]
         lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None}))
+        at = len(lines) - 1
     write_backlog(root, lines)
+    if back := next((i for i in read_backlog(root)[1] if i["line"] == at), None):
+        job["requeued"] = item_key(back)
 
 
 def md_section(text, heading):
@@ -4392,6 +4473,7 @@ def cmd_triage_apply(root, triage_id):
                             "priority": source_priority(by, n, critical=(by is None and n == 5), current=n),
                             "needs": list(dict.fromkeys(n for i in got for n in i["needs"] if n not in own)),
                             "setup": list(dict.fromkeys(st for i in got for st in i["setup"])),  # still waits on setup
+                            "after": list(dict.fromkeys(a for i in got for a in i["after"])),  # and on other repos' jobs
                             "by": by}
                     merged.append(item)
                     remap.update((n, item) for n in own)
@@ -5305,7 +5387,8 @@ def match_words(text, match):
 
 def cmd_runall_start(root, match=None):
     """One Run-all parent whose waiting children are every open backlog item, claimed in priority order (priority_key) under the lock.
-    An item that waits, directly or through its prerequisites, on a job claimed outside this run stays open. A child
+    An item that waits, directly or through its prerequisites, on a job claimed outside this run stays open, and so does
+    one held by an {after repo:job} marker or the requeue loop guard (waiting_on), with every item that needs it. A child
     whose item needs another item claimed here depends_on that sibling's child. An item waiting on Human setup stays
     open, and so does every item that needs it. With match only items match_words accepts are claimed: the rest are held,
     so a matching item that needs one stays open too. Cool-down refuses it (COOLING_CLAIM)."""
@@ -5313,12 +5396,14 @@ def cmd_runall_start(root, match=None):
         raise SystemExit(COOLING_CLAIM)
     with locked_board(root) as board:
         lines, items = read_backlog(root)
+        waits = {i["index"]: waiting_on(i, items, board) for i in items if not i["done"]}  # once: after refs read other boards
         held = {i["index"] for i in items if not i["done"]  # indexes of open items left open
-                and (i["setup"] or origin_open(i, board) or match is not None and not match_words(i["text"], match))}
+                and (i["setup"] or origin_open(i, board) or any(w not in i["needs"] for w in waits[i["index"]])
+                     or match is not None and not match_words(i["text"], match))}
         while True:
             more = {i["index"] for i in items if not i["done"] and i["index"] not in held
                     and any(o["id"] == n and (o["done"] or o["index"] in held)
-                            for n in waiting_on(i, items, board) for o in items)}
+                            for n in waits[i["index"]] for o in items)}
             if not more:
                 break
             held |= more

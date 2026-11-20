@@ -5068,7 +5068,7 @@ def cached_board(root):
     return data
 
 
-BACKLOG_CACHE = {}  # str(scrum root) -> (stat keys of backlog.md and board.json, board.backlog_items)
+BACKLOG_CACHE = {}  # str(scrum root) -> (stat keys, board.backlog_items, the extra files those keys stat; see cached_backlog_items)
 BACKLOG_CACHE_LOCK = threading.Lock()
 
 
@@ -5083,15 +5083,21 @@ def file_key(path):
 
 def cached_backlog_items(root):
     """GET /api/p/<project>/backlog: board.backlog_items(root), reused while backlog.md and board.json keep their stat
-    (their `waits` read both). Stat is taken first, so a write during the parse only costs one extra parse."""
+    (their `waits` read both). While an open item has an {after repo:job} marker, whose wait reads other projects' boards
+    (board.after_blocks), the registry and every registered project's board.json must keep their stat too. Stat is taken
+    first, so a write during the parse only costs one extra parse."""
     key = (file_key(root / "backlog.md"), file_key(root / "board.json"))
     with BACKLOG_CACHE_LOCK:
         hit = BACKLOG_CACHE.get(str(root))
-    if hit and hit[0] == key:
+    if hit and hit[0] == key + tuple(map(file_key, hit[2])):
         return hit[1]
+    extra = (board.registry_path(), *(p / "scrum" / "board.json" for p in board.projects().values()))
+    stats = tuple(map(file_key, extra))
     items = board.backlog_items(root)
+    if not any(i["after"] and not i["done"] for i in items):
+        extra, stats = (), ()
     with BACKLOG_CACHE_LOCK:
-        BACKLOG_CACHE[str(root)] = (key, items)
+        BACKLOG_CACHE[str(root)] = (key + stats, items, extra)
     return items
 
 
