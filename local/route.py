@@ -36,8 +36,10 @@ RESET = re.compile(r'resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)', r
 
 
 def _codex_installed():
-    """Cloud sessions have no codex binary; Homebrew's bin is often missing from a headless PATH."""
-    return shutil.which('codex', path=os.environ.get('PATH', '') + ':/opt/homebrew/bin') is not None
+    """Cloud sessions have no codex binary; Homebrew's bin (Trevor's Mac) and ~/.local/bin (the shop Mac, from
+    shop.py setup) are often missing from a headless PATH."""
+    path = os.environ.get('PATH', '') + ':/opt/homebrew/bin:' + os.path.expanduser('~/.local/bin')
+    return shutil.which('codex', path=path) is not None
 
 
 def _codex_local_base_url():
