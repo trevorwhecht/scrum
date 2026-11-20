@@ -1350,8 +1350,11 @@ def e2e_full_exec(repo, cmd, env, log, loads) -> int:
 
 def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
     """Run cmd in repo through buildlock.py on the E2E lock (output to root/e2e-full.log), record the result in
-    root/e2e-full.json and add one backlog item per failing spec not already on an open line, or one combined item
-    for them all when every failure is a test timeout (e2e_full_timed_out). Exit 0 is pass; a non-zero exit is loaded
+    root/e2e-full.json. A failing spec no live job names (e2e_full_owned) is run again alone with one worker
+    (e2e_full_rerun, root/e2e-full-rerun.log); one that passes is listed in the record's `flaky` and filed nowhere, a
+    loaded re-run files nothing, and the rest go to e2e_full_backlog: one backlog item per spec not already on an open
+    line, one combined item for 3 or more, or one for them all when every failure is a test timeout
+    (e2e_full_timed_out). Exit 0 is pass; a non-zero exit is loaded
     when board.cpu_load_pct, read after each E2E_FULL_LOAD_SECS of the wait and once at exit, went over
     board.MAX_CPU_LOAD_PCT (it keeps exit and failed, adds nothing, and e2e_full_due re-runs it); otherwise a
     non-zero exit with parsed failures is fail; a non-zero exit whose log says Playwright's `webServer exited early`
@@ -1396,9 +1399,18 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
         board.log_process("Full E2E on main", result, repo=str(repo), head=head, exit=code, failed=len(failed),
                           secs=int(time.time() - at), **({"pid": named[0], "port": named[1]} if named else {}))
         if failed and not loaded:
-            timed_out = e2e_full_timed_out(output, test_dir)
-            e2e_full_backlog(repo, root, failed, last_green, head,
-                             timeouts_only=all((f["spec"], f["line"]) in timed_out for f in failed))
+            owned = e2e_full_owned(root, {f["spec"] for f in failed})
+            mine = [f for f in failed if f["spec"] not in owned]
+            again, output = e2e_full_rerun(repo, root, cmd, env, mine, test_dir) if mine else (None, "")
+            if again is not None:
+                flaky = [s for s in dict.fromkeys(f["spec"] for f in mine) if s not in {f["spec"] for f in again}]
+                if flaky:
+                    rec = {**rec, "flaky": flaky}
+                    write_e2e_full(root, rec)
+                    board.log_process("Full E2E on main", "flaky", repo=str(repo), head=head, flaky=flaky)
+                timed_out = e2e_full_timed_out(output, test_dir)
+                e2e_full_backlog(repo, root, again, last_green, head,
+                                 timeouts_only=bool(again) and all((f["spec"], f["line"]) in timed_out for f in again))
         return rec
     except Exception:
         if rec is None:  # the tick's `running` record is still on disk
@@ -1409,9 +1421,47 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
         E2E_FULL["running"] = None
 
 
+def e2e_full_owned(root, specs) -> set:
+    """The specs of specs named in the title or feature.md of a board job not yet done or aborted: a live job
+    already works on them (job 1283)."""
+    text = []
+    for job in board.read_board(root).get("jobs") or []:
+        if not isinstance(job, dict) or job.get("stage") in ("done", "aborted"):
+            continue
+        text.append(str(job.get("title") or ""))
+        try:
+            text.append((Path(root) / "jobs" / str(job.get("id")) / "feature.md").read_text(errors="replace"))
+        except OSError:
+            pass
+    return {spec for spec in specs if any(spec in t for t in text)}
+
+
+def e2e_full_rerun(repo, root, cmd, env, failed, test_dir):
+    """Run the specs of failed once more, together, with one worker, through e2e_full_exec (root/e2e-full-rerun.log).
+    cmd gets ` -- --workers=1 <specs>` when it ends in `npm run <script>`, else ` --workers=1 <specs>`. Returns
+    (the failures of the re-run, its output); (None, output) when the re-run is loaded (board.MAX_CPU_LOAD_PCT) or
+    fails with no parsed failure (a lock timeout), so nothing is filed or called flaky."""
+    specs = " ".join(shlex.quote(s) for s in dict.fromkeys(f["spec"] for f in failed))
+    rerun = f"{cmd} -- --workers=1 {specs}" if re.search(r"\bnpm run \S+$", cmd) else f"{cmd} --workers=1 {specs}"
+    log, loads, before = root / "e2e-full-rerun.log", [], board.listeners()
+    try:
+        code = e2e_full_exec(repo, rerun, env, log, loads)
+        output = log.read_text(errors="replace")
+    except OSError as e:
+        return None, str(e)
+    finally:
+        e2e_full_stop_new_servers(repo, before)
+    again = e2e_full_failures(output, test_dir) if code else []
+    if code and (not again or any((load or 0) > board.MAX_CPU_LOAD_PCT for load in loads)):
+        return None, output
+    return again, output
+
+
 def e2e_full_backlog(repo, root, failed, last_green, head, timeouts_only=False):
-    """One backlog item per failing spec, naming its tests and the commits merged since the last green run. A
-    timeouts-only run files one combined `times out` item naming every new spec, so one job raises all their budgets."""
+    """One backlog item per failing spec, naming its tests and the commits merged since the last green run; a spec a
+    live job already names (e2e_full_owned) is skipped. A timeouts-only run files one combined `times out` item naming
+    every new spec, so one job raises all their budgets; 3 or more new specs file one combined `fails in <n> specs`
+    item, so one debug job looks for the shared cause (job 1283)."""
     if last_green:
         try:
             log = board._git(repo, "log", "--format=%h %s", f"{last_green}..{head}").decode(errors="replace")
@@ -1421,11 +1471,17 @@ def e2e_full_backlog(repo, root, failed, last_green, head, timeouts_only=False):
     else:
         merged = "no green run recorded"
     open_text = [i["text"] for i in board.read_backlog(root)[1] if not i["done"]]
+    owned = e2e_full_owned(root, {f["spec"] for f in failed})
     named = [f"{spec} — " + "; ".join(f"{Path(spec).name}:{f['line']} {f['title']}"
                                       for f in failed if f["spec"] == spec)
-             for spec in dict.fromkeys(f["spec"] for f in failed) if not any(spec in t for t in open_text)]
-    texts = ([f"E2E full suite on main times out: {'; '.join(named)}; {merged}"] if timeouts_only and named
-             else [f"E2E full suite on main fails: {n}; {merged}" for n in named])
+             for spec in dict.fromkeys(f["spec"] for f in failed)
+             if spec not in owned and not any(spec in t for t in open_text)]
+    if timeouts_only and named:
+        texts = [f"E2E full suite on main times out: {'; '.join(named)}; {merged}"]
+    elif len(named) >= 3:
+        texts = [f"E2E full suite on main fails in {len(named)} specs: {'; '.join(named)}; {merged}"]
+    else:
+        texts = [f"E2E full suite on main fails: {n}; {merged}" for n in named]
     for text in texts:
         if len(text) > board.ITEM_MAX:  # never cut silently: say how much of the merge list was left out
             text = text[:board.ITEM_MAX - 40].rsplit("; ", 1)[0] + "; … more in git log"

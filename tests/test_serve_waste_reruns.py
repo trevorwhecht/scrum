@@ -355,5 +355,117 @@ class SameTestsTest(unittest.TestCase):
         self.assertIn("watchdog: same tests: boom", err.getvalue())
 
 
+def e2e_out(*specs):
+    """Playwright output whose `N failed` block lists each (file, line, title) of specs."""
+    lines = "".join(f"    [chromium] › {f}:{n}:1 › {t} ──────\n" for f, n, t in specs)
+    return f"Running tests using 1 worker\n\n  {len(specs)} failed\n{lines}  2 passed (9s)\n"
+
+
+class E2eFullFilingTest(unittest.TestCase):
+    """Job 1283: e2e_full_run files only specs no live job owns that fail again on a one-worker re-run, and one
+    combined item when 3 or more fail. e2e_full_exec is mocked: call 1 is the full run, call 2 the re-run."""
+    A, B, C = ("a.spec.ts", 3, "A one"), ("b.spec.ts", 5, "B two"), ("c.spec.ts", 7, "C three")
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = Path(os.path.realpath(tmp.name)) / "app"
+        self.root = self.repo / "scrum"
+        (self.root / "jobs").mkdir(parents=True)
+        (self.repo / "e2e").mkdir()
+        (self.root / "board.json").write_text('{"jobs": []}')
+        (self.root / "backlog.md").write_text("# Backlog\n")
+        for name, val in (("listeners", []),):
+            p = mock.patch.object(board, name, return_value=val)
+            p.start()
+            self.addCleanup(p.stop)
+        env = mock.patch.dict(os.environ, HOME=str(Path(tmp.name) / "home"))
+        env.start()
+        self.addCleanup(env.stop)
+        self.cmds = []
+
+    def jobs(self, *jobs):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": i, "title": t, "stage": st} for i, t, st, _ in jobs]}))
+        for i, _, _, feature in jobs:
+            if feature is not None:
+                (self.root / "jobs" / i).mkdir(parents=True, exist_ok=True)
+                (self.root / "jobs" / i / "feature.md").write_text(feature)
+
+    def run_full(self, full, rerun, cmd="npm run test:e2e", rerun_code=1):
+        """e2e_full_run where the full run prints full and the re-run prints rerun."""
+        outs = [(full, 1), (rerun, rerun_code)]
+
+        def fake(repo, command, env, log, loads):
+            self.cmds.append(command)
+            out, code = outs[len(self.cmds) - 1]
+            Path(log).write_text(out)
+            return code
+
+        with mock.patch.object(serve, "e2e_full_exec", side_effect=fake):
+            return serve.e2e_full_run(self.repo, self.root, cmd, "h" * 40, 1.0, None)
+
+    def items(self):
+        return [i["text"] for i in board.read_backlog(self.root)[1] if not i["done"]]
+
+    def test_spec_owned_by_live_job_not_filed(self):
+        self.jobs(("1", "Fix the a spec", "build", "Make e2e/a.spec.ts pass"),
+                  ("2", "Old", "done", "e2e/b.spec.ts was broken"))
+        self.run_full(e2e_out(self.A, self.B), e2e_out(self.B))
+        items = self.items()
+        self.assertEqual(len(items), 1, items)
+        self.assertIn("e2e/b.spec.ts", items[0])
+        self.assertEqual(self.cmds[1], "npm run test:e2e -- --workers=1 e2e/b.spec.ts")
+
+    def test_spec_in_live_job_title_not_filed(self):
+        self.jobs(("1", "Fix e2e/a.spec.ts", "check", None))
+        rec = self.run_full(e2e_out(self.A), "")
+        self.assertEqual(self.items(), [])
+        self.assertEqual(len(self.cmds), 1, "nothing left to re-run")
+
+    def test_passing_on_rerun_is_flaky_not_filed(self):
+        rec = self.run_full(e2e_out(self.A, self.B), e2e_out(self.B))
+        self.assertEqual(rec["flaky"], ["e2e/a.spec.ts"])
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text())["flaky"], ["e2e/a.spec.ts"])
+        (item,) = self.items()
+        self.assertIn("e2e/b.spec.ts — b.spec.ts:5 B two", item)
+        self.assertNotIn("a.spec.ts", item)
+        self.assertEqual(self.cmds[1], "npm run test:e2e -- --workers=1 e2e/a.spec.ts e2e/b.spec.ts")
+
+    def test_rerun_command_without_npm_script(self):
+        self.run_full(e2e_out(self.A), "", cmd="npx playwright test", rerun_code=0)
+        self.assertEqual(self.cmds[1], "npx playwright test --workers=1 e2e/a.spec.ts")
+        self.assertEqual(self.items(), [])
+
+    def test_failing_again_filed_as_one_item(self):
+        self.run_full(e2e_out(self.A), e2e_out(self.A))
+        (item,) = self.items()
+        self.assertTrue(item.startswith("E2E full suite on main fails: e2e/a.spec.ts — a.spec.ts:3 A one"), item)
+
+    def test_three_failures_give_one_combined_item(self):
+        both = e2e_out(self.A, self.B, self.C)
+        self.run_full(both, both)
+        (item,) = self.items()
+        self.assertTrue(item.startswith("E2E full suite on main fails in 3 specs: e2e/a.spec.ts — a.spec.ts:3 A one; "
+                                        "e2e/b.spec.ts — b.spec.ts:5 B two; e2e/c.spec.ts — c.spec.ts:7 C three; "), item)
+
+    def test_two_failures_stay_per_spec(self):
+        both = e2e_out(self.A, self.B)
+        self.run_full(both, both)
+        self.assertEqual(len(self.items()), 2)
+
+    def test_loaded_rerun_files_nothing(self):
+        def fake(repo, command, env, log, loads):
+            self.cmds.append(command)
+            Path(log).write_text(e2e_out(self.A))
+            if len(self.cmds) == 2:
+                loads.append(board.MAX_CPU_LOAD_PCT + 50)
+            return 1
+
+        with mock.patch.object(serve, "e2e_full_exec", side_effect=fake):
+            serve.e2e_full_run(self.repo, self.root, "npm run test:e2e", "h" * 40, 1.0, None)
+        self.assertEqual(self.items(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
