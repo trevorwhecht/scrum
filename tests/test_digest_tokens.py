@@ -100,5 +100,245 @@ class PromptRoundTest(unittest.TestCase):
                           str(sub / "agent-cc.jsonl")])
 
 
+class TranscriptToolsTest(unittest.TestCase):
+    def test_counts_dedupes_and_bad_lines(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p = write_lines(Path(tmp.name) / "t.jsonl", [
+            prompt("hi"),
+            reply(T0, "m1", tools=[tool("t1", "Read", file_path="/a/shot.PNG"), tool("t2", "Bash", command="ls")]),
+            reply(T0, "m1", tools=[tool("t1", "Read", file_path="/a/shot.PNG"), tool("t2", "Bash", command="ls"),
+                                   tool("t3", "Read", file_path="/a/b.py")]),  # the same message, written again
+            "not json {\"tool_use\"",
+            '["tool_use"]',
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t9"}]}},  # no name
+            {"type": "assistant", "message": "tool_use"},
+            reply(T0 + 1, "m2", tools=[tool("t4", "Read", file_path="/a/x.jpeg"), tool("t5", "Read", file_path="/a/y.jpg"),
+                                       tool("t6", "Bash", command="pwd"), tool("t7", "Grep", pattern="png"),
+                                       tool("t8", "Read", file_path="/a/png.txt")])])
+        self.assertEqual(board.transcript_tools(p), ({"Read": 5, "Bash": 2, "Grep": 1}, 3))
+        self.assertEqual(board.transcript_tools(Path(tmp.name) / "missing.jsonl"), ({}, 0))
+        (Path(tmp.name) / "dir.jsonl").mkdir()
+        self.assertEqual(board.transcript_tools(Path(tmp.name) / "dir.jsonl"), ({}, 0))
+
+
+class AgentPinTest(unittest.TestCase):
+    def test_agent_pin_reads_frontmatter(self):
+        self.assertEqual(board.agent_pin("scrum-review-ui"), "sonnet")
+        self.assertEqual(board.agent_pin("scrum-builder"), "opus")
+        self.assertIsNone(board.agent_pin("main"))
+        self.assertIsNone(board.agent_pin("no-such-agent"))
+        self.assertIsNone(board.agent_pin("../skills/trevskills-scrum/SKILL"))
+
+
+class WriteTokensTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name).resolve()
+        self.repo = base / "app"
+        self.root = self.repo / "scrum"
+        (self.root / "digests" / "001").mkdir(parents=True)
+        self.dir = base / "projects"
+        self.dir.mkdir()
+        reg = base / "machine" / "projects.json"
+        reg.parent.mkdir()
+        reg.write_text(json.dumps([str(self.repo)]))
+        env = mock.patch.dict(os.environ, {"SCRUM_TRANSCRIPTS": str(self.dir), "SCRUM_REGISTRY": str(reg),
+                                           "SCRUM_PULSE": str(reg.with_name("pulse.log"))})
+        env.start()
+        self.addCleanup(env.stop)
+        fit = mock.patch.object(board, "_fit_diff", side_effect=self.fit)
+        self.fit_calls = []
+        fit.start()
+        self.addCleanup(fit.stop)
+        self.t = time.time() - 3600
+        self.n = 0
+
+    def fit(self, root, job):
+        self.fit_calls.append(job["id"])
+        return (120, 3, 2, None) if job["id"] == "1-a" else (None, None, None, None)
+
+    def board_jobs(self, *jobs):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": i, "title": i, "stage": "done", **({"lane": lane} if lane else {})} for i, lane in jobs]}))
+
+    def jobs_txt(self, *ids, digest="001"):
+        (self.root / "digests" / digest / "jobs.txt").write_text("".join(f"{i}\n" for i in ids))
+
+    def replies(self, usd_list, model="claude-opus-4-5", tools=(), cwd=None, context=0):
+        out = []
+        for usd in usd_list:  # opus: $1 = 40,000 output tokens; sonnet: $1 = 66,667 rounded
+            self.n += 1
+            per = 40_000 if "opus" in model else 1_000_000 / 15
+            out.append(reply(self.t + self.n, f"m{self.n}", cwd=cwd or str(self.repo), model=model,
+                             tools=tools, output_tokens=round(usd * per), cache_read_input_tokens=context))
+        return out
+
+    def main(self, sid, job, lines, extra=""):
+        return write_lines(self.dir / "p" / f"{sid}.jsonl", [prompt(f"JOB_DIR=/x/scrum/jobs/{job}{extra}")] + lines)
+
+    def sub(self, sid, aid, agent, job, rnd, lines):
+        p = write_lines(self.dir / "p" / sid / "subagents" / f"agent-{aid}.jsonl",
+                        [prompt(f"JOB_DIR=/x/scrum/jobs/{job}\nROUND={rnd}")] + lines)
+        p.with_name(f"agent-{aid}.meta.json").write_text(json.dumps({"agentType": agent}))
+        return p
+
+    def tokens(self, digest="001"):
+        board.write_tokens(self.root, digest)
+        return (self.root / "digests" / digest / "tokens.md").read_text()
+
+    def fixture(self):
+        self.board_jobs(("1-a", None), ("2-b", "standard"), ("3-c", None), ("4-d", None), ("5-e", None))
+        self.jobs_txt("1-a", "2-b", "3-c", "4-d")
+        self.main("s1", "1-a", self.replies([2]))
+        self.r1 = self.sub("s1", "u1", "scrum-review-ui", "1-a", 1, self.replies([5], context=1000, tools=[
+            tool("a1", "Read", file_path="/s/one.png"), tool("a2", "Bash", command="x")]))
+        self.r2 = self.sub("s1", "u2", "scrum-review-ui", "1-a", 2, self.replies([2.5, 2], context=3000, tools=[
+            tool("b1", "Bash", command="y")]))
+        self.sub("s1", "b1", "scrum-builder", "1-a", 0, self.replies([1]))
+        self.main("s2", "2-b", self.replies([1]))
+        self.main("s3", "3-c", self.replies([2], model="claude-sonnet-4-5"))
+        self.main("s4", "5-e", self.replies([50]))  # not in jobs.txt
+        self.main("s5", "1-a", self.replies([70], cwd="/elsewhere"))  # another project's 1-a
+
+    def test_jobs_split_by_agent_round_model(self):
+        self.fixture()
+        text = self.tokens()
+        jobs = text[text.index("## Jobs\n"):text.index("## Flagged\n")]
+        self.assertEqual(jobs, (
+            "## Jobs\n"
+            "- 1-a · lane standard · +120 lines · $12.50 · 507000 tokens\n"
+            "  - scrum-review-ui · round 1 · claude-opus-4-5 · $5.00 · 201000 tokens\n"
+            "  - scrum-review-ui · round 2 · claude-opus-4-5 · $4.50 · 186000 tokens\n"
+            "  - main · round - · claude-opus-4-5 · $2.00 · 80000 tokens\n"
+            "  - scrum-builder · round 0 · claude-opus-4-5 · $1.00 · 40000 tokens\n"
+            "- 2-b · lane standard · +? lines · $1.00 · 40000 tokens\n"
+            "  - main · round - · claude-opus-4-5 · $1.00 · 40000 tokens\n"
+            "- 3-c · lane standard · +? lines · $2.00 · 133333 tokens\n"
+            "  - main · round - · claude-sonnet-4-5 · $2.00 · 133333 tokens\n"
+            "- 4-d · no transcript rows\n"
+            "\n"))
+        self.assertNotIn("5-e", text)
+        self.assertNotIn("4-d", self.fit_calls)  # a job without cost never reads its diff
+        self.assertTrue(text.startswith("# Tokens: digest 001\n"))
+
+    def test_flags_and_round_split(self):
+        self.fixture()
+        text = self.tokens()
+        flagged = text[text.index("## Flagged\n"):]
+        lines = [l for l in flagged.splitlines() if l.startswith("- ")]
+        self.assertEqual(lines[0], (
+            "- 1-a · $12.50 · scrum-review-ui ran on claude-opus-4-5, pinned sonnet; 6.3x lane median ($2.00); "
+            "top 3 cost; scrum-review-ui 76% of job cost; scrum-review-ui round 2 $4.50 = 90% of round 1 $5.00"))
+        self.assertEqual(lines[1:], ["- 3-c · $2.00 · top 3 cost; main 100% of job cost",
+                                     "- 2-b · $1.00 · top 3 cost; main 100% of job cost"])
+        self.assertIn("  - scrum-review-ui · round 1 · claude-opus-4-5 · $5.00", text)
+        self.assertIn("  - scrum-review-ui · round 2 · claude-opus-4-5 · $4.50", text)
+
+    def test_pin_rule_ignores_unknown_families_and_opus_pins(self):
+        self.board_jobs(("1-a", None))
+        self.jobs_txt("1-a")
+        self.main("s1", "1-a", self.replies([1]))
+        self.sub("s1", "c1", "scrum-review-code", "1-a", 1, self.replies([1], model="<synthetic>")
+                 + self.replies([1], model="claude-sonnet-4-5"))
+        self.sub("s1", "b1", "scrum-builder", "1-a", 0, self.replies([1], model="claude-fable-1"))
+        self.sub("s1", "x1", "general-purpose", "1-a", 0, self.replies([1]))
+        self.sub("s1", "d1", "scrum-digest-reader", "1-a", 0, self.replies([0.5], model="claude-haiku-4-5"))
+        text = self.tokens()
+        self.assertNotIn("pinned", text)
+
+    def test_reviewer_round_rule_needs_round_one_cost(self):
+        self.board_jobs(("1-a", None))
+        self.jobs_txt("1-a")
+        self.sub("s1", "e2", "scrum-review-e2e", "1-a", 2, self.replies([3], model="claude-sonnet-4-5"))
+        self.sub("s1", "c1", "scrum-review-code", "1-a", 1, self.replies([1]))
+        self.sub("s1", "c2", "scrum-review-code", "1-a", 2, self.replies([0.7]))
+        self.sub("s1", "c3", "scrum-review-code", "1-a", 3, self.replies([0.8]))
+        self.sub("s1", "s1", "scrum-review-security", "1-a", 1, self.replies([0], model="claude-opus-4-5"))
+        self.sub("s1", "s2", "scrum-review-security", "1-a", 2, self.replies([1], model="claude-opus-4-5"))
+        text = self.tokens()
+        self.assertIn("scrum-review-code round 3 $0.80 = 80% of round 1 $1.00", text)
+        self.assertNotIn("scrum-review-code round 2", text.split("## Flagged")[1])
+        self.assertNotIn("scrum-review-e2e round", text.split("## Flagged")[1])
+        self.assertNotIn("scrum-review-security round", text.split("## Flagged")[1])
+
+    def test_costliest_agent_detail(self):
+        self.fixture()
+        text = self.tokens()
+        flagged = text[text.index("## Flagged\n"):]
+        block = flagged[flagged.index("- 1-a"):flagged.index("- 3-c")]
+        self.assertEqual(block.splitlines()[1:], [
+            "  - costliest: scrum-review-ui $9.50",
+            "  - tools: Bash 2, Read 1",
+            "  - image reads: 1",
+            "  - peak context: 3000 tokens",
+            f"  - transcript: {self.r1}",
+            f"  - transcript: {self.r2}"])
+        self.assertLessEqual(len(block.splitlines()) - 1, 10)
+
+    def test_transcript_lines_capped_at_six(self):
+        self.board_jobs(("1-a", None))
+        self.jobs_txt("1-a")
+        paths = [self.sub("s1", f"r{i}", "scrum-review-ui", "1-a", i + 1, self.replies([1]))
+                 for i in range(8)]
+        text = self.tokens()
+        flagged = text[text.index("## Flagged\n"):]
+        tl = [l for l in flagged.splitlines() if l.startswith("  - transcript: ")]
+        self.assertEqual(tl, [f"  - transcript: {p}" for p in paths[:5]] + ["  - transcript: +3 more"])
+        self.assertIn("  - tools: none", flagged)
+
+    def test_empty_and_missing_inputs(self):
+        self.board_jobs(("1-a", None))
+        self.jobs_txt()
+        self.assertEqual(self.tokens(), "No jobs in this digest\n")
+        self.jobs_txt("1-a")
+        self.assertEqual(self.tokens(), "No transcript rows for this digest's jobs\n")  # no rows at all
+        self.main("s1", "9-z", self.replies([1]))
+        self.assertEqual(self.tokens(), "No transcript rows for this digest's jobs\n")  # rows, none listed
+        with mock.patch.dict(os.environ, {"SCRUM_TRANSCRIPTS": str(self.dir / "missing")}):
+            self.assertEqual(self.tokens(), "No transcript rows for this digest's jobs\n")
+        self.main("s2", "1-a", self.replies([1]))
+        with mock.patch.dict(os.environ, {"SCRUM_TRANSCRIPTS": ""}), \
+                mock.patch.object(board, "transcript_tokens") as tt:
+            self.assertEqual(self.tokens(), "No transcript rows for this digest's jobs\n")  # unittest guard
+        tt.assert_not_called()
+        self.assertEqual(self.fit_calls, [])
+
+    def test_rerun_overwrites(self):
+        self.fixture()
+        first = self.tokens()
+        self.assertEqual(self.tokens(), first)
+        self.assertEqual(first.count("## Jobs"), 1)
+
+    def test_digest_start_writes_tokens_and_survives_failure(self):
+        guard = mock.patch.object(board, "merge_refusal", return_value=None)  # PR-less fixture jobs may go done
+        guard.start()
+        self.addCleanup(guard.stop)
+        (self.root / "digests" / "001").rmdir()
+        job_id = board.cmd_new(self.root, "done 0")
+        board.cmd_set(self.root, job_id, ["stage=done"], internal=True)
+        self.main("s1", job_id, self.replies([1]))
+        order = []
+        real_waste, real_tokens = board.write_waste, board.write_tokens
+        with mock.patch.object(board, "write_waste", side_effect=lambda *a: (order.append("waste"), real_waste(*a))), \
+                mock.patch.object(board, "write_tokens", side_effect=lambda *a: (order.append("tokens"), real_tokens(*a))):
+            out = board.cmd_digest_start(self.root)
+        self.assertEqual(out["id"], "001")
+        self.assertEqual(order, ["waste", "tokens"])
+        text = (self.root / "digests" / "001" / "tokens.md").read_text()
+        self.assertIn(f"- {job_id} · lane standard · +? lines · $1.00 · 40000 tokens\n", text)
+        board.cmd_new(self.root, "done 1")
+        job2 = board.read_board(self.root)["jobs"][-1]["id"]
+        board.cmd_set(self.root, job2, ["stage=done"], internal=True)
+        err = io.StringIO()
+        with mock.patch.object(board, "write_tokens", side_effect=ValueError("boom")), redirect_stderr(err):
+            out = board.cmd_digest_start(self.root)
+        self.assertEqual(out["id"], "002")
+        self.assertIn("digest-start: tokens: boom\n", err.getvalue())
+        self.assertTrue((self.root / "digests" / "002" / "waste.md").exists())
+        self.assertFalse((self.root / "digests" / "002" / "tokens.md").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

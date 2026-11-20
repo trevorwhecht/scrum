@@ -1404,6 +1404,10 @@ def cmd_digest_start(root):
         write_waste(root, digest_id)
     except (SystemExit, OSError, ValueError, TypeError) as e:
         print(f"digest-start: waste: {e}", file=sys.stderr)
+    try:
+        write_tokens(root, digest_id)
+    except (SystemExit, OSError, ValueError, TypeError) as e:
+        print(f"digest-start: tokens: {e}", file=sys.stderr)
     return out
 
 
@@ -1835,6 +1839,136 @@ def write_waste(root, digest_id):
     for l in catches:
         rest = " ".join(f"{k}={show(v)}" for k, v in l.items() if k not in ("t", "kind"))
         out.append(f"- {iso(l['t'])} {l['kind']}" + (f" {rest}" if rest else ""))
+    path.write_text("\n".join(out) + "\n")
+
+
+MODEL_RANK = {"haiku": 0, "sonnet": 1, "opus": 2, "fable": 3}  # write_tokens' pricier-model rule, cheapest first
+TOKENS_FLAG = {"median_x": 2, "top": 3, "agent_share": 0.4, "round_share": 0.8}  # write_tokens' ## Flagged limits
+TOKENS_TRANSCRIPTS = 6  # transcript lines under a flagged job's costliest agent
+
+
+def _model_family(model):
+    """The MODEL_RANK family a transcript model string names, else None (`<synthetic>`, a missing model)."""
+    return next((f for f in MODEL_RANK if f in model.lower()), None) if isinstance(model, str) else None
+
+
+def _token_reasons(job, usd, groups, lane_median, top):
+    """write_tokens' ## Flagged reasons for one job, in the fixed order: pricier model than the agent's pin, over
+    TOKENS_FLAG median_x its lane median, a top-cost job, one agent over agent_share of the job, a reviewer's later round
+    at round_share or more of its round 1."""
+    out, by_agent, by_round = [], {}, {}
+    for (agent, rnd, model), (_, a) in groups.items():
+        by_agent[agent] = by_agent.get(agent, 0) + a
+        by_round[agent, rnd] = by_round.get((agent, rnd), 0) + a
+    for (agent, _, model), _ in sorted(groups.items(), key=lambda g: -g[1][1]):
+        pin, fam = agent_pin(agent) if agent != "main" else None, _model_family(model)
+        reason = f"{agent} ran on {model}, pinned {pin}"
+        if pin in ("sonnet", "haiku") and fam and MODEL_RANK[fam] > MODEL_RANK[pin] and reason not in out:
+            out.append(reason)
+    if lane_median and usd > TOKENS_FLAG["median_x"] * lane_median:
+        out.append(f"{usd / lane_median:.1f}x lane median (${lane_median:.2f})")
+    if job in top:
+        out.append("top 3 cost")
+    for agent, a in sorted(by_agent.items(), key=lambda x: -x[1]):
+        if usd > 0 and a > TOKENS_FLAG["agent_share"] * usd:
+            out.append(f"{agent} {100 * a / usd:.0f}% of job cost")
+    for (agent, rnd), a in sorted(by_round.items(), key=lambda x: (x[0][0], x[0][1] or 0)):
+        base = by_round.get((agent, 1), 0)
+        if agent.startswith("scrum-review-") and isinstance(rnd, int) and rnd >= 2 and base > 0 \
+                and a >= TOKENS_FLAG["round_share"] * base:
+            out.append(f"{agent} round {rnd} ${a:.2f} = {100 * a / base:.0f}% of round 1 ${base:.2f}")
+    return out
+
+
+def _costliest_detail(rows):
+    """The indented lines under a flagged job: its costliest agent, that agent's tool calls and image Reads (over its
+    distinct transcripts), its peak context and at most TOKENS_TRANSCRIPTS transcript lines."""
+    by_agent = {}
+    for r in rows:
+        by_agent[r["agent"]] = by_agent.get(r["agent"], 0) + row_cost(r)
+    agent = max(by_agent, key=lambda a: (by_agent[a], a))
+    mine = [r for r in rows if r["agent"] == agent]
+    paths = list(dict.fromkeys(r["transcript"] for r in mine))
+    tools, images = {}, 0
+    for p in paths:
+        names, n = transcript_tools(p)
+        images += n
+        for k, v in names.items():
+            tools[k] = tools.get(k, 0) + v
+    top = sorted(tools.items(), key=lambda x: (-x[1], x[0]))[:10]
+    out = [f"  - costliest: {agent} ${by_agent[agent]:.2f}",
+           "  - tools: " + (", ".join(f"{k} {v}" for k, v in top) or "none"),
+           f"  - image reads: {images}",
+           f"  - peak context: {max(r['input_tokens'] + r['cache_read_input_tokens'] for r in mine)} tokens"]
+    if len(paths) > TOKENS_TRANSCRIPTS:
+        keep = TOKENS_TRANSCRIPTS - 1
+        return out + [f"  - transcript: {p}" for p in paths[:keep]] + [f"  - transcript: +{len(paths) - keep} more"]
+    return out + [f"  - transcript: {p}" for p in paths]
+
+
+def write_tokens(root, digest_id):
+    """digests/<NNN>/tokens.md: what each job in the digest's jobs.txt cost and why, from transcript_tokens over the last
+    JOB_COST_DAYS days, kept to this root's registered project and the listed jobs. `## Jobs`: one line per job (lane,
+    added lines from _fit_diff, usd, tokens) and one indented line per (agent, round, model), costliest first; a job
+    with no rows says so and its diff is never read. `## Flagged`: the jobs _token_reasons flags, costliest first, each
+    with _costliest_detail. Under unittest with no SCRUM_TRANSCRIPTS it reads no transcripts (job_costs' guard).
+    Overwrites the file on every run."""
+    d = Path(root) / "digests" / digest_id
+    listed = list(dict.fromkeys(l.strip() for l in (d / "jobs.txt").read_text().splitlines() if l.strip()))
+    path = d / "tokens.md"
+    if not listed:
+        path.write_text("No jobs in this digest\n")
+        return
+    rows = []
+    if not ("unittest" in sys.modules and not os.environ.get("SCRUM_TRANSCRIPTS")) and transcripts_dir().is_dir():
+        me = Path(root).resolve().parent
+        name = next((n for n, p in projects().items() if p.resolve() == me), None)
+        now, want = time.time(), set(listed)
+        rows = [r for r in transcript_tokens(now - JOB_COST_DAYS * 86400, now)
+                if r["project"] == name and r["job"] in want] if name is not None else []
+    if not rows:
+        path.write_text("No transcript rows for this digest's jobs\n")
+        return
+    try:
+        board = {j["id"]: j for j in read_board(root)["jobs"] if isinstance(j, dict) and isinstance(j.get("id"), str)}
+    except SystemExit:
+        board = {}
+    costs = next(iter(cost_by_job(rows).values()))
+    groups, by_job = {}, {}
+    for r in rows:
+        by_job.setdefault(r["job"], []).append(r)
+        g = groups.setdefault(r["job"], {})
+        tok, usd = g.get((r["agent"], r["round"], r["model"]), (0, 0))
+        g[r["agent"], r["round"], r["model"]] = (tok + sum(r[k] for k in TOKEN_KEYS), usd + row_cost(r))
+    lane = {j: board.get(j, {}).get("lane") or "standard" for j in costs}
+    out = [f"# Tokens: digest {digest_id}", "", f"Rows: the last {JOB_COST_DAYS} days of transcripts", "", "## Jobs"]
+    for j in listed:
+        if j not in costs:
+            out.append(f"- {j} · no transcript rows")
+            continue
+        try:
+            added = _fit_diff(Path(root), board[j])[0] if j in board else None
+        except (OSError, ValueError, SystemExit, subprocess.SubprocessError):
+            added = None
+        tok, usd = costs[j]
+        out.append(f"- {j} · lane {lane[j]} · +{'?' if added is None else added} lines · ${usd:.2f} · {tok} tokens")
+        for (agent, rnd, model), (t, u) in sorted(groups[j].items(), key=lambda g: (-g[1][1], -g[1][0])):
+            out.append(f"  - {agent} · round {'-' if rnd is None else rnd} · {model or 'unknown'} · ${u:.2f} · {t} tokens")
+    ranked = sorted(costs, key=lambda j: (-costs[j][1], j))
+    top = {j for j in ranked[:TOKENS_FLAG["top"]] if costs[j][1] > 0}
+    medians = {}
+    for ln in set(lane.values()):
+        vals = sorted(costs[j][1] for j in costs if lane[j] == ln)
+        mid = len(vals) // 2
+        medians[ln] = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+    out += ["", "## Flagged"]
+    for j in ranked:
+        reasons = _token_reasons(j, costs[j][1], groups[j], medians[lane[j]], top)
+        if reasons:
+            out.append(f"- {j} · ${costs[j][1]:.2f} · " + "; ".join(reasons))
+            out += _costliest_detail(by_job[j])
+    if out[-1] == "## Flagged":
+        out.append("None")
     path.write_text("\n".join(out) + "\n")
 
 
@@ -4523,6 +4657,59 @@ def transcript_tokens(start, end, projects_dir=None):
                 out.append({**row, "project": project, "job": wt or job, "agent": agent, "skill": skill,
                             "round": rnd, "transcript": str(path)})
     return sorted(out, key=lambda r: r["ts"])
+
+
+AGENTS_DIR = Path(__file__).resolve().parents[2] / "agents"  # this repo's agents/, the folder beside skills/
+
+
+def agent_pin(agent):
+    """The frontmatter `model:` of AGENTS_DIR/<agent>.md, or None when the name is not a plain agent name, the file is
+    missing or it has no frontmatter or no model line."""
+    if not isinstance(agent, str) or not re.fullmatch(r"[\w-]+", agent):
+        return None
+    try:
+        text = (AGENTS_DIR / f"{agent}.md").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    parts = text.split("---", 2)
+    m = re.search(r"^model:\s*(\S+)\s*$", parts[1], re.M) if text.startswith("---") and len(parts) == 3 else None
+    return m and m.group(1)
+
+
+IMAGE_EXTS = (".png", ".jpg", ".jpeg")
+
+
+def transcript_tools(path):
+    """({tool name: tool_use calls}, image Reads) for one transcript, read line by line: each tool_use block counts once
+    by its id (a message written again repeats its blocks), an image Read is a Read whose file_path ends in IMAGE_EXTS
+    (any case). Bad lines are skipped; an unreadable file gives ({}, 0)."""
+    names, images, seen = {}, 0, set()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"tool_use"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                msg = d.get("message") if isinstance(d, dict) else None
+                content = msg.get("content") if isinstance(msg, dict) else None
+                for b in content if isinstance(content, list) else []:
+                    if not isinstance(b, dict) or b.get("type") != "tool_use" or not isinstance(b.get("name"), str):
+                        continue
+                    bid = b.get("id")
+                    if isinstance(bid, str) and bid:
+                        if bid in seen:
+                            continue
+                        seen.add(bid)
+                    names[b["name"]] = names.get(b["name"], 0) + 1
+                    fp = b.get("input").get("file_path") if isinstance(b.get("input"), dict) else None
+                    if b["name"] == "Read" and isinstance(fp, str) and fp.lower().endswith(IMAGE_EXTS):
+                        images += 1
+    except OSError:
+        return {}, 0
+    return names, images
 
 
 def is_num(x):
