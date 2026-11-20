@@ -1185,6 +1185,56 @@ def e2e_full_from_log(repo, root, rec) -> dict | None:
     return new
 
 
+def e2e_full_stop_new_servers(repo, before, wait=5.0) -> list[int]:
+    """Stop the listeners a full run left on the main checkout (job 1252): its Playwright webServer `next dev` can
+    outlive the run and hold the Next dev lock, so the next run's dev server exits early. Signals each board.listeners()
+    pid whose cwd is repo or under it, outside <repo>/.claude/worktrees/ (job worktrees), and absent from before (the
+    pre-run listeners() snapshot, by pid, so Trevor's own server survives); never a pid also on a board.KEEP_PORTS
+    port, never this process. SIGTERM, then SIGKILL for each pid still alive after polling every 0.25 s for wait
+    seconds, as board.stop_worktree_servers does (it refuses the main checkout). Returns the pids sent SIGTERM; never
+    raises, so a failure here never changes the run's result."""
+    try:
+        repo = os.path.realpath(repo)
+        wts = os.path.join(repo, ".claude", "worktrees")
+        listening = board.listeners()
+        keep = ({pid for pid, _, _ in before} | {pid for pid, port, _ in listening if port in board.KEEP_PORTS}
+                | {os.getpid()})
+        killed = []
+        for pid, _, cwd in listening:
+            if (pid in keep or pid in killed or not (cwd == repo or cwd.startswith(repo + os.sep))
+                    or cwd == wts or cwd.startswith(wts + os.sep)):
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed.append(pid)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        def gone(pid):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                pass
+            return False
+        alive = list(killed)
+        for _ in range(int(wait / 0.25)):
+            if not alive:
+                break
+            time.sleep(0.25)
+            alive = [pid for pid in alive if not gone(pid)]
+        for pid in alive:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        return killed
+    except (OSError, ValueError, TypeError) as e:
+        print(f"e2e_full_stop_new_servers: {e}", file=sys.stderr)
+        return []
+
+
 def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
     """Run cmd in repo through buildlock.py on the E2E lock (output to root/e2e-full.log), record the result in
     root/e2e-full.json and add one backlog item per failing spec not already on an open line, or one combined item
@@ -1200,6 +1250,7 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
         env = {**os.environ, "SCRUM_BUILD_LOCK": str(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock")}
         log = root / "e2e-full.log"
         loads = []
+        before = board.listeners()
         try:
             with open(log, "w") as f:
                 proc = subprocess.Popen([sys.executable, str(Path(buildlock.__file__).resolve()), cmd], cwd=repo,
@@ -1218,6 +1269,8 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
             output = log.read_text(errors="replace")
         except OSError as e:
             code, output = -1, str(e)
+        finally:
+            e2e_full_stop_new_servers(repo, before)
         test_dir = board._e2e_dir(Path(repo))
         failed = e2e_full_failures(output, test_dir) if code else []
         loaded = code != 0 and any((load or 0) > board.MAX_CPU_LOAD_PCT for load in loads)
