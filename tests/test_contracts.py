@@ -1408,6 +1408,21 @@ class ContractTest(unittest.TestCase):
         for phrase in ("python3", "bash", "`none`", "<interpreter> <Repro test path>"):
             self.assertIn(phrase, line, phrase)
 
+    def test_debugger_token_discipline(self):
+        """Job 1253: job 1681's debugger read a 1,322-line file whole, counted prod rows and traced a second test (204 turns)."""
+        path = ROOT / "agents" / "scrum-debugger.md"
+        self.assertEqual(frontmatter(path).get("maxTurns"), "120")
+        text = path.read_text()
+        limits = text[text.index("**Hard limits:**"):]
+        for phrase in ("over about 300 lines", "`offset`/`limit`", "datafix follow-up", "names the query only"):
+            self.assertIn(phrase, limits, phrase)
+        step5 = self.section(text, "5. **Root cause.**", "6. **Fix plan.**")
+        for phrase in ("stop tracing", "never a second traced test", "does not reproduce the reported case"):
+            self.assertIn(phrase, step5, phrase)
+        self.assertIn("## Suspects", self.section(text, "**assessment.md.**", "**Diverged.**"))
+        step2 = self.section(self.lane("debug"), "2. **Validate", "\n3. ")
+        self.assertIn("turn cap", step2)
+
     def test_skill_debug_lane(self):
         text = skill_text()
         self.assertLess(text.index("## Fast lane"), text.index("## Debug lane"))

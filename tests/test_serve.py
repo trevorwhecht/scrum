@@ -4111,7 +4111,8 @@ class AiSettingsTest(unittest.TestCase):
         registry = Path(self.tmp.name) / "projects.json"
         registry.write_text(json.dumps([str(self.reg)]))
         patcher = mock.patch.dict(os.environ, CLAUDE_HOME=str(self.user), CLAUDE_MANAGED_DIR=str(self.managed),
-                                  SCRUM_REGISTRY=str(registry))
+                                  SCRUM_REGISTRY=str(registry),  # board.spawn reads the account's plugins: the fake one
+                                  SCRUM_ACCOUNTS=json.dumps([["main", str(self.user), None]]))
         patcher.start()
         self.addCleanup(patcher.stop)
         import serve  # noqa: E402
@@ -5511,12 +5512,12 @@ class AiResearchTest(unittest.TestCase):
             log = self.serve.spawn("reg", self.reg / "scrum", "999-not-a-job", "start", "/trevskills-scrum start x")
         self.addCleanup(self.serve.RUNS.pop, "reg/999-not-a-job", None)
         self.assertEqual(popen.call_args.args[0], ["claude-stub", "-p", "/trevskills-scrum start x", "--model", "sonnet",
-                                                   "--permission-mode", "acceptEdits", "--settings", self.serve.board.NO_CACHE_TAX])
+                                                   "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", self.serve.board.NO_CACHE_TAX])
         self.assertRegex(log, r"^runs/\d{8}-\d{6}-start-999-not-a-job\.log$")
         with mock.patch.object(self.serve.subprocess, "Popen") as popen:
             self.serve.spawn("reg", self.reg / "scrum", "999-not-a-job", "resume", "/trevskills-scrum resume x")
         self.assertEqual(popen.call_args.args[0], ["claude-stub", "-p", "/trevskills-scrum resume x", "--model", "sonnet",
-                                                   "--permission-mode", "acceptEdits", "--settings", self.serve.board.NO_CACHE_TAX])
+                                                   "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", self.serve.board.NO_CACHE_TAX])
 
     def spawn_argv(self, action, prompt="/p"):
         with mock.patch.object(self.serve.subprocess, "Popen") as popen:
@@ -5527,7 +5528,7 @@ class AiResearchTest(unittest.TestCase):
     def test_spawn_orchestrator_model_from_project(self):
         project = self.reg / "scrum" / "project.md"
         self.addCleanup(lambda: project.unlink(missing_ok=True))
-        plain = ["claude-stub", "-p", "/p", "--permission-mode", "acceptEdits", "--settings", self.serve.board.NO_CACHE_TAX]
+        plain = ["claude-stub", "-p", "/p", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", self.serve.board.NO_CACHE_TAX]
         for line, model in (("- Orchestrator model: opus\n", "opus"), ("- Orchestrator model: claude-sonnet-4.5  \n", "claude-sonnet-4.5"),
                             ("- Orchestrator model: inherit\n", None), ("- Orchestrator model: Inherit\n", None),
                             ("- Orchestrator model: so net; rm\n", "sonnet"), ("- Orchestrator model: $(touch x)\n", "sonnet"),
@@ -5545,7 +5546,7 @@ class AiResearchTest(unittest.TestCase):
             if text:
                 project.write_text(text)
             for action in ("approve", "rework", "digest"):
-                self.assertEqual(self.spawn_argv(action), ["claude-stub", "-p", "/p", "--permission-mode", "acceptEdits", "--settings", self.serve.board.NO_CACHE_TAX], (text, action))
+                self.assertEqual(self.spawn_argv(action), ["claude-stub", "-p", "/p", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", self.serve.board.NO_CACHE_TAX], (text, action))
 
     def test_research_home_is_this_checkout(self):
         repo = self.serve.HERE.parent.parent
@@ -5855,7 +5856,7 @@ class DigestTest(unittest.TestCase):
             self.assertEqual(code, 202, out)
             popen.assert_called_once()
             argv = popen.call_args.args[0]
-            self.assertEqual(argv[1:], ["-p", "/trevskills-scrum digest", "--permission-mode", "acceptEdits", "--settings", self.serve.board.NO_CACHE_TAX])
+            self.assertEqual(argv[1:], ["-p", "/trevskills-scrum digest", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", self.serve.board.NO_CACHE_TAX])
             self.assertEqual(self.serve.RUNS["reg/digest"]["action"], "digest")
             self.assertEqual(self.post("/api/p/reg/digest", {}), (409, None))
             self.assertEqual(popen.call_count, 1)
