@@ -946,6 +946,16 @@ class BoardTest(unittest.TestCase):
         self.assertNotIn("unblocks", job)
         self.assertEqual(job["stage"], "check")
 
+    def test_cli_quiet_machine_ask_with_resume_abort_only_is_accepted(self):
+        job_id = self.staged("check")
+        with mock.patch.object(board, "play"):
+            r = run_board("--dir", str(self.root), "ask", job_id, "waiting on a quiet machine: E2E timed out",
+                          "--a", f"Carry on=resume {job_id}", "--b", f"Remove this job=abort {job_id} --cascade",
+                          "--title", "CHECKS_FAILING")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual((job["stage"], job["stalled"]), ("check", True))
+
     def test_ask_quiet_machine_prefix_stalls(self):
         job_id = self.staged("check")
         with mock.patch.object(board, "play"):
