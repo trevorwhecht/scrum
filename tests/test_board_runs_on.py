@@ -273,8 +273,8 @@ class RunsOnTest(unittest.TestCase):
         (self.root.parent / "src").mkdir()
         self.runall(self.kid("010-a", "a", lane="lilguy"),
                     self.kid("011-b", "b", feature="Fix the widget\n\n## Notes\nLane: lilguy\n"),
-                    self.kid("012-c", "c", fit=True),
-                    self.kid("013-d", "d", feature="Expand digests/042/proposals.json\n"),
+                    self.kid("012-c", "c", fit=True, lane="fast"),  # light: job 1314's heavy cap (2) never holds it
+                    self.kid("013-d", "d", feature="Expand digests/042/proposals.json\n", lane="fast"),
                     self.kid("014-e", "e"))
         self.room()
         self.jev(False)

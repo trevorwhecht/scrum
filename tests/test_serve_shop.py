@@ -271,8 +271,8 @@ class ShopTickTest(unittest.TestCase):
     def test_two_job_cap_across_boards(self):
         self.assertEqual(self.serve.shop.workers(), [("shopmac", 2, ("owa", "main"))])
         root = self.project("mm", self.runall({"id": "043-a"}))
-        self.project("aa", [{"id": "010-x", "stage": "cloud", "shop": "11", "account": "main"}])
-        self.project("bb", [{"id": "020-y", "stage": "cloud", "shop": "12", "account": "owa"}])
+        self.project("aa", [{"id": "010-x", "stage": "cloud", "shop": "11", "account": "main", "lane": "fast"}])
+        self.project("bb", [{"id": "020-y", "stage": "cloud", "shop": "12", "account": "owa", "lane": "fast"}])  # fast: job 1314's heavy limit never applies
         self.project("cc", [{"id": "030-z", "stage": "cloud"}])  # a claude.ai session: not on the shop
         self.assertEqual(self.tick(), (False, "", ""))
         self.assertEqual(self.calls(), [], "two shop jobs run: not even ready() is asked")
@@ -481,6 +481,7 @@ class ShopTickTest(unittest.TestCase):
             self.assertEqual(self.job(root, "044-b")["stage"], "waiting", "one dispatch per call")
             self.assertEqual(self.job(root, PAR)["stage"], "running")
         with self.subTest("queued launch, no spec.md, no .env.local, no project.md"):
+            self.board.cmd_set(root, "043-a", ["lane=fast"])  # job 1314: shopmac's one heavy slot is free again
             self.sh.reset_mock()
             self.sh.env_copy.return_value = "none"
             self.sh.profile_copy.return_value = "none"
@@ -1000,7 +1001,7 @@ class ShopTickTest(unittest.TestCase):
                 self.sh.reset_mock()
                 root = self.project("mm", [], AUTO)
                 self.backlog(root, "Fix the gadget {p:3}", "Polish the knob {p:5}",
-                             specs={"Polish the knob": SPEC, "Fix the gadget": SPEC.replace("a.py", "b.py")})
+                             specs={"Polish the knob": SPEC, "Fix the gadget": SPEC.replace("a.py", "b.py").replace("# Spec", "# Spec\nLane: fast")})
                 with mock.patch.dict(os.environ, env):
                     got, out, err = self.tick()
                 self.assertEqual((got, out, err),
@@ -1342,6 +1343,70 @@ class ShopTickTest(unittest.TestCase):
                          {PAR: (None, None), "043-a": ("shop", True), "044-b": ("main", None), "045-c": (None, None),
                           "046-d": ("shop", None), "050-q": ("shop", True), "051-r": ("shop", None),
                           "060-x": ("any", None)})
+
+    # --- job 1314: this Mac's heavy cap and the shop worker's heavy limit ---
+    STARTED = [{"id": "001-a", "stage": "build"}, {"id": "002-b", "stage": "check"}]  # two started heavy jobs: this Mac is at its cap
+
+    def test_heavy_cap_shop_sends_heavy_before_fast(self):
+        """At this Mac's cap shop_tick sends a heavy held job before a fast one; below it, fast goes first."""
+        for name, started, want in (("at the cap", self.STARTED, "060-h"), ("below the cap", self.STARTED[:1], "070-f")):
+            with self.subTest(name):
+                self.sh.reset_mock()
+                root = self.project("mm", [*started, self.queued("060-h"), self.queued("070-f", lane="fast")])
+                got, out, err = self.tick()
+                self.assertEqual((got, out, err), (True, f"shop: mm: {want}: started on shopmac (pid 4242, account owa)\n", ""))
+                self.assertEqual(self.job(root, want)["stage"], "cloud")
+
+    def test_heavy_cap_worker_with_heavy_job_gets_light_one(self):
+        """A worker running one heavy job skips the heavy job in the pool and takes the first light one."""
+        running = {"id": "010-c", "stage": "cloud", "shop": "11", "worker": "shopmac", "account": "main",
+                   "likely": ["src/z.py"]}  # files known: a cloud job with none would hold every launch
+        root = self.project("mm", [*self.STARTED, running, self.queued("060-h", likely=["src/a.py"]),
+                                   self.queued("070-f", lane="fast", likely=["src/b.py"])])
+        got, out, err = self.tick()
+        self.assertEqual((got, out, err), (True, "shop: mm: 070-f: started on shopmac (pid 4242, account owa)\n", ""))
+        self.assertEqual(self.job(root, "060-h")["stage"], "spec", "the heavy job waits")
+        with self.subTest("a pool of heavy jobs only: nothing is sent"):
+            self.sh.reset_mock()
+            root = self.project("mm", [*self.STARTED, running, self.queued("060-h", likely=["src/a.py"])])
+            self.assertEqual(self.tick(), (False, "", ""))
+            self.assertEqual(self.job(root, "060-h")["stage"], "spec")
+            self.assertNotIn("start", self.calls())
+
+    def test_heavy_cap_serve_launches_hold_heavy_and_start_light(self):
+        os.environ["SCRUM_FREE_RAM"] = "100"
+        serve, board = self.serve, self.board
+        with self.subTest("idle_claim"):
+            serve.IDLE_SINCE.clear()
+            root = self.project("mm", [*self.STARTED, self.queued("050-q"), self.queued("051-r", lane="fast")])
+            with mock.patch.object(serve, "spawn", return_value="runs/x.log") as spawn:
+                self.assertIs(serve.idle_claim("mm", root, board.read_board(root)["jobs"]), True)
+            self.assertEqual([c.args[2] for c in spawn.call_args_list], ["051-r"], "the heavy start waits for the shop")
+            serve.IDLE_SINCE.clear()
+            root = self.project("mm", [*self.STARTED, self.queued("050-q")])
+            with mock.patch.object(serve, "spawn", return_value="runs/x.log") as spawn:
+                self.assertIs(serve.idle_claim("mm", root, board.read_board(root)["jobs"]), False)
+            spawn.assert_not_called()
+            self.assertIn("queued_launch", self.job(root, "050-q"))
+        for lane, started in (("standard", False), ("fast", True)):
+            with self.subTest(f"wake_waiting {lane}"):
+                root = self.project("mm", [*self.STARTED, {"id": "059-d", "stage": "done"},
+                                           {"id": "060-w", "stage": "waiting", "lane": lane, "depends_on": ["059-d"]}])
+                with mock.patch.object(serve, "spawn") as spawn, mock.patch.object(board, "machine_ok", return_value=None), \
+                        mock.patch.object(board, "ram_room", return_value=5), \
+                        mock.patch.object(board, "pick_account", return_value=(None, None)):
+                    serve.wake_waiting("mm", root)
+                self.assertEqual([c.args[2] for c in spawn.call_args_list], ["060-w"] if started else [])
+                self.assertEqual(self.job(root, "060-w")["stage"], "spec" if started else "waiting")
+        for line, started in (("[5] Rebuild everything", False), ("[2] Polish the knob", True)):
+            with self.subTest(f"auto_continue_tick {line}"):
+                root = self.project("mm", list(self.STARTED), AUTO)
+                self.backlog(root, line)
+                with mock.patch.object(serve, "spawn") as spawn, mock.patch.object(board, "machine_ok", return_value=None), \
+                        mock.patch.object(board, "live_sessions", return_value=0), mock.patch.object(serve, "running", return_value=False), \
+                        mock.patch.object(board, "pick_account", return_value=(None, None)):
+                    serve.auto_continue_tick({"mm": False})
+                self.assertEqual(spawn.call_count, 1 if started else 0)
 
 
 if __name__ == "__main__":

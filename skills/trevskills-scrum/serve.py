@@ -393,7 +393,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                     refused_live = e
                 except board.HeldStart as e:  # job 1312: a hot Mac queued this start for the shop Mac
                     proc, held = None, e
-                    note_queue_gate(root, job_id, "hot_mac")
+                    note_queue_gate(root, job_id, "heavy_cap" if "heavy_cap(" in str(e) else "hot_mac")
         if refused_live:  # not started and not queued: play_queue_tick would retry it every tick
             print(f"spawn refused: {project}/{job_id} {action}: {refused_live}", file=sys.stderr, flush=True)
             unqueue(root, job)
@@ -544,7 +544,8 @@ def wake_waiting(project, root):
     a `wake` job, which is approved work in flight and only needs RAM room. A
     `wait-on --then` job comes back at needs-human ("retry") and gets an approve spawn instead, from the same room.
     CPU load over the launch limit (cpu_hot, read just before the claim) leaves every one waiting. board.finish_first
-    (work in flight waits on a queue or the machine) holds the plain waiting jobs as cool-down does."""
+    (work in flight waits on a queue or the machine) holds the plain waiting jobs as cool-down does. A heavy job
+    (board.heavy_job) stays waiting while board.heavy_cap_reason(root) holds (job 1314)."""
     if not any(map(board.parked_waiting, board.read_board(root)["jobs"])):
         return
     why = board.machine_ok(root, claim=True) or board.finish_first(root)
@@ -568,7 +569,7 @@ def wake_waiting(project, root):
         note_held(root, cpu_token(), ready_waiting(root))
         return
     out = board.wake_waiting(root, room, hold=lambda j: (cooling and not j.get("wake")) or j.get("wake") and board.resume_blocker(
-        root, j["id"], live_ids(project)))
+        root, j["id"], live_ids(project)) or (not j.get("wake") and board.heavy_cap_reason(root, j)))  # job 1314: a heavy start at the cap waits
     for job_id in out["ready"]:
         spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
     for job_id in out.get("retry", []):
@@ -746,6 +747,15 @@ def clear_of_busy(files, busy) -> bool:
     return all(b and not board.shared_files(files, b) for b in busy) if files else not busy
 
 
+def heavy_held(root, job) -> bool:
+    """True when job is a heavy (board.heavy_job) `start` launch or waiting child and board.heavy_cap_reason(root, job)
+    holds it on this Mac (job 1314): it stays queued or waiting for shop_tick. A resume or other queued launch never is."""
+    launch = job.get("queued_launch")
+    if launch and launch.get("action") != "start":
+        return False
+    return bool(board.heavy_cap_reason(root, job))
+
+
 def idle_claim(project, root, jobs) -> bool:
     """Start one held job once the project has had held work (held_work) and a free slot for IDLE_CLAIM_SECS
     (IDLE_SINCE). A free slot: fewer than
@@ -759,8 +769,10 @@ def idle_claim(project, root, jobs) -> bool:
     holds, only queued launches count as held work. CPU load over the launch
     limit (cpu_hot, re-read just before the claim; a manual queued launch skips it) claims nothing
     and keeps the pick held. A job tagged Runs on shop (board.stored_runs_on) is never held work here: shop_tick
-    sends it. True when one started."""
+    sends it. At this Mac's heavy cap (heavy_held, job 1314) a heavy start is not held work here either: it waits for
+    the shop. True when one started."""
     held = [j for j in held_work(project, jobs) if board.stored_runs_on(root, j) != "shop"]
+    held = [j for j in held if not heavy_held(root, j)]  # job 1314: at this Mac's heavy cap a heavy start waits for the shop
     if any(not j.get("queued_launch") for j in held) and board.finish_first(root):
         held = [j for j in held if j.get("queued_launch")]  # a queued launch is work in flight, a waiting child is new
     if not held or board.live_sessions() >= board.MAX_SESSIONS or board.machine_ok(root, claim=True):
@@ -2157,6 +2169,9 @@ def shop_tick(project, repo, root) -> bool:
     launch whose files are not clear_of_busy(busy_files), checked only when the pool holds a launch) to the first
     shop_worker() worker (out of backoff, room, ready, an account; later workers are not probed).
     This Mac's cool-down does not stop the shop; a worker's own does (shop_worker).
+    Order (job 1314): while this Mac is at its heavy cap (board.heavy_cap_reason) heavy held jobs (board.heavy_job) come
+    first, then fast, then lowest id. A worker runs at most board.SHOP_HEAVY_PER_WORKER heavy jobs (board.shop_heavy_by_worker):
+    with one on it, heavy jobs in the pool are skipped, the first light one is sent, and new work claims only a light line.
     A job tagged Runs on main (board.tag_runs_on; Jev is asked, if at all, only here, with a worker free) is never sent: it is skipped and the next one is tried (job 1155). A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
     profile_copy and start run on that worker; a failed step puts a claimed child back to waiting, prints one
     `shop: <project>: <id>: <step> failed on <alias>` line and holds that worker for SHOP_RETRY_EVERY. With nothing in
@@ -2176,10 +2191,12 @@ def shop_tick(project, repo, root) -> bool:
     jobs_dir = Path(root) / "jobs"
     is_child = lambda j: j["stage"] == "waiting" and bool(j.get("parent"))  # held_work's other kind is a launch
     jobs = board.read_board(root)["jobs"]
+    capped = bool(board.heavy_cap_reason(root))  # this Mac is at its heavy cap: heavy held jobs go to the shop first
+    heavy = {j["id"]: board.heavy_job(root, j) for j in jobs}
     pool = sorted((j for j in held_work(project, jobs)
                    if (is_child(j) or (j.get("queued_launch") or {}).get("action") == "start") and not j.get("paused")
                    and j.get("setup") != "pending" and not board.shop_excluded(root, j, jobs)),
-                  key=lambda j: (board.job_lane(root, j) != "fast", int(j["id"].split("-")[0]), j["id"]))  # fast first, then numeric id: 1000- sorts after 999-
+                  key=lambda j: (not (capped and heavy[j["id"]]), board.job_lane(root, j) != "fast", int(j["id"].split("-")[0]), j["id"]))  # at the heavy cap heavy jobs first, then fast, then numeric id: 1000- sorts after 999-
     # new work, under auto_continue_tick's own rules (opted in, its run-all not running, a claimable line), without finish_first: it holds claims for work starved by this Mac's load,
     # and the shop has its own CPU and e2e.lock
     new_ok = lambda: auto_continue(root) is not None and not running(project, "run-all") and claimable(root)
@@ -2195,7 +2212,11 @@ def shop_tick(project, repo, root) -> bool:
     if w is None:
         return False
     alias, mains = w.alias, 0
+    full = board.shop_heavy_by_worker()[alias] >= board.SHOP_HEAVY_PER_WORKER  # this worker already runs its heavy job
     for job in pool:  # the first that claims; a main job (never sent) or a child held on an overlap tries the next
+        if full and heavy[job["id"]]:  # job 1314: a second heavy job never goes to one worker
+            mains += 1
+            continue
         if board.tag_runs_on(root, job["id"]) == "main":  # Jev, if asked, only now that a worker has room
             mains += 1
             continue
@@ -2215,6 +2236,8 @@ def shop_tick(project, repo, root) -> bool:
             if re.search(r"\bLane:\s*lilguy\b", item["text"], re.I) or board.DIGEST_PROPOSALS_RE.search(item["text"]) \
                     or board.header_value(spec, "Lane", board.LANES) == "lilguy" \
                     or board.names_main_only(item["text"] + "\n" + (text or ""), terms):
+                return False
+            if full and board.heavy_job(root, item):  # job 1314: this worker already runs its heavy job
                 return False
             if busy is None:  # once, under cmd_next's lock: the board as it is at the claim
                 busy = busy_files(project, root, board.read_board(root)["jobs"])
@@ -2661,6 +2684,8 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
     this tick's later starts, except a disk refusal (one volume): that project is skipped and the next is tried.
     A gate hold marks the project (SWEEP_HELD); once marked, no sweep starts until its claimable items differ from
     the last sweep's (job 1132: 129 sweeps in 5 h while swap, CPU and memory gates flickered, nothing new to claim).
+    At this Mac's heavy cap (board.heavy_cap_reason, job 1314) a project whose claimable lines are all heavy
+    (board.heavy_job) starts no sweep: noted heavy_cap, the shop takes them.
     A project missing from busy (its sweep failed this tick) is never a target."""
     for project, repo in board.projects().items():
         root = repo / "scrum"
@@ -2678,6 +2703,11 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
                     note_hold(root, held_gate(refused or fin))
                     SWEEP_HELD.add(project)
                     return
+                if board.heavy_cap_reason(root) and not any(  # job 1314: only heavy lines left: the shop takes them
+                        not i["done"] and not i["setup"] and not i["waits"] and not board.heavy_job(root, i)
+                        for i in board.backlog_items(root)):
+                    note_hold(root, "heavy_cap")
+                    continue
                 live = board.live_sessions()
                 allow = board.pick_account(time.time(), live)[1]
                 if allow is not None and live >= allow:  # the 5h/7d budget is low; retry next tick
