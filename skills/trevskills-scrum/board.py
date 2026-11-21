@@ -1627,7 +1627,7 @@ PROCESSES = (
     ("Digest retry", ("digest_retry_tick",), ()),
     ("Weekly digest", ("weekly_tick",), ()),
     ("Cloud jobs", ("cloud_tick", "cmd_cloud_sync", "cmd_cloud_claim", "shop_tick", "write_shop_room"), ()),
-    ("Usage windows", ("window_tick",), ("windows",)),
+    ("Usage windows", ("window_tick", "hard_stop_tick"), ("windows",)),
     ("Pulse", ("pulse_tick", "record_cpu_sample", "cooldown_chime"), ()),
     ("Run all and triage", ("cmd_runall_start", "cmd_triage_start", "cmd_triage_apply"), ("triage/*",)),
     ("Roadmap and BigBoy", ("cmd_roadmap_next",), ("roadmap.md", "jobs/*/track-*.md", "jobs/*/bigboy-review.md")),
@@ -5061,7 +5061,11 @@ ACCOUNTS = (("main", "~/.claude", (None, 90)), ("owa", "~/.claude-owa", (None, 9
 # (5h, 7d) used % at which an account is held while it is primary_account; an unlisted account has no primary cap.
 # Trevor 2026-11-18 (job 1208): OWA as primary hands new work to main at 97% 7d, keeping room for messageManager and his chats.
 # Trevor 2026-11-19 (job 1228): main as primary keeps 1% so a Trevor-run job (grocery run) can still start.
-PRIMARY_RESERVE = {"owa": (None, 97), "main": (None, 99)}
+# Trevor 2026-11-20: main's cap is the HARD_STOP_PCT line, so pick_account never picks what spawn would refuse.
+PRIMARY_RESERVE = {"owa": (None, 97), "main": (None, 98)}
+# Trevor 2026-11-20 "set a hard stop to scrum for if we hit 98%": no scrum session runs on an account whose 7d window is
+# at this used %, his clicks included (spawn's HardStop), and serve.py hard_stop_tick stops the running ones.
+HARD_STOP_PCT = 98
 Account = namedtuple("Account", "name dir reserve")
 ACCOUNT_RE = re.compile(r"[a-z0-9-]{1,20}")
 
@@ -5469,6 +5473,16 @@ def reserve_hit(acc, usage, now):
     return None
 
 
+def hard_stop(account, now):
+    """Why HARD_STOP_PCT stops every scrum session on the account now (its seven_day window, resets_at > now, at or
+    above it), else None. Only as fresh as usage.json: the statusline of an interactive chat on that account writes it."""
+    w = seven_day_window(account) or {}
+    pct, at = w.get("used_percentage"), w.get("resets_at")
+    if is_num(pct) and is_num(at) and at > now and pct >= HARD_STOP_PCT:
+        return f"hard stop: {account} {round(pct)}% weekly, back {datetime.fromtimestamp(at):%a %-I:%M %p}"
+    return None
+
+
 def pick_account(now, live=0, prefer=None):
     """(name, allowance): name is the first account with room, `prefer` first when listed, then the soonest seven_day reset
     first (no future 7d window last, ACCOUNTS order within ties), else (None, Allowance(0, reason)) naming every account and why. Room: no limit_until marker ahead, usage_allowance None or above the live
@@ -5527,7 +5541,8 @@ def fallback_account(now, recorded):
     accs = accounts()
     names = [a.name for a in accs]
     first = recorded if recorded in names else names[0]
-    return min([first] + [n for n in names if n != first], key=lambda n: limited_until(n, now) or now)
+    return min([first] + [n for n in names if n != first],
+               key=lambda n: (hard_stop(n, now) is not None, limited_until(n, now) or now))  # a hard-stopped one last
 
 
 def fable_used(usage, now):
@@ -9129,6 +9144,11 @@ class LiveSession(SystemExit):
     """spawn's refusal (job 1275): the job already has a live session, so a second one would fight it."""
 
 
+class HardStop(SystemExit):
+    """spawn's refusal while hard_stop holds the account it would run on (Trevor 2026-11-20), his clicks included.
+    serve.spawn keeps the launch queued like a HeldStart, so play_queue_tick starts it once the stop lifts."""
+
+
 class HeldStart(SystemExit):
     """spawn's hold (job 1312): a hand start of a not-yet-started job while this Mac is hot is queued as a `start` launch
     for the shop Mac (or this one once its guard clears) instead of launching."""
@@ -9193,6 +9213,8 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         # job 1184: never prefer the recorded account, so a restart takes the primary whenever it has room
         account = pick_account(time.time())[0] or fallback_account(time.time(), recorded)
     acc = next((a for a in accs if a.name == account), accs[0])  # an unlisted account (its dir gone) runs on the first
+    if why := hard_stop(acc.name, time.time()):
+        raise HardStop(f"job {job_id} not started: {why}")
     env = dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
                CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0")  # -p kills background agents 10 min after the last turn otherwise
     env.pop("CLAUDE_CONFIG_DIR", None)

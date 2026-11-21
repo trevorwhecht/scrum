@@ -2182,14 +2182,14 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("GET", "/api/machine")
             self.assertEqual(code, 200)
             self.assertEqual(out["usage"], {"accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400,
-                                                          "max_pct": 99}],
+                                                          "max_pct": 98}],
                                             "allowance": 0, "fable": "paused", "hold_until": now + 3600})  # 93 % 5h: held
             self.assertNotIn("five_hour_pct", json.dumps(out["usage"]), "the header has no 5h reading")
             self.assertEqual(out["verdict"], None, "the existing keys are unchanged")
             fresh["written_at"] = time.time() - 301  # stale: the weekly reading stays, the allowance and holds go
             usage.write_text(json.dumps(fresh))
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], {
-                "accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400, "max_pct": 99}],
+                "accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400, "max_pct": 98}],
                 "allowance": None, "fable": "unknown", "hold_until": None})
             fresh["rate_limits"]["seven_day"]["resets_at"] = now - 60  # a past reset reads null, as claude_usage
             usage.write_text(json.dumps(fresh))
@@ -2201,7 +2201,7 @@ class ServeTest(unittest.TestCase):
 
     def test_machine_usage_one_weekly_reading_per_account(self):
         """main 49% from a day-old file, owa 90% with its 80/90 reserve: each account's weekly %, its reset and the
-        used % its red starts at (owa: its 7d reserve, or PRIMARY_RESERVE's 97 while primary; main primary: 99, job 1228)."""
+        used % its red starts at (owa: its 7d reserve, or PRIMARY_RESERVE's 97 while primary; main primary: 98, job 1228 and Trevor 2026-11-20)."""
         base = Path(tempfile.mkdtemp(dir=self.tmp.name))
         (base / "main").mkdir()
         (base / "owa").mkdir()
@@ -2213,7 +2213,7 @@ class ServeTest(unittest.TestCase):
         accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [80, 90]]])
         with mock.patch.dict(os.environ, SCRUM_ACCOUNTS=accounts, SCRUM_USAGE=str(base / "main" / "usage.json")):
             self.assertEqual(self.serve.machine_usage(now), {
-                "accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": now + 86400, "max_pct": 99},
+                "accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": now + 86400, "max_pct": 98},
                              {"name": "owa", "seven_day_pct": 90, "resets_at": now + 2 * 86400, "max_pct": 90}],
                 "allowance": None, "fable": "unknown", "hold_until": None})
             accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [70, 85]]])
@@ -13207,7 +13207,9 @@ class E2eFullTest(unittest.TestCase):
         self.assertEqual([f["spec"] for f in rec["failed"]], ["e2e/pricing.spec.ts", "e2e/admin/orders.spec.ts"])
         self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
         self.assertEqual(self.open_items(), [])
-        self.assertTrue(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + 1))
+        # 2026-11-21 crash: a loaded run restarted every ~4 min all night; it now waits E2E_FULL_LOADED_WAIT
+        self.assertFalse(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + 1))
+        self.assertTrue(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + self.serve.E2E_FULL_LOADED_WAIT))
 
     def test_loaded_pass_stays_pass(self):
         with mock.patch.object(self.serve.board, "cpu_load_pct", return_value=350.0):
@@ -13288,11 +13290,12 @@ class HotStopTest(unittest.TestCase):
                 p.kill()
             p.wait()
 
-    def group(self, ignore_term=False):
-        """A live process group leader (its own session), reaped by a thread as serve's run watcher would."""
+    def group(self, ignore_term=False, args=()):
+        """A live process group leader (its own session), reaped by a thread as serve's run watcher would; `args` are
+        extra argv words (a fake claude command line)."""
         code = ("import signal,time,sys\n" + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_term else "")
                 + "print('ready', flush=True)\ntime.sleep(60)\n")
-        p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, start_new_session=True, text=True)
+        p = subprocess.Popen([sys.executable, "-c", code, *args], stdout=subprocess.PIPE, start_new_session=True, text=True)
         self.procs.append(p)
         self.assertEqual(p.stdout.readline().strip(), "ready")
         threading.Thread(target=p.wait, daemon=True).start()
@@ -13347,14 +13350,13 @@ class HotStopTest(unittest.TestCase):
         self.assertIn("not the current UI sweep", str(cm.exception))
         self.assertFalse((self.root / "backlog.md").exists())
         loaded = json.loads((self.root / "ui-sweep.json").read_text())
-        self.assertTrue(self.serve.e2e_full_due(loaded, "h1", 0, loaded["at"] + 1))
+        self.assertTrue(self.serve.e2e_full_due(loaded, "h1", 0, loaded["at"] + self.serve.E2E_FULL_LOADED_WAIT))
         self.assertNotIn("dir", loaded)
 
     def test_changed_record_is_left_alone(self):
         """The record no longer holds the running one the tick read (a late B ui-sweep-record): it is kept."""
         proc = self.group()
         self.sweep(proc)
-        real = self.serve.e2e_full_stop_new_servers
         newer = {"at": 100.0, "head": "h1", "since": "s0", "result": "fail", "findings": 2}
 
         def servers(repo, before, wait=5.0):
@@ -13489,6 +13491,59 @@ class HotStopTest(unittest.TestCase):
         self.assertIn("watchdog: hot stop: boom", err.getvalue())
         room.assert_called()  # the tick went on past the failed hot stop
         self.assertIn("hot_stop_tick once", self.serve.watchdog_tick.__doc__)
+
+
+class HardStopTickTest(unittest.TestCase):
+    """Trevor 2026-11-20: at board.HARD_STOP_PCT 7d, serve.py hard_stop_tick holds and stops that account's scrum
+    sessions and nothing else. The sessions are real process groups whose argv reads like a scrum `claude -p`."""
+    setUp, reap, group = HotStopTest.setUp, HotStopTest.reap, HotStopTest.group
+
+    def usage(self, pct, reset):
+        base = Path(self.tmp.name)
+        for name in ("main", "owa"):
+            (base / name).mkdir(exist_ok=True)
+        (base / "main" / "usage.json").write_text(json.dumps({"written_at": time.time(), "rate_limits": {
+            "seven_day": {"used_percentage": pct, "resets_at": reset}}}))
+        p = mock.patch.dict(os.environ, SCRUM_USAGE=str(base / "main" / "usage.json"), SCRUM_ACCOUNTS=json.dumps(
+            [["main", str(base / "main"), None], ["owa", str(base / "owa"), None]]))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def board_jobs(self):
+        live = self.group(args=("claude", "-p", "/trevskills-scrum resume 1798-x"))
+        owa = self.group(args=("claude", "-p", "/trevskills-scrum resume 1799-y"))
+        stray = self.group(args=("claude",))  # a recycled pid: a claude process that is not 1800-z's session
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "1798-x", "stage": "review", "pid": live.pid, "account": "main"},
+            {"id": "1799-y", "stage": "build", "pid": owa.pid, "account": "owa"},
+            {"id": "1800-z", "stage": "build", "pid": stray.pid, "account": "main"}]}))
+        self.serve.RUNS["repo/1798-x"] = {"action": "resume", "started": time.time(), "proc": live, "log": "x",
+                                          "account": "main"}
+        return live, owa, stray
+
+    def test_stops_and_holds_only_the_stopped_accounts_session(self):
+        reset = int(time.time()) + 86400
+        self.usage(98, reset)
+        live, owa, stray = self.board_jobs()
+        stopped, lines = processes_logged(self.serve.hard_stop_tick)
+        self.assertEqual(stopped, ["repo/1798-x"])
+        self.assertEqual(live.wait(timeout=5), -signal.SIGTERM)
+        self.assertIsNone(owa.poll(), "owa is under the line")
+        self.assertIsNone(stray.poll(), "a pid whose argv does not name the job is never signalled")
+        rows = {j["id"]: j for j in json.loads((self.root / "board.json").read_text())["jobs"]}
+        self.assertEqual((rows["1798-x"]["stage"], rows["1798-x"]["limitResetAt"]), ("review", reset))
+        self.assertNotIn("limitResetAt", rows["1800-z"])
+        self.assertTrue(self.serve.RUNS["repo/1798-x"]["handled"], "respawn_exited never resumes it")
+        self.assertEqual(self.serve.board.limited_until("main", time.time()), reset, "pick_account skips main")
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0]["reason"].startswith("hard stop: main 98% weekly, back "), lines)
+
+    def test_under_the_line_stops_nothing(self):
+        self.usage(97, int(time.time()) + 86400)
+        procs = self.board_jobs()
+        self.assertEqual(self.serve.hard_stop_tick(), [])
+        self.assertEqual([p.poll() for p in procs], [None, None, None])
+        self.assertIn("hard_stop_tick once", self.serve.watchdog_tick.__doc__)
 
 
 class HandStartHoldTest(unittest.TestCase):
