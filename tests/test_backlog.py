@@ -11,6 +11,9 @@ import board, jev  # noqa: E402
 
 class BacklogTest(unittest.TestCase):
     def setUp(self):
+        hc = mock.patch.object(board, "HEAVY_PER_MAC", 99)  # job 1314: these fixtures start many default-lane jobs; HeavyCap tests keep the real cap
+        hc.start()
+        self.addCleanup(hc.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "scrum"
         self.root.mkdir()

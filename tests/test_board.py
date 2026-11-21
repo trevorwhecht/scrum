@@ -72,6 +72,9 @@ def runall_started(root, match=None):
 
 class BoardTest(unittest.TestCase):
     def setUp(self):
+        hc = mock.patch.object(board, "HEAVY_PER_MAC", 99)  # job 1314: these fixtures start many default-lane jobs; HeavyCap tests keep the real cap
+        hc.start()
+        self.addCleanup(hc.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "scrum"
         guard = mock.patch.object(board, "merge_refusal", return_value=None)  # PR-less fixture jobs may go done
@@ -4096,7 +4099,7 @@ class BoardTest(unittest.TestCase):
 
     def test_concurrent_next_never_claims_the_same_item(self):
         self.root.mkdir(parents=True)
-        (self.root / "backlog.md").write_text("".join(f"- [ ] item {i}\n" for i in range(6)))
+        (self.root / "backlog.md").write_text("".join(f"- [ ] [2] item {i}\n" for i in range(6)))  # 2 points: light, so job 1314's heavy cap never holds one
         procs = [subprocess.Popen([sys.executable, str(BOARD_PY), "--dir", str(self.root), "next"],
                                   stdout=subprocess.PIPE, text=True) for _ in range(6)]
         features = [json.loads(p.communicate()[0])["feature"] for p in procs]
@@ -7499,6 +7502,42 @@ print("stub err", file=sys.stderr)
         proc.wait(timeout=10)
         self.assertEqual(len(self.records()), 1)
         self.assertNotIn("queued_launch", self.job_row(job_id))
+
+    def heavy_board(self, *extra, job_lane="standard"):
+        """Two started heavy jobs plus the spec-stage job 915-new (job 1314), on a board with no live sessions."""
+        self.hot_job("915-new")
+        jobs = [{"id": "901-a", "stage": "build", "lane": "standard"}, {"id": "902-b", "stage": "check", "lane": "standard"},
+                {"id": "915-new", "stage": "spec", "lane": job_lane}, *extra]
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        with mock.patch.object(board, "projects", return_value={}):
+            return "915-new"
+
+    def test_heavy_cap_holds_heavy_start(self):
+        """Job 1314: a heavy spec-stage start at the cap queues a start launch and raises HeldStart naming heavy_cap."""
+        job_id = self.heavy_board()
+        with mock.patch.object(board, "projects", return_value={}), self.assertRaises(board.HeldStart) as cm:
+            board.spawn(self.root, job_id, "start", "/p start")
+        self.assertIn("heavy_cap(2/2): 2 heavy jobs on this Mac", str(cm.exception))
+        row = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
+        self.assertEqual(row["queued_launch"], {"action": "start", "prompt": "/p start", "stage": "spec"})
+        self.assertFalse(self.out.exists(), "the stub claude never ran")
+
+    def test_heavy_cap_lets_fast_start_and_resume_through(self):
+        for name, lane, action in (("fast start", "fast", "start"), ("heavy resume", "standard", "resume")):
+            with self.subTest(name):
+                self.out.unlink(missing_ok=True)
+                job_id = self.heavy_board(job_lane=lane)
+                with mock.patch.object(board, "projects", return_value={}):
+                    proc, _ = board.spawn(self.root, job_id, action, "/p", model="sonnet")
+                proc.wait(timeout=10)
+                self.assertEqual(len(self.records()), 1)
+
+    def test_heavy_cap_below_cap_starts_heavy(self):
+        job_id = self.hot_job("916-solo", lane="standard")
+        with mock.patch.object(board, "projects", return_value={}):
+            proc, _ = board.spawn(self.root, job_id, "start", "/p", model="sonnet")
+        proc.wait(timeout=10)
+        self.assertEqual(len(self.records()), 1)
 
     def test_spawn_cli_never_holds(self):
         job_id = self.hot_job()
@@ -14390,3 +14429,142 @@ class TestDbUp(unittest.TestCase):
             self.assertIsNone(board.start_local_db(cwd=self.dir, sleep=lambda s: None))
         self.assertEqual(seen[1:], [["docker", "info"], ["open", "-a", "Docker"], ["docker", "info"],
                                     ["docker", "compose", "up", "-d"]])
+
+
+class HeavyCapBase(unittest.TestCase):
+    """Job 1314: this Mac runs at most HEAVY_PER_MAC heavy jobs; a root with a board of hand-written jobs."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "repo" / "scrum"
+        self.root.mkdir(parents=True)
+        for p in (mock.patch.object(board, "projects", return_value={}),
+                  mock.patch.object(board, "session_alive_fn", return_value=lambda job: False)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def jobs(self, *jobs, root=None):
+        root = root or self.root
+        for j in jobs:
+            (root / "jobs" / j["id"]).mkdir(parents=True, exist_ok=True)
+        (root / "board.json").write_text(json.dumps({"jobs": list(jobs)}))
+
+    def backlog(self, *lines):
+        (self.root / "backlog.md").write_text("# Backlog\n" + "".join(f"- [ ] {l}\n" for l in lines))
+
+
+class HeavyCapReasonTest(HeavyCapBase):
+    def test_counts_heavy_jobs_started_on_this_mac(self):
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard"})
+        self.assertIsNone(board.heavy_cap_reason(self.root))
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "check", "lane": "debug"})
+        self.assertEqual(board.heavy_cap_reason(self.root), "heavy_cap(2/2): 2 heavy jobs on this Mac")
+
+    def test_light_job_never_held(self):
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "check", "lane": "standard"},
+                  {"id": "003-f", "stage": "spec", "lane": "fast"}, {"id": "004-l", "stage": "spec", "lane": "lilguy"})
+        self.assertIsNotNone(board.heavy_cap_reason(self.root))
+        for lane in ("fast", "lilguy"):
+            self.assertIsNone(board.heavy_cap_reason(self.root, {"id": "009-x", "stage": "spec", "lane": lane}))
+        self.assertIsNotNone(board.heavy_cap_reason(self.root, {"id": "009-x", "stage": "spec", "lane": "standard"}))
+        self.assertIsNone(board.heavy_cap_reason(self.root, {"text": "Fix it", "points": 2, "done": False}))
+
+    def test_shop_jobs_and_other_stages_not_counted(self):
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "build", "lane": "standard", "shop": "11"},
+                  {"id": "003-c", "stage": "cloud", "lane": "standard"}, {"id": "004-d", "stage": "done", "lane": "standard"},
+                  {"id": "005-e", "stage": "waiting", "lane": "standard"}, {"id": "006-f", "stage": "needs-human", "lane": "standard"})
+        self.assertIsNone(board.heavy_cap_reason(self.root))
+
+    def test_other_registered_board_counts_and_a_job_leaves_itself_out(self):
+        other = Path(self.tmp.name) / "other" / "scrum"
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "spec", "lane": "standard"})
+        self.jobs({"id": "001-z", "stage": "check", "lane": "standard"}, root=other)
+        with mock.patch.object(board, "projects", return_value={"o": other.parent}):
+            self.assertEqual(board.heavy_cap_reason(self.root), "heavy_cap(3/2): 3 heavy jobs on this Mac")
+            self.assertEqual(board.heavy_count(self.root), 3)
+            self.assertEqual(board.heavy_count(self.root, skip="002-b"), 2)
+
+    def test_queued_launch_not_counted(self):
+        self.jobs({"id": "001-a", "stage": "spec", "lane": "standard", "queued_launch": {"action": "start"}},
+                  {"id": "002-b", "stage": "build", "lane": "standard"})
+        self.assertIsNone(board.heavy_cap_reason(self.root))
+
+    def test_job_heavy_classification(self):
+        self.jobs({"id": "010-p", "stage": "running", "lane": "bigboy"}, {"id": "011-k", "stage": "waiting", "parent": "010-p", "lane": "fast"},
+                  {"id": "012-n", "stage": "spec"}, {"id": "013-r", "stage": "running", "lane": "runall"})
+        (self.root / "jobs" / "012-n" / "feature.md").write_text("Fix\nLane: fast\n")
+        by = {j["id"]: j for j in board.read_board(self.root)["jobs"]}
+        self.assertTrue(board.heavy_job(self.root, by["011-k"]), "a BigBoy child")
+        self.assertFalse(board.heavy_job(self.root, by["012-n"]), "no board lane: feature.md's Lane: fast")
+        self.assertFalse(board.heavy_job(self.root, by["013-r"]))
+        self.assertTrue(board.heavy_job(self.root, {"id": "099-gone", "stage": "spec"}), "no readable lane counts as heavy")
+
+    def test_backlog_line_heavy_classification(self):
+        line = lambda text, points: {"text": text, "points": points, "done": False}
+        self.assertTrue(board.heavy_job(self.root, line("Fix the widget", None)), "no points and no Lane")
+        self.assertTrue(board.heavy_job(self.root, line("Big thing", 5)))
+        self.assertTrue(board.heavy_job(self.root, line("Huge thing", 8)))
+        self.assertFalse(board.heavy_job(self.root, line("Small thing", 2)))
+        self.assertFalse(board.heavy_job(self.root, line("Tiny thing Lane: fast", None)), "an inline Lane: fast")
+        self.assertTrue(board.heavy_job(self.root, line("Normal thing Lane: standard", None)))
+        spec = board.spec_path(self.root, "Specced thing")
+        spec.parent.mkdir(exist_ok=True)
+        spec.write_text("# Spec\nLane: lilguy\n## Likely files\n")
+        self.assertFalse(board.heavy_job(self.root, line("Specced thing", None)), "the pre-written spec's Lane")
+
+
+class HeavyCapNextTest(HeavyCapBase):
+    def full(self):
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "check", "lane": "standard"})
+
+    def test_next_skips_heavy_line_at_cap(self):
+        self.full()
+        self.backlog("[5] Rebuild everything", "[2] Polish the knob")
+        out = board.cmd_next(self.root)
+        self.assertEqual(out["feature"], "Polish the knob")
+        self.assertEqual(board.cmd_next(self.root), {"id": None, "feature": None}, "only the heavy line is left")
+
+    def test_next_with_shop_or_index_not_held(self):
+        self.full()
+        self.backlog("[5] Rebuild everything")
+        out = board.cmd_next(self.root, shop=lambda item: True)
+        self.assertEqual(out["feature"], "Rebuild everything")
+        self.backlog("[5] Rebuild again")
+        self.assertEqual(board.cmd_next(self.root, index=0)["feature"], "Rebuild again")
+
+    def test_next_claims_heavy_below_cap(self):
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard"})
+        self.backlog("[5] Rebuild everything")
+        self.assertEqual(board.cmd_next(self.root)["feature"], "Rebuild everything")
+
+
+class HeavyCapReadyTest(HeavyCapBase):
+    def runall(self, *kids):
+        (self.root.parent / "src").mkdir(exist_ok=True)
+        self.jobs({"id": "010-p", "stage": "running", "lane": "runall", "children": [k["id"] for k in kids]},
+                  {"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "check", "lane": "standard"},
+                  *({"stage": "waiting", "parent": "010-p", "parallel": True, **k} for k in kids))
+        for k in kids:
+            (self.root / "jobs" / k["id"] / "spec.md").write_text(f"# Spec\n## Likely files\n- `src/{k['id']}.py`\n")
+
+    def test_ready_leaves_heavy_child_waiting_at_cap(self):
+        self.runall({"id": "011-h"}, {"id": "012-f", "lane": "fast"})
+        out = board.cmd_ready(self.root, "010-p")
+        self.assertEqual(out["ready"], ["012-f"])
+        self.assertEqual(board.find(board.read_board(self.root), "011-h")["stage"], "waiting")
+
+    def test_ready_with_shop_claims_heavy_child(self):
+        self.runall({"id": "011-h"})
+        out = board.cmd_ready(self.root, "010-p", shop="011-h")
+        self.assertEqual(out["ready"], ["011-h"])
+
+    def test_ready_counts_its_own_heavy_claims(self):
+        self.jobs({"id": "010-p", "stage": "running", "lane": "runall", "children": ["011-h", "012-h", "013-h"]},
+                  *({"id": i, "stage": "waiting", "parent": "010-p", "parallel": True} for i in ("011-h", "012-h", "013-h")))
+        (self.root.parent / "src").mkdir(exist_ok=True)
+        for i in ("011-h", "012-h", "013-h"):
+            (self.root / "jobs" / i / "spec.md").write_text(f"# Spec\n## Likely files\n- `src/{i}.py`\n")
+        with mock.patch.object(board, "machine_ok", return_value=None), mock.patch.object(board, "ram_room", return_value=5), \
+                mock.patch.object(board, "pick_account", return_value=(None, None)):
+            self.assertEqual(board.cmd_ready(self.root, "010-p")["ready"], ["011-h", "012-h"])

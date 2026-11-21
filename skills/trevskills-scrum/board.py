@@ -861,7 +861,8 @@ def cmd_next(root, index=None, shop=None):
     """Claim the highest-priority open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one.
     Cool-down refuses the automatic claim (no index), and so does finish_first; an explicit index is Trevor's Run now
     and still claims. `shop` (serve.py's shop_tick, a claim for the shop Mac) is a predicate the automatic pick must
-    also pass; neither cool-down nor finish_first refuses it (the shop runs on its own CPU and e2e.lock), and the job is started_by shop."""
+    also pass; neither cool-down nor finish_first refuses it (the shop runs on its own CPU and e2e.lock), and the job is started_by shop.
+    Without `shop` and index, while heavy_cap_reason(root) holds, a heavy line (heavy_job) is skipped for the shop Mac (job 1314)."""
     if index is None and shop is None and cooling_down():
         raise SystemExit(COOLING_CLAIM)
     if index is None and shop is None and (soft := soft_cap_reason()):
@@ -870,9 +871,10 @@ def cmd_next(root, index=None, shop=None):
         raise SystemExit(f"{hold}: no new backlog claim. It claims again once that job moves on.")
     with locked_board(root) as board:
         lines, items = read_backlog(root)
+        capped = index is None and shop is None and heavy_cap_reason(root)  # job 1314: heavy lines wait for the shop Mac
         if index is None:
             item = next((i for i in sorted(items, key=priority_key) if not i["done"] and not i["setup"] and not waiting_on(i, items, board) and not origin_open(i, board)
-                         and (shop is None or shop(i))), None)
+                         and (shop is None or shop(i)) and not (capped and heavy_job(root, i))), None)
             if item is None:
                 return {"id": None, "feature": None}
         else:
@@ -6232,6 +6234,74 @@ def light_job(root, job: dict) -> bool:
     return job_lane(root, job) in LIGHT_LANES or _project_light(root)
 
 
+HEAVY_PER_MAC = 2  # job 1314: heavy jobs (heavy_job) this Mac runs at once; further heavy work waits for the shop Mac
+SHOP_HEAVY_PER_WORKER = 1  # heavy jobs one shop worker runs at once (serve.py shop_tick)
+
+
+def heavy_job(root, job: dict, parent_lane=None) -> bool:
+    """True when `job` is heavy (job 1314: it runs jest, tsc and lint). A board job (it has a `stage`): job_lane
+    standard or debug, no readable lane (crash prevention), or a child of a BigBoy parent (`parent_lane` bigboy, else
+    the parent's lane on root's board). A backlog item (no `stage`): points of BIG_POINTS or more; with no points, a
+    `Lane:` of its pre-written spec or its text that is not fast or lilguy, and no `Lane:` at all; any other points
+    are light."""
+    if "stage" in job:
+        if parent_lane is None and job.get("parent"):
+            try:
+                parent_lane = job_lane(root, find(read_board(root), job["parent"]))
+            except (SystemExit, OSError):
+                parent_lane = None
+        lane = job_lane(root, job)
+        return parent_lane == "bigboy" or lane in ("standard", "debug", None)
+    points = job.get("points")
+    if points is not None:
+        return points >= BIG_POINTS
+    text = str(job.get("text") or "")
+    lane = header_value(spec_path(root, text), "Lane", LANES) if text else None
+    if not lane and (m := re.search(r"\bLane:\s*(" + "|".join(LANES) + r")\b", text, re.I)):
+        lane = m[1].lower()
+    return lane not in LIGHT_LANES
+
+
+def heavy_count(root, skip=None) -> int:
+    """How many heavy_job jobs run on this Mac (job 1314): jobs on any registered board (and root's) in a WATCHED stage
+    with no `shop` field and no queued launch, except the job id `skip` on root's board."""
+    here = Path(root).resolve()
+    roots = {here: Path(root)}
+    for repo in projects().values():
+        roots.setdefault((repo / "scrum").resolve(), repo / "scrum")
+    n = 0
+    for key, r in roots.items():
+        try:
+            jobs = read_board(r)["jobs"]
+        except (SystemExit, OSError):
+            continue
+        by_id = {j["id"]: j for j in jobs}
+        for j in jobs:
+            if j.get("stage") not in WATCHED or j.get("shop") or j.get("queued_launch") or (skip == j["id"] and key == here):
+                continue
+            pl = job_lane(r, by_id[j["parent"]]) if j.get("parent") in by_id else None
+            n += heavy_job(r, j, parent_lane=pl)
+    return n
+
+
+def heavy_cap_reason(root, job=None) -> str | None:
+    """None, or why this Mac takes no more heavy work (job 1314): heavy_count(root), leaving out `job` itself, is
+    HEAVY_PER_MAC or more. With `job` (a board job or a backlog item) that is not heavy, None. Soft cool down counts
+    both Macs together; this only places work."""
+    if job is not None and not heavy_job(root, job):
+        return None
+    n = heavy_count(root, skip=(job or {}).get("id") if job is not None and "stage" in job else None)
+    return f"heavy_cap({n}/{HEAVY_PER_MAC}): {n} heavy jobs on this Mac" if n >= HEAVY_PER_MAC else None
+
+
+def shop_heavy_by_worker():
+    """Counter of the heavy (heavy_job) stage-cloud `shop` jobs per worker alias, every registered board (shop_jobs_by_worker's
+    alias rule); serve.py shop_tick keeps a worker at SHOP_HEAVY_PER_WORKER."""
+    return Counter(j.get("worker") or "shopmac" for r in projects().values()
+                   for j in read_board(r / "scrum")["jobs"]
+                   if j.get("stage") == "cloud" and j.get("shop") and heavy_job(r / "scrum", j))
+
+
 def ram_share(light=False):
     """The RAM % ram_room counts per new session: the measured session_rss_pct (SESSION_RAM_PCT when unknown, never
     below MIN_SESSION_RAM_PCT), or for a light job that capped at LIGHT_SESSION_RAM_PCT."""
@@ -6542,7 +6612,8 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
     `shop` (only= and manual included) first tags each waiting child that is not shop_excluded with tag_runs_on, before
     the lock (Jev is a network call), then leaves an `any` child (an untagged one counts as any; under the lock only the
     header and stored field are read) in waiting for the shop, setting `shop_first_since` once, until it is older than
-    SHOP_FIRST_MAX_S; a claim drops it."""
+    SHOP_FIRST_MAX_S; a claim drops it. Job 1314: a call without `shop` and not `manual`, while heavy_cap_reason(root)
+    holds, leaves each heavy_job child waiting for the shop Mac (like a `shop` tag), so only light children claim here."""
     jobs_dir = Path(root) / "jobs"
     shop_first = not shop and shop_room(root)  # a worker has room: an `any` child goes there first
     if shop_first:
@@ -6622,6 +6693,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
             room = min(room, cap)
         light_room = None  # read once a light kid meets a spent standard room: spawn's size for it (job 955)
         ready = []
+        heavy_n = None  # heavy_count read once the first heavy waiting child is met (job 1314)
         left = []  # children left in waiting for a shop Mac: the parent keeps running
         critical = lambda j: str(j.get("title") or "").startswith("Critical")
         built = {}  # holder id -> not unbuilt(), so each holder's branch is read once per call
@@ -6636,6 +6708,13 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
             if tag == ("main" if shop else "shop"):
                 left.append(k["id"])
                 continue
+            heavy = not shop and not manual and heavy_job(root, k, parent_lane=parent.get("lane"))
+            if heavy:  # job 1314: counted once per call, then each heavy claim adds one
+                if heavy_n is None:
+                    heavy_n = heavy_count(root)
+                if heavy_n >= HEAVY_PER_MAC:
+                    left.append(k["id"])  # at this Mac's heavy cap: waits for the shop Mac
+                    continue
             light = (k.get("lane") or header_value(jobs_dir / k["id"] / "spec.md", "Lane", LANES)
                      or header_value(jobs_dir / k["id"] / "feature.md", "Lane", LANES)) in LIGHT_LANES
             if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the free RAM
@@ -6706,6 +6785,8 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
             busy.append(k)
             slots.append(k)
             ready.append(k["id"])
+            if heavy:
+                heavy_n += 1
         shop_left = list(left)  # the BLOCKED branch below reuses `left` for its own list
         merged = sum(k["stage"] == "done" for k in kids)
         finished = sum(k["stage"] in ("done", "aborted") for k in kids)  # an aborted child never runs again
@@ -9067,7 +9148,8 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     the UI sweep passes 19). `flags` without their own get --strict-mcp-config and --settings spawn_settings(...); a job
     whose job_lane is not lilguy runs with CLAUDE_CODE_DISABLE_CLAUDE_MDS=1. With `hot_hold` (the `B spawn` CLI passes
     False), a `start` of a board job at stage spec with no `shop` field launches nothing while hand_hold(root) gives a
-    reason: queue_start queues it and HeldStart (a SystemExit) says so (job 1312). Returns (proc, log path relative to root)."""
+    reason, or heavy_cap_reason(root, job) gives one (job 1314: a heavy job at this Mac's heavy cap): queue_start queues it
+    and HeldStart (a SystemExit) says so (job 1312). Returns (proc, log path relative to root)."""
     root = Path(root)  # a chat hand-off passes a str
     if not SPAWN_ID_RE.fullmatch(job_id):
         raise SystemExit(f"bad spawn id {job_id!r}")
@@ -9086,8 +9168,8 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     if job and session_alive_fn(skip=caller)(job):  # job 1275: two sessions on one job fight over its worktree
         pid = job.get("pid") if job.get("pid") != caller else None  # the caller's own pid is not the live one
         raise LiveSession(f"job {job_id} already has a live session (pid {pid or 'unknown'})")
-    if hot_hold and action == "start" and job.get("stage") == "spec" and not job.get("shop") and (why := hand_hold(root)) \
-            and queue_start(root, job_id, prompt):
+    if hot_hold and action == "start" and job.get("stage") == "spec" and not job.get("shop") \
+            and (why := hand_hold(root) or heavy_cap_reason(root, job)) and queue_start(root, job_id, prompt):
         raise HeldStart(f"job {job_id} queued, not started on this Mac: {why}; the shop Mac takes it when a worker has "
                         "room, else it starts here once this Mac's guard clears")
     if account is None:
