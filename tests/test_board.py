@@ -7535,6 +7535,26 @@ print("stub err", file=sys.stderr)
                 board.spawn(self.root, job_id, "start")
         self.assertEqual(self.job_row(job_id)["play_queued"], first, "a second held call keeps the first time")
 
+    def test_spawn_refused_at_hard_stop(self):
+        """Trevor 2026-11-20: at HARD_STOP_PCT 7d spawn refuses every launch on that account, a click's too, before the
+        stub runs; below it, or once that window has reset, there is no stop."""
+        job_id = self.hot_job(stage="review")
+        usage = self.account / "usage.json"
+
+        def write(pct, reset):
+            usage.write_text(json.dumps({"written_at": time.time(), "rate_limits": {
+                "seven_day": {"used_percentage": pct, "resets_at": reset}}}))
+        write(98, time.time() + 86400)
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)):
+            with self.assertRaises(board.HardStop) as cm:
+                board.spawn(self.root, job_id, "resume", "/p resume")
+            self.assertIn("not started: hard stop: main 98% weekly, back ", str(cm.exception))
+            self.assertFalse(self.out.exists(), "the stub claude never ran")
+            write(97.9, time.time() + 86400)
+            self.assertIsNone(board.hard_stop("main", time.time()))
+            write(100, time.time() - 1)
+            self.assertIsNone(board.hard_stop("main", time.time()), "that window already reset")
+
     def test_queue_start_rechecks_under_lock(self):
         job_id = self.hot_job(shop="mini")
         self.assertFalse(board.queue_start(self.root, job_id))

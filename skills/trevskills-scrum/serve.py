@@ -391,9 +391,10 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                     proc, log = board.spawn(root, job_id, action, prompt, flags, **niced)
                 except board.LiveSession as e:  # job 1275: a second session would fight the live one
                     refused_live = e
-                except board.HeldStart as e:  # job 1312: a hot Mac queued this start for the shop Mac
-                    proc, held = None, e
-                    note_queue_gate(root, job_id, "heavy_cap" if "heavy_cap(" in str(e) else "hot_mac")
+                except (board.HeldStart, board.HardStop) as e:  # job 1312: a hot Mac queued this start for the shop Mac
+                    proc, held = None, e  # a HardStop stays queued the same way, so it starts once the stop lifts
+                    note_queue_gate(root, job_id, "hard_stop" if isinstance(e, board.HardStop)
+                                    else "heavy_cap" if "heavy_cap(" in str(e) else "hot_mac")
         if refused_live:  # not started and not queued: play_queue_tick would retry it every tick
             print(f"spawn refused: {project}/{job_id} {action}: {refused_live}", file=sys.stderr, flush=True)
             unqueue(root, job)
@@ -438,7 +439,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
         except board.LiveSession as e:  # job 1275: a board job past the gate (cloud-home) is checked too
             print(f"spawn refused: {project}/{job_id} {action}: {e}", file=sys.stderr, flush=True)
             return None
-        except board.HeldStart as e:  # job 1312: a job that reached the board meanwhile
+        except (board.HeldStart, board.HardStop) as e:  # job 1312: a job that reached the board meanwhile
             print(f"spawn held: {project}/{job_id} {action}: {e}", file=sys.stderr, flush=True)
             return None
         if action == "run-all" and not manual:  # a run-all launch (not a board job) is a start too, for pulse_tick
@@ -1094,6 +1095,9 @@ def e2e_queue_free():
 # project's main checkout, after 5 merges or 24 h. One run in flight across all projects.
 E2E_FULL = {"running": None}  # the project whose full run is in flight in this serve.py
 E2E_FULL_MERGES, E2E_FULL_EVERY, E2E_FULL_STALE = 5, 86400, 7200
+# 2026-11-21 crash: a `loaded` run due at once was hot stopped and restarted 152 times in 11 h (start passes,
+# the run pushes memory pressure to level 2, hot_stop_tick kills it, pressure falls, repeat) until the Mac hung.
+E2E_FULL_LOADED_WAIT = 3600
 E2E_FULL_LOAD_SECS = 60  # e2e_full_run samples board.cpu_load_pct once per this many seconds of the run, and at exit
 E2E_FULL_FAILED_RE = re.compile(r"^\s*(\d+) failed\s*$")
 E2E_FULL_ENTRY_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*›\s*)?(\S+?):(\d+):\d+\s*›\s*(.+?)[\s─]*$")  # ─ pads the line
@@ -1110,10 +1114,13 @@ E2E_FULL_DEV_LOG = "/tmp/e2e-next-dev-{}.log"  # a webServer's tee'd next dev lo
 def e2e_full_due(record, head, merges, now, settled=False) -> bool:
     """A full run is due with no record yet, else only when HEAD moved and 5+ commits or 24 h passed since the last,
     or the project is settled (cool down is on and no job blocks a restart there). An `error` or `running` record
-    24 h+ old is due whatever the HEAD, so a failed or orphaned run is retried. A `loaded` record (a fail under load)
-    or a `busy` one (another dev server held the checkout) is due at once, whatever the HEAD, merges or age."""
-    if not record or record.get("result") in ("loaded", "busy"):
+    24 h+ old is due whatever the HEAD, so a failed or orphaned run is retried. A `busy` record (another dev server
+    held the checkout) is due at once; a `loaded` one (a fail under load, or hot stopped) once E2E_FULL_LOADED_WAIT has
+    passed since its start, whatever the HEAD or merges."""
+    if not record or record.get("result") == "busy":
         return True
+    if record.get("result") == "loaded":
+        return now - (record.get("at") or 0) >= E2E_FULL_LOADED_WAIT
     if record.get("result") in ("error", "running") and now - (record.get("at") or 0) >= E2E_FULL_EVERY:
         return True
     return head != record.get("head") and (settled or merges >= E2E_FULL_MERGES
@@ -1366,6 +1373,55 @@ def stop_group(pid, wait=HOT_STOP_WAIT) -> bool:
     except (ProcessLookupError, PermissionError):
         pass
     return True
+
+
+def hard_stop_tick() -> list[str]:
+    """Trevor 2026-11-20: stop every scrum session on an account board.hard_stop holds. A board job whose recorded pid
+    is a live claude process naming the job is held first (hold_limited, fixed at that 7d window's reset, which also writes the limit
+    marker so pick_account skips the account), so auto_resume picks it up where it stopped after the reset, or sooner on
+    another account with room; its RUNS entry is marked handled so respawn_exited never resumes it. A tracked run with
+    no board job (run-all, digest) is only stopped. Returns the `<project>/<id>` names stopped."""
+    now = time.time()
+    resets = {a.name: int(board.seven_day_window(a.name)["resets_at"]) for a in board.accounts()
+              if board.hard_stop(a.name, now)}
+    if not resets:
+        return []
+    first, stopped = board.accounts()[0].name, []
+
+    def runs_job(pid, job_id):  # a recorded pid can be recycled: only a claude process whose argv names the job
+        try:
+            out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return board._is_claude(out.strip()) and job_id in out
+
+    for project, repo in board.projects().items():
+        root = repo / "scrum"
+        try:
+            jobs = board.read_board(root)["jobs"]
+        except (SystemExit, OSError, KeyError):
+            continue
+        for job in jobs:
+            acc, pid = job.get("account") or first, job.get("pid")
+            if acc not in resets or job.get("stage") in ("done", "aborted") or not isinstance(pid, int) \
+                    or not runs_job(pid, job["id"]):
+                continue
+            with RUNS_LOCK:
+                if run := RUNS.get(f"{project}/{job['id']}"):
+                    run["handled"] = run["limit_noted"] = True
+            if job.get("stage") in board.WATCHED:
+                hold_limited(root, job, resets[acc], fixed=True)
+            if stop_group(pid):
+                board.log_process("Usage windows", "stopped", repo=str(repo), reason=board.hard_stop(acc, now))
+                stopped.append(f"{project}/{job['id']}")
+    with RUNS_LOCK:
+        runs = [(k, r) for k, r in RUNS.items() if r.get("account") in resets and r["proc"].poll() is None]
+    for key, run in runs:
+        run["handled"] = run["limit_noted"] = True
+        if stop_group(run["proc"].pid) and key not in stopped:
+            board.log_process("Usage windows", "stopped", reason=board.hard_stop(run["account"], now))
+            stopped.append(key)
+    return stopped
 
 
 def hot_stop_tick() -> list[str]:
@@ -3787,7 +3843,8 @@ def watchdog_tick():
     then write_shop_room (shop-room.json, which cmd_ready reads), written again after a shop_tick that dispatched,
     then agent_links_tick (re-runs install.sh when a scrum agent link is bad, in its own guard), then hot_stop_tick once,
     before the per-project loop (stops a running UI sweep or full E2E while board.heavy_hold gives a reason, in its own
-    guard; job 1312)."""
+    guard; job 1312), then hard_stop_tick once (stops every scrum session on an account at board.HARD_STOP_PCT 7d, in
+    its own guard; Trevor 2026-11-20)."""
     global RESUME_ROOM, E2E_RESUMED
     try:
         board.record_cpu_sample()  # cpu_busy_pct's reading; first, so this tick's machine_ok sees it
@@ -3809,6 +3866,10 @@ def watchdog_tick():
         hot_stop_tick()
     except (Exception, SystemExit) as e:
         print(f"watchdog: hot stop: {e}", file=sys.stderr, flush=True)
+    try:
+        hard_stop_tick()  # Trevor 2026-11-20: 98% weekly stops every scrum session on that account
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: hard stop: {e}", file=sys.stderr, flush=True)
     busy, alive, seen, candidates, idle = {}, once(lambda: board.session_alive_fn()), [], [], []
     pending = disk_short = False
     RESUME_ROOM, E2E_RESUMED = board.ram_room(), False
