@@ -91,9 +91,8 @@ class MachineMeter(unittest.TestCase):
         self.assertIn('<p class="error" role="alert"></p>', ra, "the empty error slot stays for failed clicks")
         self.assertNotRegex(ra, r'role="alert">[^<]*queued')
         poll = fn_body(text, "poll")
-        self.assertIn('readMachine().then(m => { renderMachine(m); renderAiUsage(m); renderCooldown(m); })', poll)
-        self.assertIn('const readMachine = single(() => getJson("api/machine", null));', text)
-        self.assertLess(poll.index('readMachine()'), poll.index('timed("api/projects"'),
+        self.assertIn('(poll.machine ||= getJson("api/machine", null).finally(() => { poll.machine = null; })).then(m => { renderMachine(m); renderAiUsage(m); renderCooldown(m); })', poll)
+        self.assertLess(poll.index('api/machine'), poll.index('timed("api/projects"'),
                         "fetched before anything that can return early, on every poll")
         render = fn_body(text, "renderMachine")
         self.assertIn("el.hidden = false", render, "a failed or 404 fetch (null) keeps the meter, showing —")
