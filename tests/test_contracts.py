@@ -1172,7 +1172,7 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(text.count(phrase), 1, name)
             para = next(l for l in text.splitlines() if l.startswith("**Compare with the base.**"))
             self.assertIn(phrase, para, name)
-            self.assertLessEqual(len(text), 21900 if name == "review-ui" else 20400, name)  # +Real data review-ui, job 830, +tall-row rule job 893, +Sweep mode, job 894, +digest 030 p1, job 1056
+            self.assertLessEqual(len(text), 21900 if name == "review-ui" else 21400, name)  # +Open what it makes review-ux, job 1315; +Real data review-ui, job 830, +tall-row rule job 893, +Sweep mode, job 894, +digest 030 p1, job 1056
 
     def test_ui_reviewer_reuses_harness_dir(self):
         """Job 1247: the UI reviewer keeps its harness in HARNESS_DIR and reuses it from round 2."""
