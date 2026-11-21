@@ -1065,7 +1065,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 28100, "newjob.md")  # +load wait ask, job 1316; +job E2E budget, job 1311; +lilguy hand-off, job 1261; +fast lane Out of scope, job 1257; +debug E2E in background, Build queue, job 1250; +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 28566, "newjob.md")  # +wrong-project move, job 1319; +load wait ask, job 1316; +job E2E budget, job 1311; +lilguy hand-off, job 1261; +fast lane Out of scope, job 1257; +debug E2E in background, Build queue, job 1250; +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -2793,7 +2793,7 @@ class ContractTest(unittest.TestCase):
         ui = (ROOT / "agents" / "scrum-review-ui.md").read_text()
         debt = ("- Judge new violations in this diff, not existing debt. Put existing debt under Notes as "
                 "`pre-existing: <rule ID> — <where>`, never as a finding.")
-        blocking = ("- A new violation of a numbered rule in the UI behaviour file (for example a new link "
+        blocking = ("- A new violation of a numbered rule in the UI behaviour file (for example a new button "
                     "under 44 px, UB-15) is `[blocking]` with confidence ≥ 80, never `[minor]`.")
         self.assertIn(debt + "\n" + blocking + "\n", ux)
         harness = ("When the page needs a signed-in session or a database you cannot reach, render the new "
