@@ -1836,7 +1836,7 @@ def auto_resume(project, root, jobs):
         if str(job.get("reason") or "").startswith(board.STALL + board.LOAD_BLOCK_WAIT):  # no try spent, never spent
             if refused(job) is None and room(job):
                 busy = True
-                resume_job(project, root, job, jobs, note=LOAD_BLOCK_NOTE if job.get("lane") == "debug" else LOAD_WAIT_NOTE)
+                resume_job(project, root, job, jobs, note=LOAD_BLOCK_NOTE if job.get("lane") == "debug" and job["stage"] == "build" else LOAD_WAIT_NOTE)
             continue
         tries, due = AUTO_RESUME.get(key, [0, 0.0])
         if tries >= AUTO_RESUME_MAX:

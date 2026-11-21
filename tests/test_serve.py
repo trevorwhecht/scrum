@@ -8250,6 +8250,11 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(resume.call_args.kwargs, {"note": self.CHECKNOTE})
         self.assertNotIn("p/chk", s.AUTO_RESUME)
 
+    def test_auto_resume_debug_lane_stalled_in_check_gets_check_note(self):
+        self.jobs = [{"id": "dbg", "stage": "check", "lane": "debug", "stalled": True, "reason": self.LOADWAIT, "loadWaits": 1}]
+        resume = self.load_sweep(None)
+        self.assertEqual(resume.call_args.kwargs, {"note": self.CHECKNOTE})
+
     def test_auto_resume_check_load_wait_held_while_machine_refuses(self):
         self.jobs = [{"id": "chk", "stage": "check", "stalled": True, "reason": self.LOADWAIT, "loadWaits": 1}]
         self.load_sweep(self.serve.board.MACHINE_WAIT + "CPU load 14").assert_not_called()
