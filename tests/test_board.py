@@ -891,28 +891,92 @@ class BoardTest(unittest.TestCase):
 
     def test_ask_debug_blocked_machine_load_is_stalled(self):
         job_id = self.staged("build")
-        want = "stalled: debug blocked by machine load; retrying on a quiet machine"
+        want = "stalled: failed under machine load; retrying on a quiet machine"
         before = len(self.log_lines())
         with mock.patch.object(board, "play") as play:
             out = board.cmd_ask(self.root, job_id, self.LOAD_Q, [f"R=resume {job_id}", f"A=abort {job_id}"], title="BUILDER_BLOCKED")
         self.assertEqual(out, {"stalled": True})
         play.assert_not_called()
         job = next(j for j in self.jobs() if j["id"] == job_id)
-        self.assertEqual((job["stage"], job["stalled"], job["reason"], job["loadBlocked"]), ("build", True, want, True))
+        self.assertEqual((job["stage"], job["stalled"], job["reason"], job["loadWaits"]), ("build", True, want, 1))
         for k in ("question", "options", "recommend"):
             self.assertNotIn(k, job)
         self.assertEqual([(l["kind"], l.get("auto")) for l in self.log_lines()[before:]], [("stall", True)])
 
-    def test_ask_debug_blocked_machine_load_second_time_parks(self):
+    def test_ask_debug_blocked_machine_load_fourth_time_parks(self):
         job_id = self.staged("build")
+        opts = [f"R=resume {job_id}", f"A=abort {job_id}"]
         with mock.patch.object(board, "play") as play:
-            board.cmd_ask(self.root, job_id, self.LOAD_Q, [f"R=resume {job_id}", f"A=abort {job_id}"], title="BUILDER_BLOCKED")
+            for _ in range(3):
+                board.cmd_ask(self.root, job_id, self.LOAD_Q, opts, title="BUILDER_BLOCKED")
             self.assertEqual(play.call_count, 0)
-            board.cmd_ask(self.root, job_id, self.LOAD_Q, [f"R=resume {job_id}", f"A=abort {job_id}"], title="BUILDER_BLOCKED")
+            board.cmd_ask(self.root, job_id, self.LOAD_Q, opts, title="BUILDER_BLOCKED")
             self.assertEqual(play.call_count, 1)
         job = next(j for j in self.jobs() if j["id"] == job_id)
-        self.assertEqual((job["stage"], job["question"]), ("needs-human", self.LOAD_Q))
+        self.assertEqual((job["stage"], job["question"]), ("needs-human", "Failed under machine load 3 times on a quiet machine: " + self.LOAD_Q))
         self.assertTrue(job["options"])
+
+    Q1678 = ("Build check could not finish E2E: the machine was overloaded (load 25-34 on 8 cores), so the dev server "
+             "stalled and sign-in timed out.")
+    Q1764 = "the machine was overloaded, so the browser tests timed out twice"
+
+    def check_ask(self, job_id, q, **kw):
+        return board.cmd_ask(self.root, job_id, q, [f"R=resume {job_id}", f"A=abort {job_id}"], **kw)
+
+    def test_ask_check_load_checks_failing_stalls_in_check(self):
+        job_id = self.staged("check")
+        before = len(self.log_lines())
+        with mock.patch.object(board, "play") as play:
+            out = self.check_ask(job_id, self.Q1678, title="CHECKS_FAILING")
+        self.assertEqual(out, {"stalled": True})
+        play.assert_not_called()
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual((job["stage"], job["stalled"], job["reason"], job["loadWaits"]),
+                         ("check", True, "stalled: " + board.LOAD_BLOCK_WAIT, 1))
+        for k in ("question", "options", "recommend", "stopTitle"):
+            self.assertNotIn(k, job)
+        self.assertEqual([(l["kind"], l.get("auto")) for l in self.log_lines()[before:]], [("stall", True)])
+
+    def test_ask_check_load_check_fail_kind_skips_unblocker(self):
+        job_id = self.staged("check")
+        with mock.patch.object(board, "play"):
+            out = self.check_ask(job_id, self.Q1764, kind="check-fail", title="CHECKS_FAILING")
+        self.assertEqual(out, {"stalled": True})
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertNotIn("unblocks", job)
+        self.assertEqual(job["stage"], "check")
+
+    def test_ask_quiet_machine_prefix_stalls(self):
+        job_id = self.staged("check")
+        with mock.patch.object(board, "play"):
+            out = self.check_ask(job_id, "waiting on a quiet machine: E2E timed out", title="CHECKS_FAILING")
+        self.assertEqual(out, {"stalled": True})
+
+    def test_ask_check_load_fourth_ask_parks(self):
+        job_id = self.staged("check")
+        with mock.patch.object(board, "play") as play:
+            for _ in range(3):
+                self.assertEqual(self.check_ask(job_id, self.Q1678, title="CHECKS_FAILING"), {"stalled": True})
+            self.check_ask(job_id, self.Q1678, title="CHECKS_FAILING")
+        play.assert_called_once()
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual(job["stage"], "needs-human")
+        self.assertTrue(job["question"].startswith("Failed under machine load 3 times on a quiet machine:"))
+        self.assertNotIn("unblocks", job)
+
+    def test_ask_check_non_load_checks_failing_parks(self):
+        job_id = self.staged("check")
+        q = "Build check failed: 3 tests fail in test_orders"
+        with mock.patch.object(board, "play") as play:
+            self.check_ask(job_id, q, title="CHECKS_FAILING")
+        play.assert_called_once()
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual((job["stage"], job["question"]), ("needs-human", q))
+
+    def test_ask_check_non_load_check_fail_kind_unblocks(self):
+        job_id = self.staged("check")
+        out = self.check_ask(job_id, "Build check failed: 3 tests fail in test_orders", kind="check-fail", title="CHECKS_FAILING")
+        self.assertEqual(out, {"unblock": True, "n": 1})
 
     def test_ask_debug_blocked_other_reason_parks(self):
         job_id = self.staged("build")
@@ -922,7 +986,7 @@ class BoardTest(unittest.TestCase):
         play.assert_called_once()
         job = next(j for j in self.jobs() if j["id"] == job_id)
         self.assertEqual((job["stage"], job["question"]), ("needs-human", q))
-        self.assertNotIn("loadBlocked", job)
+        self.assertNotIn("loadWaits", job)
 
     def test_ask_ci_billing_refusal_parks_all_merging_jobs(self):
         a, b, c = self.staged("merging"), self.staged("merging"), self.staged("build")

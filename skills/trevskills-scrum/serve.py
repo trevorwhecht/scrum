@@ -965,6 +965,8 @@ def answer_job(project, root, job, jobs, key, note=None, raise_window=False, aut
     return 202, {"id": job_id, "action": "answer", "command": verb, **queued(started)}
 
 
+LOAD_WAIT_NOTE = ("the last run failed under machine load and no code changed: re-run the step that failed "
+                  "(for check, the whole Check gate) on the quiet machine")
 LOAD_BLOCK_NOTE = "re-read assessment.md, reproduce on a quiet machine and diagnose again"
 AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit outage kills every session, this brings them back
 AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) is parked for Trevor (park_spent)
@@ -1834,7 +1836,7 @@ def auto_resume(project, root, jobs):
         if str(job.get("reason") or "").startswith(board.STALL + board.LOAD_BLOCK_WAIT):  # no try spent, never spent
             if refused(job) is None and room(job):
                 busy = True
-                resume_job(project, root, job, jobs, note=LOAD_BLOCK_NOTE)
+                resume_job(project, root, job, jobs, note=LOAD_BLOCK_NOTE if job.get("lane") == "debug" else LOAD_WAIT_NOTE)
             continue
         tries, due = AUTO_RESUME.get(key, [0, 0.0])
         if tries >= AUTO_RESUME_MAX:

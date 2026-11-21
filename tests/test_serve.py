@@ -8211,7 +8211,7 @@ class AutoResumeTest(unittest.TestCase):
             self.assertEqual(self.sweep(), ["q0"], "lock free: one job per tick, even a child")
             self.assertEqual(self.sweep(), ["q0"], "again next tick, not once per stage")
 
-    LOADWAIT = "stalled: debug blocked by machine load; retrying on a quiet machine"
+    LOADWAIT = "stalled: failed under machine load; retrying on a quiet machine"
     LOADNOTE = "re-read assessment.md, reproduce on a quiet machine and diagnose again"
 
     def load_sweep(self, refusal):
@@ -8224,7 +8224,7 @@ class AutoResumeTest(unittest.TestCase):
 
     def test_auto_resume_debug_load_block_resumes_with_note(self):
         s = self.serve
-        self.jobs = [{"id": "dbg", "stage": "build", "stalled": True, "reason": self.LOADWAIT, "loadBlocked": True}]
+        self.jobs = [{"id": "dbg", "stage": "build", "lane": "debug", "stalled": True, "reason": self.LOADWAIT, "loadWaits": 1}]
         resume = self.load_sweep(None)
         resume.assert_called_once()
         self.assertEqual(resume.call_args.args[2]["id"], "dbg")
@@ -8233,16 +8233,31 @@ class AutoResumeTest(unittest.TestCase):
 
     def test_auto_resume_debug_load_block_waits_for_machine(self):
         s = self.serve
-        self.jobs = [{"id": "dbg", "stage": "build", "stalled": True, "reason": self.LOADWAIT, "loadBlocked": True}]
+        self.jobs = [{"id": "dbg", "stage": "build", "stalled": True, "reason": self.LOADWAIT, "loadWaits": 1}]
         for _ in range(s.AUTO_RESUME_MAX + 2):
             self.load_sweep(s.board.MACHINE_WAIT + "CPU load 14").assert_not_called()
         self.assertNotIn("p/dbg", s.AUTO_RESUME)
         self.load_sweep(None).assert_called_once()
 
+    CHECKNOTE = ("the last run failed under machine load and no code changed: re-run the step that failed "
+                 "(for check, the whole Check gate) on the quiet machine")
+
+    def test_auto_resume_check_load_wait_resumes_with_check_note(self):
+        s = self.serve
+        self.jobs = [{"id": "chk", "stage": "check", "stalled": True, "reason": self.LOADWAIT, "loadWaits": 1}]
+        resume = self.load_sweep(None)
+        resume.assert_called_once()
+        self.assertEqual(resume.call_args.kwargs, {"note": self.CHECKNOTE})
+        self.assertNotIn("p/chk", s.AUTO_RESUME)
+
+    def test_auto_resume_check_load_wait_held_while_machine_refuses(self):
+        self.jobs = [{"id": "chk", "stage": "check", "stalled": True, "reason": self.LOADWAIT, "loadWaits": 1}]
+        self.load_sweep(self.serve.board.MACHINE_WAIT + "CPU load 14").assert_not_called()
+
     def test_auto_resume_debug_load_block_ignores_parked(self):
-        self.jobs = [{"id": "a", "stage": "needs-human", "reason": "debug: blocked \u2014 CPU load 14", "loadBlocked": True,
+        self.jobs = [{"id": "a", "stage": "needs-human", "reason": "debug: blocked \u2014 CPU load 14", "loadWaits": 1,
                       "question": "debug: blocked \u2014 CPU load 14"},
-                     {"id": "b", "stage": "build", "reason": self.LOADWAIT, "loadBlocked": True}]
+                     {"id": "b", "stage": "build", "reason": self.LOADWAIT, "loadWaits": 1}]
         self.load_sweep(None).assert_not_called()
 
     BILLING = "stalled: waiting on GitHub billing to run CI"
