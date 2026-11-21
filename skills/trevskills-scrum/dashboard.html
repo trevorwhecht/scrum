@@ -949,8 +949,10 @@ function renderAutoOff(boards, names = []) {
   el.hidden = !recs.length;
 }
 
+// One api/machine request in flight per tab: a slow server never gets a new one stacked every 2 s.
+const readMachine = single(() => getJson("api/machine", null));
 async function poll() {
-  getJson("api/machine", null).then(m => { renderMachine(m); renderAiUsage(m); renderCooldown(m); });  // not awaited: memory_pressure never delays the board
+  readMachine().then(m => { renderMachine(m); renderAiUsage(m); renderCooldown(m); });  // not awaited: memory_pressure never delays the board
   missed = 0;
   try {
     const res = await timed("api/projects", {cache: "no-store"});
