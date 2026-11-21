@@ -1065,7 +1065,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 27690, "newjob.md")  # +job E2E budget, job 1311; +lilguy hand-off, job 1261; +fast lane Out of scope, job 1257; +debug E2E in background, Build queue, job 1250; +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 28100, "newjob.md")  # +load wait ask, job 1316; +job E2E budget, job 1311; +lilguy hand-off, job 1261; +fast lane Out of scope, job 1257; +debug E2E in background, Build queue, job 1250; +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -3126,7 +3126,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(len(commands), (2, 3), span)
             for command in commands:
                 self.assertTrue(board.ASK_COMMAND_RE.fullmatch(command), f"{command!r} in {span}")
-            self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot'|a 'it is not a code failure; the board resumes it when CI runs again')$")
+            self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot'|a 'it is not a code failure; the board resumes it when CI runs again'|a 'the machine was overloaded, not the code')$")
             self.assertEqual(span.count("--recommend"), 1, span)
         text = self.rules()
         self.assertIn("**Every stop is a closed question.** A job goes needs-human only through `B ask`", text)
@@ -3164,7 +3164,7 @@ class ContractTest(unittest.TestCase):
             key = words[words.index("--title") + 1]
             self.assertIn(key, board.STOP_TITLES, span)
             self.assertEqual(words[words.index("--title") + 2], "--recommend", span)
-            self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot'|a 'it is not a code failure; the board resumes it when CI runs again')$")
+            self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot'|a 'it is not a code failure; the board resumes it when CI runs again'|a 'the machine was overloaded, not the code')$")
         self.assertEqual(len(board.STOP_TITLES), 18)
         stops = self.lane("stops")
         for key, meaning in board.STOP_TITLES.items():
@@ -3182,7 +3182,7 @@ class ContractTest(unittest.TestCase):
     def test_ask_lines_not_resume_abort_only(self):
         """`board.py ask` refuses an ask offering only resume/abort unless it is an automatic (exempt) ask."""
         import shlex
-        exempt = ("Unpushed commits in ", " main checkout is on ", "waiting on the E2E queue", "failed account payments")
+        exempt = ("Unpushed commits in ", " main checkout is on ", "waiting on the E2E queue", "failed account payments", "waiting on a quiet machine")
         spans = self.ask_spans()
         self.assertGreaterEqual(len(spans), 30)  # spans split over lines are read too ([^`]+ crosses newlines)
         seen_exempt = set()

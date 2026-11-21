@@ -7101,6 +7101,18 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
                          "rework.md, merge origin/<default> per Conflicts sub-steps 1-4, go to the Check gate (no `B ask`)")
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
+        if job["stage"] in WATCHED and _load_ask(question, title):  # the machine, not the bug: wait, no unblocker
+            waits = job.get("loadWaits", 0)
+            if waits < LOAD_WAITS_MAX:
+                reason = f"{STALL}{LOAD_BLOCK_WAIT}"
+                for k in ("question", "options", "recommend", "stopTitle", "outcome"):
+                    job.pop(k, None)
+                job.update(stalled=True, reason=reason, loadWaits=waits + 1, updatedAt=now())
+                questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
+                                     "question": question, "reason": reason, "kind": "stall", "auto": True})
+                return {"stalled": True}
+            question = f"Failed under machine load {LOAD_WAITS_MAX} times on a quiet machine: {question}"
+            kind = None  # parked for Trevor: never spend an unblocker session on it
         kinds = job.get("unblockKinds", [])
         if kind in UNBLOCK_KINDS and job.get("unblocks", 0) < UNBLOCK_MAX and kind not in kinds:
             n = job.get("unblocks", 0) + 1
@@ -7120,15 +7132,6 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
         # a session that did not load the scrum agent types is a session fault: stalled in its stage, so
         # auto_resume retries it; not a human stop, so no question and no sound. A GitHub billing CI refusal stalls
         # the same way: its answer is always Try again, which auto_resume gives
-        if was in WATCHED and not job.get("loadBlocked") and question.lower().startswith("debug: blocked") \
-                and LOAD_BLOCK_RE.search(question):  # the machine, not the bug: one retry on a quiet machine
-            reason = f"{STALL}{LOAD_BLOCK_WAIT}"
-            for k in ("question", "options", "recommend", "stopTitle", "outcome"):
-                job.pop(k, None)
-            job.update(stalled=True, reason=reason, loadBlocked=True, updatedAt=now())
-            questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
-                                 "question": question, "reason": reason, "kind": "stall", "auto": True})
-            return {"stalled": True}
         billing = was in WATCHED and CI_BILLING_RE.search(question)
         if billing or (was in WATCHED and AGENT_TYPES_RE.search(question)):
             reason = f"{STALL}{CI_BILLING_WAIT if billing else question}"
@@ -7859,8 +7862,18 @@ QUEUE_ASK_RE = re.compile(r"^waiting on the (E2E|Check|Build) queue", re.I)  # c
 E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT = "waiting: E2E queue", "waiting: Check queue"  # serve.py auto_resume starts it once the lock frees
 BUILD_QUEUE_WAIT = "waiting: Build queue"  # a second Build 124 (job 1250): auto_resume starts it once build.lock frees
 CI_BILLING_RE = re.compile(r"failed account payments|spending limit|CI refused: GitHub billing", re.I)
-LOAD_BLOCK_RE = re.compile(r"CPU load|machine load|swap|out of memory|low memory|memory pressure|free RAM", re.I)
-LOAD_BLOCK_WAIT = "debug blocked by machine load; retrying on a quiet machine"  # serve.py auto_resume re-runs the debugger once
+LOAD_BLOCK_RE = re.compile(r"CPU load|machine load|overload|load average|\bload \d|swap|out of memory|low memory|memory pressure|free RAM", re.I)
+LOAD_BLOCK_WAIT = "failed under machine load; retrying on a quiet machine"  # serve.py auto_resume re-runs the stage
+LOAD_WAITS_MAX = 3  # load waits per job; the next load ask parks at needs-human
+LOAD_ASK_TITLES = ("CHECKS_FAILING", "BUILDER_BLOCKED", "REVIEW_ESCALATED")
+QUIET_PREFIX = "waiting on a quiet machine"  # a lane asks it on purpose
+
+
+def _load_ask(question, title) -> bool:
+    """True for a stop that is machine load, not the job's code: the explicit QUIET_PREFIX, `debug: blocked` or a
+    LOAD_ASK_TITLES stop whose text matches LOAD_BLOCK_RE."""
+    q = question.lower()
+    return q.startswith(QUIET_PREFIX) or bool(LOAD_BLOCK_RE.search(question) and (q.startswith("debug: blocked") or title in LOAD_ASK_TITLES))
 CI_BILLING_WAIT = "waiting on GitHub billing to run CI"  # serve.py auto_resume retries it after 60 s, then when the banner clears
 # Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
 RESUMABLE = (STALLED, STALL, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")
@@ -8757,7 +8770,8 @@ def main(argv=None):
         commands = [o.partition("=")[2].strip() for o in (a.a, a.b, a.c) if o is not None]
         q = a.question.strip()  # cmd_ask stores it stripped
         # the automatic asks process_health already ignores keep Carry on=resume / Remove this job=abort
-        exempt = is_guard_ask(q) or QUEUE_ASK_RE.match(q) or CI_BILLING_RE.search(q) or AGENT_TYPES_RE.search(q)
+        exempt = is_guard_ask(q) or QUEUE_ASK_RE.match(q) or CI_BILLING_RE.search(q) or AGENT_TYPES_RE.search(q) \
+            or q.lower().startswith(QUIET_PREFIX)
         if resume_abort_only(commands) and not exempt:
             raise SystemExit('ask refused: add a followup <id> "<fix>" option, or run B wait-on <id> <blocker> '
                              'instead of asking')
