@@ -91,7 +91,7 @@ class MachineMeter(unittest.TestCase):
         self.assertIn('<p class="error" role="alert"></p>', ra, "the empty error slot stays for failed clicks")
         self.assertNotRegex(ra, r'role="alert">[^<]*queued')
         poll = fn_body(text, "poll")
-        self.assertIn('getJson("api/machine", null).then(m => { renderMachine(m); renderAiUsage(m); renderCooldown(m); })', poll)
+        self.assertIn('(poll.machine ||= getJson("api/machine", null).finally(() => { poll.machine = null; })).then(m => { renderMachine(m); renderAiUsage(m); renderCooldown(m); })', poll)
         self.assertLess(poll.index('api/machine'), poll.index('timed("api/projects"'),
                         "fetched before anything that can return early, on every poll")
         render = fn_body(text, "renderMachine")

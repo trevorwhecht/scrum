@@ -7459,8 +7459,25 @@ def rotate_serve_log():
         pass
 
 
+FD_LIMIT = 10240  # macOS OPEN_MAX; launchd's default soft limit of 256 is gone in a few minutes of piled-up requests
+
+
+def raise_fd_limit():
+    """Raise this process's open file soft limit to min(hard, FD_LIMIT) and return it; None (one stderr line) when setrlimit fails. Silent on success."""
+    try:
+        import resource
+        hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+        want = FD_LIMIT if hard == resource.RLIM_INFINITY else min(hard, FD_LIMIT)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+        return want
+    except (ImportError, OSError, ValueError) as e:
+        print(f"serve.py: could not raise the open file limit: {e}", file=sys.stderr)
+        return None
+
+
 def main():
     drop_malloc_logging()
+    fd_limit = raise_fd_limit()
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--estimate", metavar="TEXT", help="estimate this backlog item (board.py backlog-add runs this) and exit")
@@ -7504,6 +7521,8 @@ def main():
     threading.Thread(target=watchdog_loop, daemon=True).start()
     names = ", ".join(board.projects()) or "none yet (run /trevskills-scrum in a repo)"
     print(f"Trevskills Scrum: http://localhost:{a.port}  projects: {names}  claude: {CLAUDE}" + (f"  tailnet: {tn}" if tn else ""), flush=True)
+    if fd_limit:
+        print(f"open file limit {fd_limit}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

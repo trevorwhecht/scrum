@@ -15172,3 +15172,42 @@ class AgentLinksTest(unittest.TestCase):
             self.serve.watchdog_tick()
         self.assertEqual(tick.call_count, 1)
         self.assertIn("watchdog: agent links: boom", err.getvalue())
+
+
+class RaiseFdLimitTest(unittest.TestCase):
+    SRV = str(Path(__file__).resolve().parent.parent / "skills" / "trevskills-scrum")
+
+    def run_child(self, code):
+        prog = f"import sys, resource; sys.path.insert(0, {self.SRV!r}); import serve; {code}"
+        return subprocess.run([sys.executable, "-c", prog], capture_output=True, text=True, timeout=60)
+
+    def test_raises_low_soft_limit(self):
+        r = self.run_child("resource.setrlimit(resource.RLIMIT_NOFILE, (256, resource.getrlimit(resource.RLIMIT_NOFILE)[1])); "
+                           "got = serve.raise_fd_limit(); print(got, resource.getrlimit(resource.RLIMIT_NOFILE)[0])")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.split(), ["10240", "10240"])
+        self.assertEqual(r.stderr, "")
+
+    def test_survives_infinite_hard_limit(self):
+        r = self.run_child("resource.setrlimit(resource.RLIMIT_NOFILE, (256, resource.RLIM_INFINITY)); "
+                           "print(serve.raise_fd_limit(), resource.getrlimit(resource.RLIMIT_NOFILE)[0])")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.split(), ["10240", "10240"])
+
+    def test_stays_within_a_low_hard_limit(self):
+        r = self.run_child("resource.setrlimit(resource.RLIMIT_NOFILE, (128, 512)); "
+                           "print(serve.raise_fd_limit(), resource.getrlimit(resource.RLIMIT_NOFILE)[0])")
+        self.assertEqual(r.stdout.split(), ["512", "512"])
+
+    def test_setrlimit_failure_is_one_stderr_line(self):
+        import serve
+        err = io.StringIO()
+        with mock.patch("resource.setrlimit", side_effect=ValueError("nope")), contextlib.redirect_stderr(err):
+            self.assertIsNone(serve.raise_fd_limit())
+        self.assertEqual(err.getvalue().count("\n"), 1)
+        self.assertIn("nope", err.getvalue())
+
+    def test_main_raises_before_binding(self):
+        import serve
+        src = inspect.getsource(serve.main)
+        self.assertLess(src.index("raise_fd_limit()"), src.index("add_argument"))
