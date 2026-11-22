@@ -36,6 +36,11 @@ class CheckoutAlert(unittest.TestCase):
         self.assertEqual(el, {"innerHTML": "9-x merged, not live: fast-forward failed.<br>"
                                            "onewitharts: GitHub Actions refused to start runs.", "hidden": False})
 
+    def test_hog_alert_machine_wide_line_shows_once(self):
+        hog = "Spotify Helper (Renderer) is using 110% of one core while 1-a wait for the CPU. Quit it."
+        el = render([{"jobs": [], "hogAlert": hog}, {"jobs": [], "checkoutAlert": "9-x merged, not live.", "hogAlert": hog}])
+        self.assertEqual(el, {"innerHTML": hog + "<br>9-x merged, not live.", "hidden": False})
+
     def test_all_null_with_actions_alert_hidden(self):
         self.assertEqual(render([{"jobs": [], "checkoutAlert": None, "actionsAlert": None}, None]),
                          {"innerHTML": "", "hidden": True})

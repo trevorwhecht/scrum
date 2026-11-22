@@ -889,12 +889,12 @@ function renderMachine(m) {
 }
 
 // Every project's board.checkoutAlert (its live checkout cannot go live) and board.actionsAlert (GitHub refused to start
-// runs, or a scheduled workflow failed), one per line, whatever the project filter.
+// runs, or a scheduled workflow failed) and board.hogAlert (an outside app hogs the CPU while jobs wait), one per line, repeats shown once, whatever the project filter.
 function renderCheckoutAlert(boards) {
   const el = $("checkoutAlert");
   if (!el) return;
-  const alerts = boards.flatMap(b => b ? [b.checkoutAlert, b.actionsAlert] : []).filter(Boolean);
-  const html = alerts.map(esc).join("<br>");
+  const alerts = boards.flatMap(b => b ? [b.checkoutAlert, b.actionsAlert, b.hogAlert] : []).filter(Boolean);
+  const html = [...new Set(alerts)].map(esc).join("<br>");  // hogAlert is machine-wide: every board repeats it
   if (el.innerHTML !== html) el.innerHTML = html;  // unchanged text is not rewritten, so role=alert does not re-announce it
   el.hidden = !alerts.length;
 }

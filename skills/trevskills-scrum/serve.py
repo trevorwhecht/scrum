@@ -260,10 +260,16 @@ def mark_ram_hold(project, root, jobs, skip=None):
 def cpu_held(root, job):
     """True for a non-manual queued launch (play_queued + queued_launch still in its stage, no play_queued_manual) that
     spawn's CPU gate held: cpu_load in its jobs/<id>/queue-gates.txt (note_queue_gate)."""
+    return gate_held(root, job, {"cpu_load"})
+
+
+def gate_held(root, job, gates):
+    """True for a non-manual queued launch (play_queued + queued_launch still in its stage, no play_queued_manual) whose
+    fresh queue-gates.txt names any of `gates`."""
     launch = job.get("queued_launch")
     if not (job.get("play_queued") and launch) or job.get("play_queued_manual") or job.get("stage") != launch.get("stage"):
         return False
-    return "cpu_load" in gate_heads(root, job)
+    return bool(gate_heads(root, job) & gates)
 
 
 GATE_FRESH_SECS = 900  # a queue-gates.txt untouched this long names no current hold (note_queue_gate touches it each time)
@@ -5676,6 +5682,37 @@ def checkout_alert(repo: Path, jobs: list[dict]) -> str | None:
     return None
 
 
+HOG_CAUGHT: set[tuple[int, str]] = set()  # (pid, local date) pairs hog_alert already logged: one cpu-hog catch per pid per day
+
+
+def hog_alert(today: str | None = None) -> str | None:
+    """The machine-wide alert line while HOGS (a process outside the scrum over a core, report_hogs) is non-empty and a
+    job on any board.projects() board is held on the CPU gate (gate_held cpu_load or cpu_busy): `<app> is using <pct>% of
+    one core while <ids> wait for the CPU. Quit it.` (the top hog; at most 3 ids, then `and N more`). Else None. Each hog
+    in HOGS is logged once per pid per local date `today` (default now) as a board.log_waste("cpu-hog") line with caught=True
+    and the held job ids; the app is only reported, never signalled."""
+    if not HOGS:
+        return None
+    held = []
+    for repo in board.projects().values():
+        root = repo / "scrum"
+        try:
+            held += [j["id"] for j in cached_board(root).get("jobs", []) if gate_held(root, j, {"cpu_load", "cpu_busy"})]
+        except (OSError, ValueError, AttributeError):
+            continue
+    if not held:
+        return None
+    today = today or time.strftime("%Y-%m-%d")
+    for h in HOGS:
+        if (h["pid"], today) not in HOG_CAUGHT:
+            HOG_CAUGHT.add((h["pid"], today))
+            board.log_waste("cpu-hog", project=None, jobs=held, pids=[h["pid"]], cpu_min=round(h["pct"] / 100 * h["minutes"], 1),
+                            name=h["name"], pid=h["pid"], pct=h["pct"], caught=True)
+    top = HOGS[0]
+    names = ", ".join(map(str, held[:3])) + (f" and {len(held) - 3} more" if len(held) > 3 else "")
+    return f"{top['name']} is using {top['pct']}% of one core while {names} wait for the CPU. Quit it."
+
+
 JOB_COST_TTL = 300  # seconds one board.transcript_tokens read serves every project's job costs
 JOB_COST_CACHE = {}  # "at" -> time.monotonic() of the read; "costs" -> {project: {job: (tokens, usd)}}
 JOB_COST_LOCK = threading.Lock()  # one read at a time; a poll that waits shares the result
@@ -5715,7 +5752,7 @@ def board_with_activity(root, project):
     A check job with an E2E waiter over E2E_WAIT_RECORD_SECS gets `e2eWait`
     (e2e_wait_info). A job with transcript rows in the last board.JOB_COST_DAYS days gets `costUsd` and `costTokens`
     (job_costs). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
-    cannot go live, or None), `actionsAlert` (actions_alert's last result from the watchdog's ACTIONS_ALERT cache, or
+    cannot go live, or None), `hogAlert` (hog_alert, or None), `actionsAlert` (actions_alert's last result from the watchdog's ACTIONS_ALERT cache, or
     None), `e2eFull` (the full-E2E record's at, head, result, failed, or None), `uiSweep` (the UI sweep record's at,
     head, result, findings, and `open`: open backlog lines starting `UI sweep`; or None) and `autoOff` (auto_off). board.json comes from cached_board, and each job is a fresh shallow copy, so
     no live field outlives the poll that computed it."""
@@ -5768,6 +5805,7 @@ def board_with_activity(root, project):
         if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
             job["waitingOn"] = {**job["waitingOn"], "titles": [title.get(i, "") for i in job["waitingOn"]["ids"]]}
     data["checkoutAlert"] = checkout_alert(root.parent, data.get("jobs", []))
+    data["hogAlert"] = hog_alert()  # machine-wide, so every board carries the same line; the dashboard shows it once
     data["actionsAlert"] = (ACTIONS_ALERT.get(str(root.parent)) or (0, None))[1]  # the watchdog's cache; never gh here
     rec = e2e_full_record(root)  # the dashboard's "E2E main" header line
     data["e2eFull"] = {k: rec.get(k) for k in ("at", "head", "result", "failed")} if rec else None
