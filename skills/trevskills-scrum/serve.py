@@ -5686,11 +5686,9 @@ HOG_CAUGHT: set[tuple[int, str]] = set()  # (pid, local date) pairs hog_alert al
 
 
 def hog_alert(today: str | None = None) -> str | None:
-    """The machine-wide alert line while HOGS (a process outside the scrum over a core, report_hogs) is non-empty and a
-    job on any board.projects() board is held on the CPU gate (gate_held cpu_load or cpu_busy): `<app> is using <pct>% of
-    one core while <ids> wait for the CPU. Quit it.` (the top hog; at most 3 ids, then `and N more`). Else None. Each hog
-    in HOGS is logged once per pid per local date `today` (default now) as a board.log_waste("cpu-hog") line with caught=True
-    and the held job ids; the app is only reported, never signalled."""
+    """The machine-wide alert while HOGS is non-empty and a job on any board is held on cpu_load or cpu_busy (gate_held):
+    `<top hog> is using <pct>% of one core while <ids, at most 3> wait for the CPU. Quit it.`, else None. Each hog is
+    logged once per pid per local date as a cpu-hog waste line (caught=True, the held ids); never signalled."""
     if not HOGS:
         return None
     held = []
