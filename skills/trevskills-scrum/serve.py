@@ -347,8 +347,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     A RAM hold older than RAM_HOLD_SECS (from play_queued) writes ram_hold, the reading, and logs it to stderr the first time. An id not on the board (run-all,
     digest, weekly) runs on `account` when given, else board.pick_account's account, kept as RUNS[key]["account"]
     (a board job's: the account board.spawn ran it on, proc.account).
-    Cool down never parks a start (job 1346): it holds only new claims. `idle` (idle_claim) skips only
-    the ram_room check. A RAM hold notes board.ram_room_reason (the readings), then ram_room:<id> per live run of the
+    Cool down never parks a start (job 1346): it holds only new claims. `idle` (idle_claim, or play_queue_tick
+    for a launch held past RAM_HOLD_SECS while machine_ok(claim=True) passes) skips only the ram_room check. A RAM hold notes board.ram_room_reason (the readings), then ram_room:<id> per live run of the
     project (live_ids). A launched non-manual `start` of a board job appends {project, job, cpu} (the gate's reading)
     to PULSE_STARTS for pulse_tick. While the CPU gate is open, a non-manual `start` of any job other than cpu_first()
     (the longest-held CPU launch) is queued too, noted cpu_queue, so that job starts ahead of new claims and other projects.
@@ -676,7 +676,9 @@ def play_queue_tick(project, root, jobs) -> bool:
     queue; another kind of refusal keeps it queued and moves on; a machine-guard refusal or a spent resume budget
     (take_room) stops here and keeps it and every later one queued. A launch spawn's gate queued (queued_launch) is
     re-run through spawn as it was, and dropped when its job is running or left that stage; a second refusal from the
-    gate stops here too. A click Trevor made (play_queued_manual) is gated as his click: no CPU gate. A queued `start`
+    gate stops here too, and when the job is still queued (re-read; LiveSession unqueues it) notes the hold
+    queued_launch:<id> (note_hold) for pulse_tick. One held past RAM_HOLD_SECS (held_over) re-runs with idle=True, as
+    idle_claim's does, while board.machine_ok(root, claim=True) passes; spawn's other gates still apply (job 1356). A click Trevor made (play_queued_manual) is gated as his click: no CPU gate. A queued `start`
     of a job tagged Runs on shop (board.stored_runs_on) is skipped and stays queued for shop_tick. True when it
     started one or one waits on a slot."""
     started = False
@@ -692,9 +694,16 @@ def play_queue_tick(project, root, jobs) -> bool:
             if not take_room():
                 mark_ram_hold(project, root, jobs)
                 return True
-            if spawn(project, root, job["id"], launch["action"], launch["prompt"], manual=manual) is None:
+            # job 1356: held past RAM_HOLD_SECS while machine_ok(claim=True) has room, it skips the RAM gate as idle_claim's does
+            idle = held_over(job.get("play_queued")) and not board.machine_ok(root, claim=True)
+            if spawn(project, root, job["id"], launch["action"], launch["prompt"], manual=manual, idle=idle) is None:
                 give_room()  # the gate held it: nothing started, so idle_claim may still use the session
                 mark_ram_hold(project, root, jobs, skip=job["id"])
+                try:
+                    if board.find(board.read_board(root), job["id"]).get("queued_launch"):  # still queued: name the hold
+                        note_hold(root, f"queued_launch:{job['id']}")
+                except (SystemExit, OSError, ValueError):
+                    pass  # gone from the board meanwhile: nothing holds it
                 return True
             started = True
             continue
@@ -4241,7 +4250,7 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     blocks every one of those waiting jobs), and top-level gates: ram_room when board.ram_room(floor=0) < 1, plus a PULSE_GATES token (other when
     unrecognised) for the first project's machine_ok(claim=True) refusal other than COOLING. A gates list that raised
     is null. A hold start_ready or auto_continue_tick noted (note_hold: a child left to the shop, finish_first, a running
-    run-all, SWEEP_HELD, a machine or usage hold) in the last PULSE_HOLD_TTL_S adds `held:<token>` to that project's gates, which
+    run-all, SWEEP_HELD, a machine or usage hold; play_queue_tick's queued_launch:<id> for a launch spawn still holds) in the last PULSE_HOLD_TTL_S adds `held:<token>` to that project's gates, which
     board.write_pulse counts as gated even beside claimable work. guard: the first project's machine_ok(claim=False) refusal, else the allowance reason when
     board.pick_account has no account or the live count reaches its allowance (the 5h pace included), else null.
     started: spawn's PULSE_STARTS since the last tick (copied and cleared in one step under PULSE_STARTS_LOCK; [] when

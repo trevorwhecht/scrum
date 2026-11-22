@@ -978,7 +978,9 @@ class ServeTest(unittest.TestCase):
         ps.write_text("   02:01 claude -p /trevskills-scrum start 999-young\n")  # aged past SESSION_RAMP_SECS
         mine = (moved, busy, first, second, third)  # a queued job another test left on this board must not drain here
         jobs = [j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] in mine]
+        # job 1356: these launches are held past RAM_HOLD_SECS; a machine_ok refusal keeps the plain RAM-gate drain
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="30", SCRUM_SWAP_PCT="0", SCRUM_PS=str(ps)), \
+                mock.patch.object(b, "machine_ok", return_value=b.COOLING), \
                 mock.patch.object(b, "spawn", side_effect=fake) as spawn:
             self.assertTrue(s.play_queue_tick("repo", self.root, jobs))
         self.assertEqual([c.args[1:4] for c in spawn.call_args_list],
@@ -11067,6 +11069,128 @@ class IdleClaimTest(unittest.TestCase):
         self.assertNotIn("ic", s.IDLE_SINCE)
         live = next(j for j in self.jobs() if j["id"] == "005-queued")
         self.assertNotIn("queued_launch", live)
+
+
+class QueuedLaunchHoldTest(unittest.TestCase):
+    """Job 1356 (digest 148): a queued `start` the RAM gate held past RAM_HOLD_SECS starts once machine_ok(claim=True)
+    allows (spawn idle=True, as idle_claim does), and a launch spawn still holds is named in the pulse as
+    held:queued_launch:<id>."""
+    JOB = "1821-held"
+    HOLD = "1 sessions running, 73% RAM free"
+
+    def setUp(self):
+        import serve
+        self.serve, self.board = serve, serve.board
+        self.repo = Path(os.path.realpath(tempfile.mkdtemp()))
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        self.root = self.repo / "scrum"
+        (self.root / "jobs").mkdir(parents=True)
+        self.pulse = self.repo / "pulse.log"
+        for p in (mock.patch.dict(os.environ, SCRUM_USAGE=str(self.repo / "no-usage.json")),
+                  mock.patch.object(self.board, "projects", return_value={"qh": self.repo}),
+                  mock.patch.object(self.board, "pulse_path", return_value=self.pulse),
+                  mock.patch.object(self.board, "pick_account", return_value=("main", None)),
+                  mock.patch.object(serve, "RESUME_ROOM", None)):
+            p.start()
+            self.addCleanup(p.stop)
+        serve.PULSE_HOLDS.clear()
+        self.addCleanup(serve.PULSE_HOLDS.clear)
+        self.addCleanup(lambda: [serve.RUNS.pop(k, None) for k in list(serve.RUNS) if k.startswith("qh/")])
+
+    def ago(self, secs):
+        return (datetime.now(timezone.utc) - timedelta(seconds=secs)).isoformat(timespec="seconds")
+
+    def write(self, queued_at, manual=False):
+        job = {"id": self.JOB, "stage": "spec", "updatedAt": self.board.now(), "reason": None, "play_queued": queued_at,
+               "queued_launch": {"action": "start", "prompt": f"/trevskills-scrum start {self.JOB}", "stage": "spec"},
+               "ram_hold": self.HOLD, **({"play_queued_manual": True} if manual else {})}
+        shutil.rmtree(self.root / "jobs" / self.JOB, True)  # a fresh queue-gates.txt per case
+        (self.root / "jobs" / self.JOB).mkdir()
+        (self.root / "board.json").write_text(json.dumps({"jobs": [job]}))
+
+    def job(self):
+        return self.board.find(self.board.read_board(self.root), self.JOB)
+
+    def started(self, *a, **kw):
+        proc = mock.Mock(account="main")
+        proc.poll.return_value = None
+        return proc, f"runs/{self.JOB}-start.log"
+
+    def tick(self, machine_ok=None, room=0, cpu="1", spawn=None):
+        """One play_queue_tick over the board; machine_ok answers claim=True with `machine_ok` (None: room), anything
+        else with a refusal so a call without claim=True never passes. Returns (result, board.spawn job ids)."""
+        b, s = self.board, self.serve
+        ok = lambda *a, **kw: machine_ok if kw.get("claim") is True else "called without claim=True"
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT=cpu), \
+                mock.patch.object(b, "machine_ok", side_effect=ok), \
+                mock.patch.object(b, "ram_room", return_value=room), \
+                mock.patch.object(b, "spawn", side_effect=spawn or self.started) as board_spawn, \
+                contextlib.redirect_stderr(io.StringIO()):
+            got = s.play_queue_tick("qh", self.root, b.read_board(self.root)["jobs"])
+        return got, [c.args[1] for c in board_spawn.call_args_list]
+
+    def pulse_gates(self):
+        with mock.patch.object(self.board, "machine_ok", return_value=None), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.serve.pulse_tick({})
+        return json.loads(self.pulse.read_text().splitlines()[-1])["projects"]["qh"]["gates"]
+
+    def test_held_over_launch_starts_when_machine_ok(self):
+        self.write(self.ago(2 * 3600))
+        self.assertEqual(self.tick(), (True, [self.JOB]))
+        job = self.job()
+        for key in ("queued_launch", "play_queued", "ram_hold"):
+            self.assertNotIn(key, job, key)
+        self.assertIn(f"qh/{self.JOB}", self.serve.RUNS)
+
+    def test_held_launch_stays_queued_without_room(self):
+        old = self.ago(2 * 3600)
+        for name, why, queued_at in (("cooling", self.board.COOLING, old), ("young", None, self.ago(600)),
+                                     ("malformed", None, "not a time")):
+            with self.subTest(name):
+                self.write(queued_at)
+                self.assertEqual(self.tick(machine_ok=why), (True, []))
+                job = self.job()
+                self.assertEqual((job["queued_launch"]["action"], job["play_queued"]), ("start", queued_at))
+                self.assertIn("ram_room", (self.root / "jobs" / self.JOB / "queue-gates.txt").read_text())
+
+    def test_held_over_launch_keeps_cpu_gate(self):
+        self.write(self.ago(2 * 3600))
+        self.assertEqual(self.tick(cpu="501"), (True, []), "non-manual over the launch limit: held")
+        self.assertEqual(self.job()["queued_launch"]["action"], "start")
+        self.assertIn("cpu_load(501%)", (self.root / "jobs" / self.JOB / "queue-gates.txt").read_text())
+        self.write(self.ago(2 * 3600), manual=True)
+        self.assertEqual(self.tick(cpu="501"), (True, [self.JOB]), "Trevor's click: no CPU gate")
+        job = self.job()
+        self.assertIs(job.get("manual_run"), True)
+        self.assertNotIn("play_queued_manual", job)
+
+    def test_held_launch_noted_in_pulse(self):
+        self.write(self.ago(2 * 3600))
+        self.assertEqual(self.tick(machine_ok=self.board.COOLING), (True, []))
+        self.assertIn(f"held:queued_launch:{self.JOB}", self.pulse_gates())
+
+    def test_live_session_refusal_notes_no_hold(self):
+        self.write(self.ago(2 * 3600))
+
+        def live(*a, **kw):
+            raise self.board.LiveSession(f"{self.JOB} has a live session")
+        self.assertEqual(self.tick(spawn=live), (True, [self.JOB]))
+        self.assertNotIn("queued_launch", self.job())
+        self.assertEqual(self.pulse_gates(), [])
+
+    def test_write_pulse_counts_queued_launch_hold(self):
+        (self.root / "digests" / "001").mkdir(parents=True)
+        proj = lambda gates: {"qh": {"claimable": 2, "waiting": 0, "busy": False, "top": 1821, "auto": True, "gates": gates}}
+        t = 1_700_000_000
+        lines = [{"t": t, "sessions": 0, "cooldown": False, "focus": "qh", "projects": proj([f"held:queued_launch:{self.JOB}"])},
+                 {"t": t + 60, "sessions": 0, "cooldown": False, "focus": "qh", "projects": proj([])},
+                 {"t": t + 120, "sessions": 1, "cooldown": False, "focus": "qh", "projects": proj([])}]
+        self.pulse.write_text("".join(json.dumps(l) + "\n" for l in lines))
+        self.board.write_pulse(self.root, "001")
+        text = (self.root / "digests" / "001" / "pulse.md").read_text()
+        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\n"
+                      f"Gated with claimable work: 1 min (held:queued_launch:{self.JOB} 1)\n", text)
 
 
 class WatchdogResilienceTest(unittest.TestCase):
