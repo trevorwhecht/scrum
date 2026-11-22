@@ -1009,18 +1009,17 @@ class ContractTest(unittest.TestCase):
         approve = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum approve <id>`**"))
         self.assertIn("obsolete", approve)
 
-    def test_cooldown_park_checkpoints(self):
-        """Job 622: New job parks a round-0 job at two checkpoints while cooling down (merge.md's paragraph)."""
-        merge = (SKILL_DIR / "lanes" / "merge.md").read_text()
-        para = next(l for l in merge.splitlines() if l.startswith("**Cool-down park**"))
-        self.assertIn("B cooldown-park $ID", para)
-        self.assertIn('`"parked": true`', para)
-        self.assertIn("stop with the **Final report**", para)
-        self.assertIn("is a cool-down bypass whatever the prompt says", para)  # job 967: Trevor's click never parks
-        newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
-        self.assertEqual(newjob.count("**Cool-down park**"), 2)
-        self.assertIn("worktree=$WT stage=build`, then **Cool-down park**", newjob)
-        self.assertIn("6. Continue: **Cool-down park** (merge.md), then **Check gate**.", newjob)
+    def test_no_cooldown_park_checkpoints(self):
+        """Job 1346: cool down never parks a started job, so New job has no Cool-down park checkpoint (job 622's)."""
+        lanes = SKILL_DIR / "lanes"
+        for name in ("newjob.md", "merge.md", "lilguy.md"):
+            text = (lanes / name).read_text()
+            for bad in ("Cool-down park", "cooldown-park"):
+                self.assertNotIn(bad, text, name)
+        newjob = (lanes / "newjob.md").read_text()
+        step4 = newjob[newjob.index("4. **Worktree:**"):newjob.index("5. **Build:**")]
+        self.assertTrue(step4.rstrip().endswith("Then `B set $ID worktree=$WT stage=build`."), step4[-120:])
+        self.assertIn("\n6. Continue: **Check gate**.\n", newjob)
 
     def test_approver_minor_findings_never_rework(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
