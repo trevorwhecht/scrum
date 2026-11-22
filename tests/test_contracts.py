@@ -3165,7 +3165,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(key, board.STOP_TITLES, span)
             self.assertEqual(words[words.index("--title") + 2], "--recommend", span)
             self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot'|a 'it is not a code failure; the board resumes it when CI runs again'|a 'the machine was overloaded, not the code')$")
-        self.assertEqual(len(board.STOP_TITLES), 18)
+        self.assertEqual(len(board.STOP_TITLES), 19)
         stops = self.lane("stops")
         for key, meaning in board.STOP_TITLES.items():
             self.assertRegex(key, r"^[A-Z]+(_[A-Z]+)*$")
@@ -4085,6 +4085,27 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                 self.assertTrue((skill / "lanes" / f"{name}.md").is_file(), f"{f.name} -> {name}")
                 referenced.add(name)
         self.assertLessEqual(set(MOVED), referenced)
+
+    def test_video_lane(self):
+        lane = self.lane("video")  # job 1340: motion ads run outside git, with Trevor's OK on storyboard and cuts
+        for phrase in ("Video folder: ", "lane=video", "video.md", "templates/storyboard.html",
+                       "references/style-rules.md", "contact_sheet.py", "VERDICT: FAIL", "review/v<N>.html",
+                       "only his approval ends", "general-purpose", "--title VIDEO_REVIEW", "one-current-version.md",
+                       "Archivve/<project>-archive.zip", "~/Desktop/videos/", "ElevenLabs", "Suno",
+                       "only when Trevor asks", "vid-img-editing/motion/video/", "never reuses a version number",
+                       "3 reviewer FAILs"):
+            self.assertIn(phrase, lane, phrase)
+        spans = [sp for name, sp in self.ask_spans() if name == "video"]
+        self.assertGreaterEqual(len(spans), 3)
+        for span in spans:
+            self.assertRegex(span, r"--title (VIDEO_REVIEW|BUILDER_BLOCKED) --recommend <key> '<why>'$", span)
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        body = [l for l in self.h2(text, "## Video lane").splitlines()[2:] if l.strip()]
+        self.assertEqual(len(body), 2, body)
+        self.assertIn("Video folder:", body[0])
+        self.assertEqual(body[1], "Read `$HOME/.claude/skills/trevskills-scrum/lanes/video.md` when this lane runs.")
+        self.assertEqual(text.index("\n## ", text.index("\n## Digest\n") + 1), text.index("\n## Video lane\n"))
+        self.assertEqual(text.index("\n## ", text.index("\n## Video lane\n") + 1), text.index("\n## Final report\n"))
 
     def test_skill_lane_pointers(self):
         text = skill_text()

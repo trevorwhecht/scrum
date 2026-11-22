@@ -182,6 +182,12 @@ Read `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md` when this section ru
 
 Read `$HOME/.claude/skills/trevskills-scrum/lanes/digest.md` when this lane runs.
 
+## Video lane
+
+A job whose feature.md has a `Video folder:` line runs only this lane, for every command.
+
+Read `$HOME/.claude/skills/trevskills-scrum/lanes/video.md` when this lane runs.
+
 ## Final report
 
 End with the job id, the final stage, for a BigBoy parent or child the children this run started (or `none`) and the parent's stage, the PR URL, rounds used, any follow-ups added to the backlog, for merged jobs whether main was fast-forwarded (`main updated`, or `main not updated: <reason>`) the restart outcome (`restarted + verified`, `restarted + verified (behavioural)`, `restart failed`, `restart command not allowed`, `verify failed`, `Restart pending: <process> — <reason>`, or `none`), and whether the change is live (`live`, or `merged, not live: <why>` as written to the board), and, for needs-human, the exact reason and the next `/trevskills-scrum` command (`approve <id>`, `rework <id> "<feedback>"`, or `discuss <id>` when it's unclear which).

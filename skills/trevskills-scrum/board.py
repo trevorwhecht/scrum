@@ -206,7 +206,7 @@ FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "bas
 ACTIVE = ("spec", "build", "check", "review", "approve", "merging", "deploying")  # stages an interactive session can pause in
 # Where the job's terminal and run log are: both are matched or read by path, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
-          "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy)$"),  # no lane key = standard
+          "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy|video)$"),  # no lane key = standard
           "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
           "account": re.compile(r"^[a-z0-9-]{1,20}$"),  # the accounts() name board.spawn ran the session on
           "reset": re.compile(r"^[0-9]{0,12}$"),  # the account's seven_day resets_at when board.spawn recorded it: fallback_account favours the recorded account only until then
@@ -240,6 +240,7 @@ STOP_TITLES = {
     "DIGEST": "a weekly digest proposal, a digest edit that failed to apply, or a pipeline-health finding",
     "TWO_SESSIONS": "two sessions were working the same job at once and the watchdog could not tell which one owns it",
     "AGENT_MISSING": "a scrum agent could not be loaded (Agent type not found), so the job stopped instead of running a stand-in agent",
+    "VIDEO_REVIEW": "a video job needs Trevor to approve its storyboard or a cut, or to send notes",
 }
 
 # The scrum commands a needs-human question's option may run (shape only: the id need not be the asked job's).
@@ -2969,7 +2970,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
         hits["fable_misuse"] += [job_id for line in fable if simple and line.split("\t")[2:3] == ["fable"]]
         job = board.get(job_id, {})
         if job.get("stage") == "done" and (str(job.get("reason") or "").startswith("merged, not live")
-                                          or job.get("lane") not in ("lilguy", "runall", "bigboy") and not job.get("pr")):
+                                          or job.get("lane") not in ("lilguy", "runall", "bigboy", "video") and not job.get("pr")):
             m = re.search(r"/pull/(\d+)/?$", str(job.get("pr") or ""))
             if m and m[1] in on_main():  # main holds the PR: a stale reason must not flag it
                 continue
@@ -6963,10 +6964,10 @@ def lilguy_in_checkout(job: dict) -> bool:
 
 def merge_refusal(job: dict) -> str | None:
     """Why `job` may not move to done, or None. Its PR must be MERGED; a PR-less job may finish only on a parent
-    (bigboy/runall) lane or a lilguy job in the main checkout."""
+    (bigboy/runall) lane, a video job (lanes/video.md: no worktree or PR) or a lilguy job in the main checkout."""
     pr = job.get("pr")
     if not pr:
-        return None if job.get("lane") in ("bigboy", "runall") or lilguy_in_checkout(job) else "not done: no PR recorded"
+        return None if job.get("lane") in ("bigboy", "runall", "video") or lilguy_in_checkout(job) else "not done: no PR recorded"
     m = re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", pr)
     if not m:
         return f"not done: could not confirm PR {pr} is merged: not a GitHub pull request URL"
