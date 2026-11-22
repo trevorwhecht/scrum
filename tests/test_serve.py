@@ -13245,6 +13245,30 @@ class E2eFullTest(unittest.TestCase):
         self.assertFalse(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + 1))
         self.assertTrue(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + self.serve.E2E_FULL_LOADED_WAIT))
 
+    def test_loaded_wait_doubles_per_head_and_resets(self):
+        """Job 1345: each loaded stop on a head doubles the wait from E2E_FULL_LOADED_WAIT, capped at E2E_FULL_EVERY;
+        a moved HEAD or a finished run starts over."""
+        sv, w = self.serve, self.serve.E2E_FULL_LOADED_WAIT
+        self.assertEqual(w, 600)
+        due = lambda loads, secs, head="h": sv.e2e_full_due(
+            {"at": 1000.0, "head": "h", "result": "loaded", **({"loads": loads} if loads else {})}, head, 0, 1000.0 + secs)
+        for loads, wait in ((None, w), (1, w), (2, 2 * w), (3, 4 * w), (4, 8 * w), (30, sv.E2E_FULL_EVERY)):
+            with self.subTest(loads=loads):
+                self.assertFalse(due(loads, wait - 1))
+                self.assertTrue(due(loads, wait))
+        self.assertTrue(due(5, w, head="moved"))  # HEAD moved: the first wait again
+        # two loaded runs on one head count 1 then 2; the tick's running record carries the count between them
+        with mock.patch.object(sv.board, "cpu_load_pct", return_value=350.0):
+            rec = self.run_suite(E2E_LIST_OUTPUT, 1, last_green=self.base)
+            self.assertEqual(rec["loads"], 1)
+            sv.write_e2e_full(self.root, {**rec, "result": "running", "exit": None, "failed": []})
+            rec = self.run_suite(E2E_LIST_OUTPUT, 1, last_green=self.base)
+        self.assertEqual(rec["loads"], 2)
+        with mock.patch.object(sv.board, "cpu_load_pct", return_value=1.0):
+            sv.write_e2e_full(self.root, {**rec, "result": "running", "exit": None, "failed": []})
+            rec = self.run_suite("5 passed (9s)\n", 0, last_green=self.base)
+        self.assertNotIn("loads", rec)
+
     def test_loaded_pass_stays_pass(self):
         with mock.patch.object(self.serve.board, "cpu_load_pct", return_value=350.0):
             rec = self.run_suite("5 passed (9s)\n", 0, last_green="old")
