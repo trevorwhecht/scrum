@@ -2187,6 +2187,8 @@ class BoardTest(unittest.TestCase):
         for t in ("`OrdersView-Board.tsx:799-878`", "OrdersView-Board.tsx:799-878,", "OrdersView-Board.tsx:799-878."):
             self.assertEqual(board.bare_name_paths(f"See {t}", tracked), {"src/views/OrdersView-Board.tsx"})
         self.assertEqual(board.bare_name_paths("See dup.ts:5", tracked), set())
+        for t in ("(OrdersView-Board.tsx,", "(OrdersView-Board.tsx).", "(OrdersView-Board.tsx)"):
+            self.assertEqual(board.bare_name_paths(f"See {t} now", tracked), {"src/views/OrdersView-Board.tsx"})
         jobs = self.root / "jobs"
         self.write("j1/feature.md", "Fix e2e/quote-builder.spec.ts:101 only.\n")
         self.write("j2/feature.md", "Fix `OrdersView-Board.tsx:799-878`.\n")
@@ -2197,6 +2199,12 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.prose_paths("Reword (lanes/cloud.md wording) now"), {"lanes/cloud.md"})
         self.assertEqual(board.prose_paths("see (the lanes/cloud.md)"), {"lanes/cloud.md"})
         self.assertEqual(board.prose_paths("Edit src/app/(shop)/page.tsx now"), {"src/app/(shop)/page.tsx"})
+
+    def test_prose_paths_strips_wrapping_paren_pair(self):
+        self.assertEqual(board.prose_paths("Fix it (e2e/admin-quote-builder.spec.ts). Then"), {"e2e/admin-quote-builder.spec.ts"})
+        self.assertEqual(board.prose_paths("Fix (src/app/(pages)/x.ts) now"), {"src/app/(pages)/x.ts"})
+        self.assertEqual(board.prose_paths("Edit src/app/(pages)/x.ts now"), {"src/app/(pages)/x.ts"})
+        self.assertEqual(board.prose_paths("Edit (pages)/x.ts now"), set())  # first ( closes mid-token: not a wrapping pair
 
     def test_child_files_partial_slash_path_maps_to_tracked(self):
         repo = Path(self.tmp.name)

@@ -5691,9 +5691,19 @@ def strip_line_ref(token):
 
 def prose_paths(text):
     """Every backticked token, and every bare token with a /, in text that matches PATH_RE."""
+    def wraps(t):  # True when the first ( closes at the last char: `(a/b.ts)` wraps, `(shop)/page.tsx` does not
+        depth = 0
+        for i, c in enumerate(t):
+            depth += (c == "(") - (c == ")")
+            if depth == 0:
+                return i == len(t) - 1
+        return False
+
     def unparen(t):  # an unmatched leading ( or trailing ) is prose punctuation; a balanced pair is a Next.js route folder
         if t.count("(") != t.count(")"):
             t = t[1:] if t.startswith("(") else t[:-1] if t.endswith(")") else t
+        elif t.startswith("(") and wraps(t):
+            t = t[1:-1]  # a pair wrapping the whole token is prose: `(e2e/x.spec.ts).`
         return t
     bare = (unparen(strip_line_ref(t.rstrip(".,;:"))) for t in re.sub(r"`[^`]*`", " ", text).split())
     ticked = (strip_line_ref(p) for p in re.findall(r"`([^`\s]+)`", text))
@@ -5711,7 +5721,7 @@ def git_tracked(repo):
 
 def bare_name_paths(text, tracked):
     """Tracked full paths for the slash-less file names in text (`useX.ts`) that exactly one tracked entry (git_tracked) carries by base name."""
-    names = {strip_line_ref(t.lstrip("`").rstrip(".,;:`")) for t in text.split()}
+    names = {strip_line_ref(t.lstrip("`(").rstrip(".,;:`)")) for t in text.split()}
     names = {n for n in names if "/" not in n and PATH_RE.match(n) and repo_path(n)}
     return {m[0] for n in names if len(m := [t for t in tracked if t.rsplit("/", 1)[-1] == n]) == 1}
 
