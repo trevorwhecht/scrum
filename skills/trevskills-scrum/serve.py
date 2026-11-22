@@ -1103,7 +1103,7 @@ E2E_FULL = {"running": None}  # the project whose full run is in flight in this 
 E2E_FULL_MERGES, E2E_FULL_EVERY, E2E_FULL_STALE = 5, 86400, 7200
 # 2026-11-21 crash: a `loaded` run due at once was hot stopped and restarted 152 times in 11 h (start passes,
 # the run pushes memory pressure to level 2, hot_stop_tick kills it, pressure falls, repeat) until the Mac hung.
-E2E_FULL_LOADED_WAIT = 3600
+E2E_FULL_LOADED_WAIT = 600  # the first wait after a loaded stop on a head; each further one on that head doubles, up to E2E_FULL_EVERY
 E2E_FULL_LOAD_SECS = 60  # e2e_full_run samples board.cpu_load_pct once per this many seconds of the run, and at exit
 E2E_FULL_FAILED_RE = re.compile(r"^\s*(\d+) failed\s*$")
 E2E_FULL_ENTRY_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*›\s*)?(\S+?):(\d+):\d+\s*›\s*(.+?)[\s─]*$")  # ─ pads the line
@@ -1121,12 +1121,15 @@ def e2e_full_due(record, head, merges, now, settled=False) -> bool:
     """A full run is due with no record yet, else only when HEAD moved and 5+ commits or 24 h passed since the last,
     or the project is settled (cool down is on and no job blocks a restart there). An `error` or `running` record
     24 h+ old is due whatever the HEAD, so a failed or orphaned run is retried. A `busy` record (another dev server
-    held the checkout) is due at once; a `loaded` one (a fail under load, or hot stopped) once E2E_FULL_LOADED_WAIT has
-    passed since its start, whatever the HEAD or merges."""
+    held the checkout) is due at once; a `loaded` one (a fail under load, or hot stopped) once its wait has passed
+    since its start, whatever the HEAD or merges: E2E_FULL_LOADED_WAIT doubled per loaded stop counted in its `loads`
+    on this head (job 1345), capped at E2E_FULL_EVERY; a record of another HEAD waits the first one."""
     if not record or record.get("result") == "busy":
         return True
     if record.get("result") == "loaded":
-        return now - (record.get("at") or 0) >= E2E_FULL_LOADED_WAIT
+        loads = record.get("loads") if head == record.get("head") else None  # a moved HEAD starts the waits over
+        wait = min(E2E_FULL_EVERY, E2E_FULL_LOADED_WAIT * 2 ** (max(int(loads or 1), 1) - 1))
+        return now - (record.get("at") or 0) >= wait
     if record.get("result") in ("error", "running") and now - (record.get("at") or 0) >= E2E_FULL_EVERY:
         return True
     return head != record.get("head") and (settled or merges >= E2E_FULL_MERGES
@@ -1248,8 +1251,9 @@ def e2e_full_tick(project, repo, root) -> None:
     if not e2e_full_due(record, head, merges, now, settled) or board.machine_ok(root):
         return
     last_green = (record or {}).get("lastGreen")
+    loads = (record or {}).get("loads") if (record or {}).get("head") == head else None  # run's loaded count carries
     write_e2e_full(root, {"at": now, "head": head, "result": "running", "exit": None, "failed": [],
-                          "lastGreen": last_green})
+                          "lastGreen": last_green, **({"loads": loads} if loads else {})})
     E2E_FULL["running"] = project
     retried = (record or {}).get("result") == "busy" and (record or {}).get("head") == head
     threading.Thread(target=e2e_full_run, args=(repo, root, cmd, head, now, last_green),
@@ -1639,8 +1643,10 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
         loaded = bool(hot) or (code != 0 and any((load or 0) > board.MAX_CPU_LOAD_PCT for load in loads))
         busy = not hot and not retried and (lock or E2E_FULL_EARLY in ANSI_RE.sub("", output))
         result = "pass" if code == 0 and not hot else "loaded" if loaded else "fail" if failed else "busy" if busy else "error"
+        prior = (e2e_full_record(root) or {}).get("loads") or 0  # the tick's running record carries this head's count
         rec = {"at": at, "head": head, "result": result, "exit": code, "failed": failed,
-               "lastGreen": head if code == 0 and not hot else last_green, **({"reason": hot} if hot else {})}
+               "lastGreen": head if code == 0 and not hot else last_green, **({"reason": hot} if hot else {}),
+               **({"loads": prior + 1} if result == "loaded" else {})}
         write_e2e_full(root, rec)
         named = lock or stopped
         board.log_process("Full E2E on main", result, repo=str(repo), head=head, exit=code, failed=len(failed),
@@ -1650,7 +1656,7 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
             mine = [f for f in failed if f["spec"] not in owned]
             again, output = e2e_full_rerun(repo, root, cmd, env, mine, test_dir) if mine else (None, "")
             if again is None and E2E_FULL.get("hot_stop"):  # stopped during the re-run: loaded, nothing filed
-                rec = {**rec, "result": "loaded", "reason": E2E_FULL["hot_stop"]}
+                rec = {**rec, "result": "loaded", "reason": E2E_FULL["hot_stop"], "loads": prior + 1}
                 write_e2e_full(root, rec)
             if again is not None:
                 flaky = [s for s in dict.fromkeys(f["spec"] for f in mine) if s not in {f["spec"] for f in again}]
