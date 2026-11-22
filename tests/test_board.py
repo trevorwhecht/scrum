@@ -7923,6 +7923,13 @@ print("stub err", file=sys.stderr)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(self.records()[0]["argv"][2:4], ["--model", "sonnet"])
 
+    def test_spawn_rework_and_approve_get_orchestrator_model(self):  # job 1344
+        for action in ("rework", "approve"):
+            self.out.unlink(missing_ok=True)
+            out = self.cli("999-x", action, f"/trevskills-scrum {action} 999-x")
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(self.records()[-1]["argv"][2:4], ["--model", "sonnet"], action)
+
     def test_spawn_rejects_bad_id_or_action(self):
         for job_id, action in (("a/b", "start"), ("a b", "start"), ("..", "start"), ("../x", "start"), ("-x", "start"),
                                ("001-ok", "St"), ("001-ok", "st art"), ("001-ok", "a/b"), ("001-ok", "")):
