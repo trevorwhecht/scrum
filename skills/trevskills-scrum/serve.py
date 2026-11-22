@@ -3828,6 +3828,35 @@ def updated_at(job) -> float:
         return float("inf")
 
 
+def mark_auto_played(root, job):
+    """The board write both automatic Plays share: autoPlayed (a later Pause is deliberate: cmd_pause sets holdPause) and,
+    for a leaf, the `stalled in <stage>` reason prefix that lets the resume session re-enter that stage."""
+    with board.locked_board(root) as b:
+        live = board.find(b, job["id"])
+        live["autoPlayed"] = True
+        if not job.get("children"):
+            live.update(reason=f"{board.STALLED}{job['stage']}: {AUTO_PLAYED}", updatedAt=board.now())
+
+
+def weekly_reset_play(project, root, jobs) -> list[str]:
+    """An account's weekly (seven_day) usage window reset: mark every paused job the auto-play filter lets through
+    (not done or aborted, not running, no holdPause, parent not paused) auto-played and queue it as an automatic Play
+    (play_queued, never play_queued_manual), so play_queue_tick starts each when the machine guard allows. Returns the ids."""
+    by_id = {j["id"]: j for j in jobs}
+    played = []
+    for job in jobs:
+        if not (job.get("paused") and job["stage"] not in ("done", "aborted") and not running(project, job["id"])
+                and not job.get("holdPause") and not by_id.get(job.get("parent"), {}).get("paused")):
+            continue
+        mark_auto_played(root, job)
+        with board.locked_board(root) as b:
+            live = board.find(b, job["id"])
+            live.setdefault("play_queued", board.now())
+        played.append(job["id"])
+        print(f"watchdog: {project}: weekly reset: auto-played {job['id']}", file=sys.stderr, flush=True)
+    return played
+
+
 def auto_play(candidates: list[tuple[str, Path, dict, list[dict]]]) -> bool:
     """With no session running anywhere, Play the oldest paused job (updatedAt) that resume_refusal lets through: a
     pause Trevor left during an overload is no longer needed. A candidate refused for another reason (a sibling, a
@@ -3838,11 +3867,7 @@ def auto_play(candidates: list[tuple[str, Path, dict, list[dict]]]) -> bool:
             return False
         if refusal:
             continue
-        with board.locked_board(root) as b:  # autoPlayed: a later Pause is deliberate (cmd_pause sets holdPause)
-            live = board.find(b, job["id"])
-            live["autoPlayed"] = True
-            if not job.get("children"):  # the `stalled in <stage>` prefix lets the resume session re-enter that stage
-                live.update(reason=f"{board.STALLED}{job['stage']}: {AUTO_PLAYED}", updatedAt=board.now())
+        mark_auto_played(root, job)
         resume_job(project, root, job, jobs)
         if job.get("children") and not board.find(board.read_board(root), job["id"]).get("reason"):
             board.cmd_set(root, job["id"], [f"reason={AUTO_PLAYED}"], expect="running")
@@ -4116,7 +4141,9 @@ def window_tick():
     for project, repo in board.projects().items():
         try:
             root = repo / "scrum"
-            board.cmd_window_report(root)
+            scores = board.cmd_window_report(root)
+            if any(isinstance(c, dict) and c.get("window") == "seven_day" for c in scores or []):
+                weekly_reset_play(project, root, board.read_board(root)["jobs"])
             note_run_limits(project, root)
             now = time.time()
             if not board.cooling_down() and not board.soft_cap_reason() \
