@@ -7554,6 +7554,8 @@ print("stub err", file=sys.stderr)
             self.assertIsNone(board.hard_stop("main", time.time()))
             write(100, time.time() - 1)
             self.assertIsNone(board.hard_stop("main", time.time()), "that window already reset")
+            write(99, time.time() + board.FINAL_HOUR_SECS - 60)
+            self.assertIsNone(board.hard_stop("main", time.time()), "Trevor 2026-11-21: the final hour runs to 100%")
 
     def test_queue_start_rechecks_under_lock(self):
         job_id = self.hot_job(shop="mini")

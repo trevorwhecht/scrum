@@ -1382,8 +1382,8 @@ def hard_stop_tick() -> list[str]:
     another account with room; its RUNS entry is marked handled so respawn_exited never resumes it. A tracked run with
     no board job (run-all, digest) is only stopped. Returns the `<project>/<id>` names stopped."""
     now = time.time()
-    resets = {a.name: int(board.seven_day_window(a.name)["resets_at"]) for a in board.accounts()
-              if board.hard_stop(a.name, now)}
+    resets = {a.name: int(board.seven_day_window(a.name)["resets_at"]) - board.FINAL_HOUR_SECS for a in board.accounts()
+              if board.hard_stop(a.name, now)}  # held until the final hour, when the line lifts
     if not resets:
         return []
     first, stopped = board.accounts()[0].name, []

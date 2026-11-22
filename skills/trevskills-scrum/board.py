@@ -5066,6 +5066,9 @@ PRIMARY_RESERVE = {"owa": (None, 97), "main": (None, 98)}
 # Trevor 2026-11-20 "set a hard stop to scrum for if we hit 98%": no scrum session runs on an account whose 7d window is
 # at this used %, his clicks included (spawn's HardStop), and serve.py hard_stop_tick stops the running ones.
 HARD_STOP_PCT = 98
+# Trevor 2026-11-21: in the last hour before the seven_day window resets its unused quota is lost, so neither
+# HARD_STOP_PCT nor a 7d reserve holds the account then; only a used-up window (100 %) does.
+FINAL_HOUR_SECS = 3600
 Account = namedtuple("Account", "name dir reserve")
 ACCOUNT_RE = re.compile(r"[a-z0-9-]{1,20}")
 
@@ -5465,21 +5468,23 @@ def reserve_hit(acc, usage, now):
     if not isinstance(limits, dict):
         return None
     for (key, label), cap in zip(WINDOWS, account_reserve(acc, now) or (None, None)):
-        cap = 100 if cap is None else cap
         w = limits.get(key)
-        if isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) \
-                and w["resets_at"] > now and w["used_percentage"] >= cap:
+        if not (isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) and w["resets_at"] > now):
+            continue
+        cap = 100 if cap is None or key == "seven_day" and w["resets_at"] - now <= FINAL_HOUR_SECS else cap
+        if w["used_percentage"] >= cap:
             return f"reserve {label} {round(w['used_percentage'])}% used (keeps {cap}%)" if cap < 100 else f"{label} used up"
     return None
 
 
 def hard_stop(account, now):
-    """Why HARD_STOP_PCT stops every scrum session on the account now (its seven_day window, resets_at > now, at or
-    above it), else None. Only as fresh as usage.json: the statusline of an interactive chat on that account writes it."""
+    """Why HARD_STOP_PCT stops every scrum session on the account now (its seven_day window at or above it, more than
+    FINAL_HOUR_SECS before resets_at), else None. Only as fresh as usage.json: the statusline of an interactive chat on
+    that account writes it."""
     w = seven_day_window(account) or {}
     pct, at = w.get("used_percentage"), w.get("resets_at")
-    if is_num(pct) and is_num(at) and at > now and pct >= HARD_STOP_PCT:
-        return f"hard stop: {account} {round(pct)}% weekly, back {datetime.fromtimestamp(at):%a %-I:%M %p}"
+    if is_num(pct) and is_num(at) and at - FINAL_HOUR_SECS > now and pct >= HARD_STOP_PCT:
+        return f"hard stop: {account} {round(pct)}% weekly, back {datetime.fromtimestamp(at - FINAL_HOUR_SECS):%a %-I:%M %p}"
     return None
 
 

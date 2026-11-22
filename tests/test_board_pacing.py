@@ -489,6 +489,11 @@ class PickAccountTest(AccountEnv):
         self.assertIsNone(board.reserve_hit(owa, board.read_usage("owa"), NOW))
         self.write(self.owa, seven=(90, 90000))
         self.assertEqual(board.reserve_hit(owa, board.read_usage("owa"), NOW), "reserve 7d 90% used (keeps 90%)")
+        self.write(self.owa, seven=(99, board.FINAL_HOUR_SECS))  # Trevor 2026-11-21: the final hour runs to 100 %
+        self.assertIsNone(board.reserve_hit(owa, board.read_usage("owa"), NOW))
+        self.write(self.owa, seven=(100, board.FINAL_HOUR_SECS))
+        self.assertEqual(board.reserve_hit(owa, board.read_usage("owa"), NOW), "7d used up")
+        self.write(self.owa, seven=(90, 90000))
         self.write(self.main, seven=(95, 95000))  # owa now resets first: primary, so main is the one held
         self.assertIsNone(board.reserve_hit(owa, board.read_usage("owa"), NOW))
         self.assertEqual(board.reserve_hit(main, board.read_usage("main"), NOW), "reserve 7d 95% used (keeps 90%)")
