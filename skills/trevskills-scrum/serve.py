@@ -649,6 +649,27 @@ def give_room():
         RESUME_ROOM += 1
 
 
+def resume_budget() -> int:
+    """watchdog_tick's RESUME_ROOM: 0 while board.solo_hold(waiting=False) names a solo run holder (job 1361: every
+    tick resume spends take_room, so none starts beside it), else board.ram_room(). A holder still stalled on its
+    LOAD_SOLO_WAIT reason with a queued_launch does not zero it: that queued launch is the solo run itself."""
+    holder = board.solo_hold(waiting=False)
+    if holder:
+        for repo in board.projects().values():
+            scrum = (repo / "scrum").resolve()
+            try:
+                jobs = board.read_board(scrum)["jobs"]
+            except (SystemExit, OSError, ValueError, KeyError):
+                continue
+            for j in jobs:
+                if f"{scrum.parent.name}/{j.get('id')} runs alone" == holder:
+                    queued = j.get("queued_launch") and board.stalled(j) \
+                        and str(j.get("reason") or "").startswith(board.STALL + board.LOAD_SOLO_WAIT)
+                    return board.ram_room() if queued else 0
+        return 0
+    return board.ram_room()
+
+
 def launched_since(project, t) -> bool:
     """A RUNS launch of the project started at or after t (epoch s)."""
     with RUNS_LOCK:
@@ -1232,7 +1253,8 @@ def e2e_job_waiting() -> bool:
 def e2e_full_tick(project, repo, root) -> None:
     """Start one background full E2E run on repo's main checkout when project.md has an E2E command, no full run is in
     flight in this serve (E2E_FULL), this project's UI sweep is not running (its dev server holds the checkout's dev
-    lock), the E2E lock is free, no job waits on the E2E queue (e2e_job_waiting), the tracked tree is clean, e2e_full_due holds (watchdog_tick pass 1) and
+    lock), the E2E lock is free, no job waits on the E2E queue (e2e_job_waiting), no solo run holds the Mac or waits
+    for it (board.solo_hold, job 1361), the tracked tree is clean, e2e_full_due holds (watchdog_tick pass 1) and
     board.machine_ok passes (without claim=True, so cool-down never stops it). During
     cool down, once no job on this project blocks a restart, any new HEAD is due: the merges bundled into one run.
     With no run in flight here, every project's `running` record is an orphan (a serve reload killed its thread; one
@@ -1254,7 +1276,7 @@ def e2e_full_tick(project, repo, root) -> None:
     if sweep and sweep.get("result") == "running" and (now - (sweep.get("at") or 0) < E2E_FULL_STALE or (
             sweep.get("dir") and board.session_alive_fn()({"id": sweep["dir"]}))):
         return
-    if not e2e_queue_free() or e2e_job_waiting() \
+    if not e2e_queue_free() or e2e_job_waiting() or board.solo_hold() \
             or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip():
         return
     record = e2e_full_record(root)
@@ -1793,7 +1815,7 @@ def ui_sweep_tick(project, repo, root) -> None:
     """Start one headless sweep session (spawn id ui-sweep, at UI_SWEEP_NICE) on repo's main checkout when project.md
     has UI globs and a Dev command, no sweep runs anywhere, no full E2E run is in flight (E2E_FULL; its next dev holds
     the dev lock), the E2E lock is free (an orphaned full run holds it) and no job waits on the E2E queue
-    (e2e_job_waiting), the tracked tree is clean,
+    (e2e_job_waiting), no solo run holds the Mac or waits for it (board.solo_hold, job 1361), the tracked tree is clean,
     board.machine_ok(claim=True) passes, check.lock and build.lock have no holder or waiter (a job's Check or Build
     goes first; a last record E2E_FULL_EVERY old, or none, starts anyway, job 1244) and e2e_full_due holds. It sweeps
     since the last record's head (its since after a running or error record, so a dead sweep's range is kept; HEAD~5
@@ -1805,7 +1827,7 @@ def ui_sweep_tick(project, repo, root) -> None:
         rec = ui_sweep_record(other / "scrum")
         if rec and rec.get("result") == "running" and now - (rec.get("at") or 0) < E2E_FULL_STALE:
             return
-    if not e2e_queue_free() or e2e_job_waiting() \
+    if not e2e_queue_free() or e2e_job_waiting() or board.solo_hold() \
             or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip() \
             or board.machine_ok(root, claim=True):
         return
@@ -1889,9 +1911,13 @@ def auto_resume(project, root, jobs):
     over (a refusal, a spent budget, a busy E2E or Check queue) is noted in stall-holds.txt (note_stall_hold).
     A check job held on a queue (board.queue_waiting: not stalled) is resumed as soon as its lock is free (queue_free:
     e2e.lock, check.lock, or build.lock for a Build-queue wait), whatever else sits in check, under the same one-per-tick
-    E2E cap and one-per-call Check and Build caps, spending no try and never parked as spent."""
-    global E2E_RESUMED
+    E2E cap and one-per-call Check and Build caps, spending no try and never parked as spent. A job waiting for a solo
+    run (board.LOAD_SOLO_WAIT) resumes only when board.live_sessions() is 0, no full E2E runs (E2E_FULL) and nothing
+    refuses it; board.mark_solo_run reserves the Mac for it first (board.solo_hold), and no other job resumes after it
+    in this call (noted solo_run), nor, inside a tick, in any later project (RESUME_ROOM = 0)."""
+    global E2E_RESUMED, RESUME_ROOM
     now, busy, e2e_resumed, check_resumed, build_resumed = time.time(), False, bool(E2E_RESUMED), False, False
+    solo_run = False  # a solo job resumed in this call: nothing else resumes after it (job 1361)
 
     def check_job(j):
         return j.get("stage") == "check" and not j.get("paused") and not board.stalled(j) and not limit_held(j) \
@@ -1906,7 +1932,10 @@ def auto_resume(project, root, jobs):
             note_stall_hold(root, job["id"], cpu_token() if tok == "cpu_load" else tok)
         return refusal
 
-    def room(job):  # take_room, noting resume_room when the tick's budget is spent
+    def room(job):  # take_room, noting resume_room when the tick's budget is spent, solo_run after a solo resume
+        if solo_run:
+            note_stall_hold(root, job["id"], "solo_run")
+            return False
         if take_room():
             return True
         note_stall_hold(root, job["id"], "resume_room")
@@ -1935,7 +1964,7 @@ def auto_resume(project, root, jobs):
                 and f"{project}/{job['id']}" not in BUILD_CHECK_RETRIED and not running(project, job["id"]):
             opt = next((o for o in job.get("options") or [] if isinstance(o, dict)
                         and (option_command(o.get("command")) or ("",))[0] == "resume"), None)
-            if opt and resume_refusal(project, root, job) is None and take_room():
+            if opt and not solo_run and resume_refusal(project, root, job) is None and take_room():
                 BUILD_CHECK_RETRIED.add(f"{project}/{job['id']}")  # Trevor's Try again, once; a second stop stays on him
                 busy = True
                 answer_job(project, root, job, jobs, opt.get("key"))
@@ -1944,7 +1973,7 @@ def auto_resume(project, root, jobs):
                 and GUARD_RETRIED.get(f"{project}/{job['id']}") != job.get("updatedAt") and not running(project, job["id"]):
             opt = next((o for o in job.get("options") or [] if isinstance(o, dict)
                         and (option_command(o.get("command")) or ("",))[0] == "resume"), None)
-            if opt and main_guard_clear(root.parent, (job.get("base") or "main").removeprefix("origin/")) \
+            if opt and not solo_run and main_guard_clear(root.parent, (job.get("base") or "main").removeprefix("origin/")) \
                     and resume_refusal(project, root, job) is None and take_room():
                 GUARD_RETRIED[f"{project}/{job['id']}"] = job.get("updatedAt")
                 busy = True
@@ -1989,9 +2018,13 @@ def auto_resume(project, root, jobs):
                 resume_job(project, root, job, jobs, note=LOAD_BLOCK_NOTE if job.get("lane") == "debug" and job["stage"] == "build" else LOAD_WAIT_NOTE)
             continue
         if str(job.get("reason") or "").startswith(board.STALL + board.LOAD_SOLO_WAIT):  # no try spent, never spent
-            if board.live_sessions() == 0 and refused(job) is None and room(job):
+            if board.live_sessions() == 0 and not E2E_FULL["running"] and refused(job) is None and room(job):
                 busy = True
+                board.mark_solo_run(root, job["id"])  # before the launch, so every claim path already sees the hold
                 resume_job(project, root, job, jobs, note=LOAD_BLOCK_NOTE if job.get("lane") == "debug" and job["stage"] == "build" else LOAD_WAIT_NOTE)
+                solo_run = True
+                if RESUME_ROOM is not None:
+                    RESUME_ROOM = 0  # inside a tick: no later project resumes either
             else:
                 busy = True  # no new claims while it waits for a quiet Mac
                 note_stall_hold(root, job["id"], "solo_wait")
@@ -3963,7 +3996,7 @@ def watchdog_tick():
     """Three passes over every registered project; one project's failure never stops the others.
     1. Resume: per project, move old .claude parks into the Terminal batch (claude_migrate), flag exited and stalled sessions (respawn_exited, cmd_watchdog), then start Trevor's queued
        Plays (play_queue_tick) and auto-resume stalled or limit-held jobs (auto_resume), sharing one session budget
-       from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project (a free-disk
+       from resume_budget() (RESUME_ROOM: board.ram_room(), 0 while a solo run holds the Mac, job 1361); a board.machine_ok refusal ends the pass for every project (a free-disk
        refusal first runs reclaim_disk on that project and checks again). Then resume
        BigBoy parents waiting on the main checkout's fast-forward (main_ff_tick). Then start a due full E2E run on the main checkout (e2e_full_tick),
        then, in its own guard, a due UI sweep there (ui_sweep_tick).
@@ -4019,7 +4052,7 @@ def watchdog_tick():
         print(f"watchdog: hard stop: {e}", file=sys.stderr, flush=True)
     busy, alive, seen, candidates, idle = {}, once(lambda: board.session_alive_fn()), [], [], []
     pending = disk_short = False
-    RESUME_ROOM, E2E_RESUMED = board.ram_room(), False
+    RESUME_ROOM, E2E_RESUMED = resume_budget(), False
     try:
         for project, repo in board.projects().items():
             try:

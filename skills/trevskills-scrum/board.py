@@ -1611,7 +1611,8 @@ def pulse_path():
 # or scrum-folder file no entry names, and on a log_process name that is no entry.
 PROCESSES = (
     ("Session starts", ("spawn", "auto_continue_tick", "play_queue_tick", "auto_resume", "auto_play", "idle_claim",
-                        "start_ready", "wake_waiting", "sweep_parents", "main_ff_tick", "terminal_batch_tick"), ()),
+                        "start_ready", "wake_waiting", "sweep_parents", "main_ff_tick", "terminal_batch_tick",
+                        "resume_budget"), ()),
     ("Stalls and exits", ("cmd_watchdog", "respawn_exited", "record_outcomes", "cmd_migrate_paused", "claude_migrate"),
      ("questions.log",)),
     ("Full E2E on main", ("e2e_full_tick", "e2e_full_run", "hot_stop_tick"), ("e2e-full.json", "e2e-full.log", "e2e-full-rerun.log")),
