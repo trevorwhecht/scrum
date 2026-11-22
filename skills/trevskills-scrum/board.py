@@ -9236,7 +9236,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     A job on the board whose session reads alive (session_alive_fn, ps unreadable counting as alive) launches nothing:
     LiveSession (a SystemExit) names it. `caller` (`B spawn`'s caller_claude_pid) is left out of that scan, so the job's
     own session may hand it off (a lilguy hand-off, a cloud-home auto-migrate). A job not on the board is never checked.
-    start/resume/run-all/cloud-home get `--model <Orchestrator model>` (or `<Big ticket model>`, see orchestrator_model) unless `model` is given.
+    start/resume/run-all/cloud-home/rework/approve get `--model <Orchestrator model>` (or `<Big ticket model>`, see orchestrator_model) unless `model` is given.
     `account` None: pick_account, preferring the job's recorded account; with none free, the one whose limit ends soonest
     (the recorded account on a tie), else the first (Trevor's Play and Resume are never refused on usage). Any account but the first runs with
     CLAUDE_CONFIG_DIR=<its dir>; the first runs with CLAUDE_CONFIG_DIR removed. The session runs at `nice` (SESSION_NICE;
@@ -9252,7 +9252,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         raise SystemExit(f"bad spawn action {action!r}")
     if model is not None and not MODEL_RE.fullmatch(model):
         raise SystemExit(f"bad model {model!r}; must match {MODEL_RE.pattern}")
-    if model is None and action in ("start", "resume", "run-all", "cloud-home"):  # job 1261: run-all and cloud-home no longer run on the CLI default Opus
+    if model is None and action in ("start", "resume", "run-all", "cloud-home", "rework", "approve"):  # job 1261: run-all and cloud-home no longer run on the CLI default Opus; job 1344: rework and approve too
         model = orchestrator_model(root, job_id)
     prompt = prompt if prompt is not None else f"/trevskills-scrum {action} {job_id}"
     accs = accounts()

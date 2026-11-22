@@ -7702,7 +7702,7 @@ print("stub err", file=sys.stderr)
         out = self.cli("123-some-job", "approve", "/trevskills-scrum approve 123-some-job it's; rm -rf ~")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(self.records(2)[1]["argv"], ["-p", "/trevskills-scrum approve 123-some-job it's; rm -rf ~",
-                                                      "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX])
+                                                      "--model", "sonnet", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX])  # job 1344: approve gets the model
 
     def test_big_ticket_model(self):
         (self.root / "board.json").write_text(json.dumps({"jobs": [
@@ -7747,12 +7747,12 @@ print("stub err", file=sys.stderr)
                             ("- Orchestrator model: $(touch x)\n", "sonnet"), ("- Orchestrator model:   \n", "sonnet"),
                             ("- Stack: Python\n", "sonnet")):
             project.write_text("# Project profile\n" + line)
-            for action in ("start", "resume"):
+            for action in ("start", "resume", "rework", "approve"):  # job 1344
                 expect = plain if model is None else ["-p", "/p", "--model", model, "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX]
                 self.assertEqual(self.argv(action), expect, (line, action))
-            self.assertEqual(self.argv("approve"), plain, line)
+            self.assertEqual(self.argv("digest"), plain, line)  # an action with no orchestrator model
         project.write_text("- Orchestrator model: opus\n")
-        self.assertEqual(self.argv("approve", model="sonnet"),
+        self.assertEqual(self.argv("digest", model="sonnet"),
                          ["-p", "/p", "--model", "sonnet", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX])
         self.assertEqual(self.argv("start", model="haiku"),
                          ["-p", "/p", "--model", "haiku", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX])
@@ -7816,8 +7816,8 @@ print("stub err", file=sys.stderr)
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1"}):  # a Run-all parent's own setting
             for job_id, mds in (("001-std", "1"), ("999-not-a-job", "1"), ("002-lil", None), ("003-pinned", None)):
                 rec, settings = run(job_id)
-                self.assertEqual(rec["argv"][:5], ["-p", "/p", "--permission-mode", "acceptEdits", "--strict-mcp-config"], job_id)
-                self.assertEqual(rec["argv"][5], "--settings", job_id)
+                self.assertEqual(rec["argv"][:7], ["-p", "/p", "--model", "sonnet", "--permission-mode", "acceptEdits", "--strict-mcp-config"], job_id)
+                self.assertEqual(rec["argv"][7], "--settings", job_id)
                 self.assertEqual(settings["enabledPlugins"], {
                     "cache-tax@claude-code-mods": False, "vercel@claude-plugins-official": False,
                     "hookify@claude-plugins-official": False, "claude-seo@seo": False}, job_id)
@@ -7922,6 +7922,13 @@ print("stub err", file=sys.stderr)
         out = self.cli("999-x", "cloud-home", "/trevskills-scrum cloud-home 999-x")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(self.records()[0]["argv"][2:4], ["--model", "sonnet"])
+
+    def test_spawn_rework_and_approve_get_orchestrator_model(self):  # job 1344
+        for action in ("rework", "approve"):
+            self.out.unlink(missing_ok=True)
+            out = self.cli("999-x", action, f"/trevskills-scrum {action} 999-x")
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(self.records()[-1]["argv"][2:4], ["--model", "sonnet"], action)
 
     def test_spawn_rejects_bad_id_or_action(self):
         for job_id, action in (("a/b", "start"), ("a b", "start"), ("..", "start"), ("../x", "start"), ("-x", "start"),

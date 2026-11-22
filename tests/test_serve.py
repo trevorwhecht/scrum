@@ -5640,7 +5640,7 @@ class AiResearchTest(unittest.TestCase):
         for text in (None, "- Orchestrator model: opus\n"):
             if text:
                 project.write_text(text)
-            for action in ("approve", "rework", "digest"):
+            for action in ("digest",):  # job 1344: approve and rework get the orchestrator model
                 self.assertEqual(self.spawn_argv(action), ["claude-stub", "-p", "/p", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", self.serve.board.NO_CACHE_TAX], (text, action))
 
     def test_research_home_is_this_checkout(self):
