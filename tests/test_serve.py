@@ -7621,7 +7621,7 @@ class AutoResumeTest(unittest.TestCase):
             ("room", plain, {"room": 0}, [], "resume_room\n"),
             ("e2e", f"stalled: {s.E2E_WAIT}", {}, [checking], "e2e_queue\n"),
             ("check", f"stalled: {s.CHECK_WAIT}", {"check_free": False}, [], "check_queue\n"),
-            ("cool", f"stalled: {b.COOLDOWN_PARK}", {"cooling": True}, [], "cool_down\n"),
+            ("cool", f"stalled: {b.COOLDOWN_PARK}", {"cooling": True}, [], None),  # job 1346: resumed while cooling
             ("resumed", plain, {}, [], None))
         for name, reason, p, extra, want in cases:
             with self.subTest(name):
@@ -8178,17 +8178,21 @@ class AutoResumeTest(unittest.TestCase):
 
     PARKED = "stalled: parked for cool down; resumes when cool down ends"
 
-    def test_cooldown_parked_waits_while_cooling(self):
-        """Job 622: a cool-down park waits out cool down without a try and without holding new claims (busy)."""
+    def test_cooldown_parked_resumes_while_cooling(self):
+        """Job 1346: a park left over from job 622 resumes while cooling down, writing no cool_down stall hold."""
         s = self.serve
         flag = self.root / "cooldown"
         flag.write_text("")
+        (self.root / "jobs" / "far").mkdir(parents=True, exist_ok=True)
         self.jobs = [{"id": "far", "stage": "build", "stalled": True, "reason": self.PARKED}]
         with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)), \
                 mock.patch.object(s, "resume_job") as resume, mock.patch.object(s, "running", return_value=False):
-            self.assertIs(s.auto_resume("p", self.root, self.jobs), False)
-        resume.assert_not_called()
-        self.assertNotIn("p/far", s.AUTO_RESUME)
+            self.assertTrue(s.board.cooling_down())
+            self.assertIs(s.auto_resume("p", self.root, self.jobs), True)
+        resume.assert_called_once()
+        self.assertEqual(resume.call_args.args[2]["id"], "far")
+        self.assertEqual(s.AUTO_RESUME["p/far"][0], 1)
+        self.assertFalse((self.root / "jobs" / "far" / "stall-holds.txt").exists())
 
     def test_cooldown_parked_resumes_after(self):
         s = self.serve
@@ -8197,8 +8201,6 @@ class AutoResumeTest(unittest.TestCase):
         self.jobs = [{"id": "far", "stage": "build", "stalled": True, "reason": self.PARKED, "parent": "ra"},
                      {"id": "ra", "stage": "running", "lane": "runall"}]
         s.STALL_RESUMED.add("p/far/build")  # its one non-limit resume in build is already spent
-        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
-            self.assertEqual(self.sweep(), [])
         flag.unlink()
         with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
             self.assertEqual(self.sweep(), ["far"])
@@ -14868,8 +14870,8 @@ if __name__ == "__main__":
 
 
 class SpawnCooldownTest(unittest.TestCase):
-    """Job 842: spawn refuses an automatic start of a serve or runall job while cooling down, parking it for
-    auto_resume; a wake or hand job, a manual start or a park that fails still launches."""
+    """Job 842 refused an automatic start of a serve or runall job while cooling down; since job 1346 cool down never
+    parks a started job, so every start launches."""
 
     def setUp(self):
         import serve
@@ -14903,7 +14905,8 @@ class SpawnCooldownTest(unittest.TestCase):
         return out, bspawn, err.getvalue()
 
     def test_spawn_logs_session_start(self):
-        """Job 976: a real launch logs one Session starts line; a queued launch or a cool-down park logs nothing."""
+        """Job 976: a real launch logs one Session starts line, an automatic runall start in cool down too (job 1346);
+        a queued launch logs nothing."""
         job_id = self.job("wake")
         (out, _, _), lines = processes_logged(lambda: self.start(job_id))
         self.assertEqual(out, f"runs/{job_id}-start.log")
@@ -14918,39 +14921,38 @@ class SpawnCooldownTest(unittest.TestCase):
             (out, _, _), lines = processes_logged(lambda: self.start(queued))
         self.assertIsNone(out)
         self.assertEqual(lines, [])
-        parked = self.job("runall")
-        (out, _, _), lines = processes_logged(lambda: self.start(parked))
-        self.assertIsNone(out)
-        self.assertEqual(lines, [])
+        auto = self.job("runall")
+        (out, _, _), lines = processes_logged(lambda: self.start(auto))
+        self.assertEqual(out, f"runs/{auto}-start.log")
+        self.assertEqual(lines, [{"process": "Session starts", "result": "start", "repo": str(self.root.parent),
+                                  "job": auto, "manual": False}])
 
-    def test_runall_start_refused_in_cool_down(self):
+    def test_runall_start_launches_in_cool_down(self):
         for by in ("runall", "serve", "shop"):  # shop: a shop claim whose dispatch failed, left a queued start here
             job_id = self.job(by)
             out, bspawn, err = self.start(job_id)
-            self.assertIsNone(out)
-            bspawn.assert_not_called()
+            self.assertEqual(out, f"runs/{job_id}-start.log", by)
+            bspawn.assert_called_once()
             job = self.get(job_id)
-            self.assertEqual((job["stage"], job.get("stalled"), job["reason"]),
-                             ("spec", True, "stalled: parked for cool down; resumes when cool down ends"))
-            self.assertNotIn("play_queued", job)
-            self.assertNotIn("queued_launch", job)
-            self.assertEqual(err, f"cool down: refused start of repo/{job_id}\n")
+            self.assertEqual((job["stage"], job.get("stalled")), ("spec", None), by)
+            self.assertNotIn("cool down: refused start", err)
 
-    def test_cooldown_park_clears_play_queue(self):
+    def test_queued_start_launches_in_cool_down(self):
         job_id = self.job("runall")
         with self.board.locked_board(self.root) as board:
             job = self.board.find(board, job_id)
             job.update(play_queued=time.time(), queued_launch={"action": "start", "prompt": "p", "stage": "spec"})
-        out, _, _ = self.start(job_id)
-        self.assertIsNone(out)
+        err = io.StringIO()
+        with mock.patch.object(self.board, "spawn", return_value=(mock.Mock(), f"runs/{job_id}-start.log")) as bspawn, \
+                mock.patch("sys.stderr", new=err):
+            self.serve.play_queue_tick("repo", self.root, self.board.read_board(self.root)["jobs"])
+        bspawn.assert_called_once()
+        self.assertEqual(bspawn.call_args.args[1:3], (job_id, "start"))
         job = self.get(job_id)
-        self.assertEqual((job["stage"], job.get("stalled"), job["reason"]),
-                         ("spec", True, "stalled: parked for cool down; resumes when cool down ends"))
+        self.assertFalse(job.get("stalled"))
         self.assertNotIn("play_queued", job)
         self.assertNotIn("queued_launch", job)
-        with mock.patch.object(self.board, "spawn") as bspawn:
-            self.serve.play_queue_tick("repo", self.root, self.board.read_board(self.root)["jobs"])
-        bspawn.assert_not_called()
+        self.assertNotIn("cool down: refused start", err.getvalue())
 
     def test_wake_and_hand_start_in_cool_down(self):
         for by in ("wake", "hand"):

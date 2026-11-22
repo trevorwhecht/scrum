@@ -1,7 +1,8 @@
 """Repro for job 967: cool down overrides Trevor's own Play and Resume clicks.
 
 Jobs: a session Trevor's click launched (serve.spawn manual=True), or one whose Play he queued (play_queued with
-play_queued_manual), still parks itself at New job's `board.py cooldown-park` checkpoint (job 962).
+play_queued_manual), parked itself at New job's `board.py cooldown-park` checkpoint (job 962). Since job 1346 that
+checkpoint is gone and cooldown-park never parks any job, manual or automatic.
 BigBoy parents: a manual Resume on a running, unpaused parent held with reason `waiting: cooling down` is answered 409
 and its next ready child is never claimed (BigBoy 960, child 963)."""
 import os, sys, tempfile, unittest
@@ -23,9 +24,6 @@ os.environ["SCRUM_SWAP_PCT"] = "1"
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"
 os.environ["SCRUM_CPU_LOAD_PCT"] = "1"
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
-
-PARKED = "stalled: parked for cool down; resumes when cool down ends"
-
 
 class CooldownManualReproTest(unittest.TestCase):
     def setUp(self):
@@ -65,7 +63,7 @@ class CooldownManualReproTest(unittest.TestCase):
         bspawn.assert_called_once()
         self.serve.RUNS.pop(f"repo/{job_id}", None)  # the mocked session ended
 
-    # criteria 1 and 3: job 962's shape, a Play Trevor queued, is not parked; an automatic queued launch still is
+    # job 1346: neither a Play Trevor queued (job 962's shape) nor an automatic queued launch is parked
     def test_cooldown_park_skips_queued_manual_click(self):
         for stage in ("spec", "build"):
             launch = {"action": "resume", "prompt": "/trevskills-scrum resume 962", "stage": stage}
@@ -73,34 +71,30 @@ class CooldownManualReproTest(unittest.TestCase):
             before = self.get(j)
             self.assertEqual(self.board.cmd_cooldown_park(self.root, j), {"parked": False}, stage)
             self.assertEqual(self.get(j), before, f"{stage}: a queued manual click writes nothing")
-        auto = self.job("build", play_queued="2026-11-18T06:20:45+00:00",
-                        queued_launch={"action": "start", "prompt": "/trevskills-scrum start x", "stage": "build"})
-        self.assertEqual(self.board.cmd_cooldown_park(self.root, auto), {"parked": True})
+        launch = {"action": "start", "prompt": "/trevskills-scrum start x", "stage": "build"}
+        auto = self.job("build", play_queued="2026-11-18T06:20:45+00:00", queued_launch=launch)
+        self.assertEqual(self.board.cmd_cooldown_park(self.root, auto), {"parked": False})
         got = self.get(auto)
-        self.assertEqual((got["stalled"], got["reason"]), (True, PARKED))
-        self.assertNotIn("play_queued", got)
-        self.assertNotIn("queued_launch", got)
+        self.assertFalse(got.get("stalled"))
+        self.assertEqual((got["play_queued"], got["queued_launch"]), ("2026-11-18T06:20:45+00:00", launch))
 
-    # criterion 4: a play_queued_manual left over from an old park (no play_queued) does not bypass the park
+    # job 1346: a play_queued_manual left over from an old park is kept and the job is not parked
     def test_cooldown_park_drops_stale_manual_marker(self):
         j = self.job("build", play_queued_manual=True)
-        self.assertEqual(self.board.cmd_cooldown_park(self.root, j), {"parked": True})
+        self.assertEqual(self.board.cmd_cooldown_park(self.root, j), {"parked": False})
         got = self.get(j)
-        self.assertEqual((got["stage"], got["stalled"], got["reason"]), ("build", True, PARKED))
-        self.assertNotIn("play_queued_manual", got)
+        self.assertEqual((got["stage"], got.get("stalled"), got["play_queued_manual"]), ("build", None, True))
 
-    # criterion 2: a session Trevor's click launched passes both New job checkpoints; a later automatic launch parks
+    # job 1346: neither a session Trevor's click launched nor a later automatic launch is parked
     def test_manual_launch_not_parked_at_checkpoint(self):
         for action in ("start", "resume"):
             j = self.job("spec")
             self.launch(j, action, manual=True)
-            self.assertEqual(self.board.cmd_cooldown_park(self.root, j), {"parked": False}, f"{action}: step 4")
-            self.assertEqual(self.board.cmd_cooldown_park(self.root, j), {"parked": False}, f"{action}: step 6")
-            self.assertFalse(self.get(j).get("stalled"), action)
+            self.assertEqual(self.board.cmd_cooldown_park(self.root, j), {"parked": False}, f"{action}: manual")
             self.launch(j, "resume", manual=False)  # an automatic launch clears the mark
-            self.assertEqual(self.board.cmd_cooldown_park(self.root, j), {"parked": True}, f"{action}: then automatic")
+            self.assertEqual(self.board.cmd_cooldown_park(self.root, j), {"parked": False}, f"{action}: then automatic")
             got = self.get(j)
-            self.assertEqual((got["stage"], got["stalled"], got["reason"]), ("spec", True, PARKED))
+            self.assertEqual((got["stage"], got.get("stalled")), ("spec", None))
 
     # criteria 5 and 6: BigBoy 960 held by cool down; Trevor's Resume claims its next ready child, an automatic one does not
     def test_cooldown_play_on_held_parent_claims_next_child(self):

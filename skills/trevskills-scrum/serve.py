@@ -338,13 +338,11 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     on a board job starts only while board.ram_room(floor=0, light=board.light_job(...)) >= 1 (every session ps sees,
     young ones counted as spent RAM; a fast or lilguy job sizes at the light share) and, unless `manual` (Trevor's click) or
     cpu_exempt (a small fast or debug job), board.cpu_load_pct() is not above MAX_LAUNCH_CPU_LOAD_PCT; else it is queued on the job (play_queued + queued_launch, which play_queue_tick drains) and this returns
-    None. A start clears both fields, whichever path launched it, and sets manual_run (the cool-down bypass
-    board.cmd_cooldown_park reads) when `manual`, else pops it. A RAM hold older than RAM_HOLD_SECS (from
-    play_queued) writes ram_hold, the reading, and logs it to stderr the first time. An id not on the board (run-all,
+    None. A start clears both fields, whichever path launched it, and sets manual_run when `manual`, else pops it.
+    A RAM hold older than RAM_HOLD_SECS (from play_queued) writes ram_hold, the reading, and logs it to stderr the first time. An id not on the board (run-all,
     digest, weekly) runs on `account` when given, else board.pick_account's account, kept as RUNS[key]["account"]
     (a board job's: the account board.spawn ran it on, proc.account).
-    While cooling down, a non-manual start of a serve, runall or shop job (started_by) is parked by board.cmd_cooldown_park
-    for auto_resume and launches nothing (None); a park that fails launches as usual. `idle` (idle_claim) skips only
+    Cool down never parks a start (job 1346): it holds only new claims. `idle` (idle_claim) skips only
     the ram_room check. A RAM hold notes board.ram_room_reason (the readings), then ram_room:<id> per live run of the
     project (live_ids). A launched non-manual `start` of a board job appends {project, job, cpu} (the gate's reading)
     to PULSE_STARTS for pulse_tick. While the CPU gate is open, a non-manual `start` of any job other than cpu_first()
@@ -363,10 +361,6 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             on_board = True
         except (SystemExit, OSError, ValueError):
             pass
-    if (on_board and action == "start" and not manual and job.get("started_by") in ("serve", "runall", "shop")
-            and board.cooling_down() and board.cmd_cooldown_park(root, job_id)["parked"]):
-        print(f"cool down: refused start of {project}/{job_id}", file=sys.stderr, flush=True)
-        return None
     if on_board:
         with LAUNCH_LOCK:
             cpu = None if manual else board.cpu_load_pct()
@@ -1857,14 +1851,14 @@ def auto_resume(project, root, jobs):
     limit-held: a limit-held check job runs nothing and holds nothing) in this project or in any registered project
     whose project.md has an E2E command: that job takes the machine-wide E2E lock soon. E2E-queue resumes are capped
     at one per watchdog_tick across all projects (E2E_RESUMED), and one per call outside a tick. A cool-down park
-    (board.COOLDOWN_PARK) waits, spending no try and not busy, while cooling down; after it, it is resumed whatever
-    its parent, with no per-stage limit. A job parked on the Check queue (CHECK_WAIT) is resumed the same way, one
+    left over from before job 1346 (board.COOLDOWN_PARK) is resumed whatever its parent, with no per-stage limit, cool
+    down or not. A job parked on the Check queue (CHECK_WAIT) is resumed the same way, one
     per call, once a check.lock slot is free and nobody waits on it. A spec stall with no spec.md (a claim whose
     launch never started) is resumed whatever its parent, with no per-stage limit, once board.ram_room(floor=0) >= 1;
     it waits, spending no try and not busy, until then. A GitHub billing stall (board.CI_BILLING_WAIT) is resumed
     60 s after it is first seen, then each time an ACTIONS_ALERT check newer than its last resume shows no refusal;
     it spends no try, is never parked as spent and is not busy while it waits. Each hold that passes a stalled job
-    over (a refusal, a spent budget, a busy E2E or Check queue, cool-down) is noted in stall-holds.txt (note_stall_hold).
+    over (a refusal, a spent budget, a busy E2E or Check queue) is noted in stall-holds.txt (note_stall_hold).
     A check job held on a queue (board.queue_waiting: not stalled) is resumed as soon as its lock is free (queue_free:
     e2e.lock, check.lock, or build.lock for a Build-queue wait), whatever else sits in check, under the same one-per-tick
     E2E cap and one-per-call Check and Build caps, spending no try and never parked as spent."""
@@ -1978,10 +1972,8 @@ def auto_resume(project, root, jobs):
         if tries >= AUTO_RESUME_MAX:
             park_spent(root, job, board.stall_stage(job), AUTO_RESUME_MAX)
             continue
-        if str(job.get("reason") or "").startswith(board.STALL + board.COOLDOWN_PARK):  # waits out cool down, no try spent
-            if board.cooling_down():
-                note_stall_hold(root, job["id"], "cool_down")
-            elif refused(job) is None and room(job):
+        if str(job.get("reason") or "").startswith(board.STALL + board.COOLDOWN_PARK):  # left over: resumes, cool down or not
+            if refused(job) is None and room(job):
                 busy = True
                 AUTO_RESUME[key] = [tries + 1, now]
                 resume_job(project, root, job, jobs)
