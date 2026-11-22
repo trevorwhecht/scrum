@@ -21,11 +21,14 @@ class EditKindTag(unittest.TestCase):
         self.assertEqual(style, TAG.findall(plain)[0][1], "the kind tag keeps the project's colour")
 
     def test_card_tag_without_kind_unchanged(self):
-        plain, other, button = run(f"out(card({json.dumps(JOB)}));"
-                                   f"out(card({json.dumps({**JOB, 'key': 'p/300-a', 'project': 'p', 'lane': None})}));"
-                                   "out(tagButton('edit'));")
+        plain, other, button, mapped = run(f"out(card({json.dumps(JOB)}));"
+                                           f"out(card({json.dumps({**JOB, 'key': 'p/300-a', 'project': 'p', 'lane': None})}));"
+                                           "out(tagButton('edit'));"
+                                           "out(['edit', 'p'].map(tag).join(''));")
         self.assertEqual([(p, t) for p, _, t in TAG.findall(plain)], [("edit", "edit")])
         self.assertEqual([(p, t) for p, _, t in TAG.findall(other)], [("p", "p")])
+        # .map(tag) passes an array index as the second argument: the tag still reads the project name.
+        self.assertEqual([(p, t) for p, _, t in TAG.findall(mapped)], [("edit", "edit"), ("p", "p")])
         self.assertRegex(button, r'^<button type="button" class="tag" data-project="edit" [^>]*>edit</button>$')
 
 

@@ -105,9 +105,10 @@ class EditLaneTest(unittest.TestCase):
         # No workers.txt beside SCRUM_REGISTRY: shop.workers() is the default shopmac worker, read from the real notes.
         self.assertFalse((self.base / "workers.txt").exists())
         terms = board.main_only_terms()
-        for term in ("Kind: edit-reel", "Kind: edit-animation", "Kind: edit-vector", "Kind: edit-photo", "VectorCraft",
+        for term in ("Kind: edit-reel", "Kind: edit-animation", "Kind: edit-vector", "Kind: edit-photo",
                      "PhotoCraft", "Blender", "saas-animation", "vid-img-editing", "Video folder"):
             self.assertIn(term, terms)
+        self.assertNotIn("VectorCraft", terms)  # installed on the shop Mac (#866); an edit-vector job is held by its Kind line
         self.assertTrue(board.names_main_only("Kind: edit-photo\nretouch the hoodie shot", terms))
         self.assertTrue(board.names_main_only("Kind: edit-reel", terms))
         self.assertFalse(board.names_main_only("Claude edits the widget", terms))
