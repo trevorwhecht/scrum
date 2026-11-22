@@ -616,13 +616,16 @@ class ServeTest(unittest.TestCase):
         text = path.read_text()
         self.addCleanup(path.write_text, text)
         before = self.serve.board.backlog_items(self.root)
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="501"):
+        # spawn is mocked: the shared stub log also holds late starts from other tests under load
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="501"), mock.patch.object(self.serve, "spawn") as spawn:
             self.assertEqual(self.req("POST", "/api/p/repo/backlog/run", {})[0], 409)
             self.assertEqual(self.serve.board.backlog_items(self.root), before)
-            self.assertFalse(any("start" in a for c in self.calls() for a in c))
+            spawn.assert_not_called()
             self.assertEqual(self.req("POST", "/api/p/repo/backlog/run", {"index": 1})[0], 202)  # explicit index: ungated
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="500"):
+            self.assertTrue(self.wait_for(lambda: spawn.called))
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="500"), mock.patch.object(self.serve, "spawn") as spawn:
             self.assertEqual(self.req("POST", "/api/p/repo/backlog/run", {})[0], 202)
+            self.assertTrue(self.wait_for(lambda: spawn.called))
 
     def test_backlog_run_refuses_waiting_item(self):
         path = self.root / "backlog.md"
