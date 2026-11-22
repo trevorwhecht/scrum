@@ -118,7 +118,7 @@
                                    round-(n-1)/head.txt, else null (Check gate step 1)
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
                                    git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
-  board.py lilguy-fit <id>         print {"fit","why"} (+ "read": a sed command for the lane parts a lilguy job runs, when fit): whether the job is tiny (backlog points 1, or jev.log's last model
+  board.py lilguy-fit <id>         print {"fit","why"} (+ "read": a sed command for the lane parts the job runs: lilguy parts when fit, else the fast/standard ones): whether the job is tiny (backlog points 1, or jev.log's last model
                                    answer score < 1.5 at confidence >= 0.7, or feature.md names a file path) with no
                                    hard-stop word in feature.md and an estimate (10 lines per named path) within 30
                                    lines, 10 files (SKILL.md New job step 3's Lilguy route)
@@ -4520,11 +4520,23 @@ LILGUY_READ_PARTS = (
 )
 
 
-def lilguy_read(lane_dir: Path | None = None) -> str | None:
-    """One `sed -n` shell command per lane file for the lines a lilguy job runs, or None when a file or anchor is missing."""
+# Same shape for a fast or standard job: the New job, Fast lane, Check gate, Review, Approve and Merge steps it runs.
+# The 1c Askme text, Visual diff, Migrate, Dev migrate and Resuming sections are read by their own heading when needed.
+# An end regex of None reads to the end of the file.
+STANDARD_READ_PARTS = (
+    ("newjob.md", r"# New job", r"   1c\. "),
+    ("newjob.md", r"2\. \*\*Base:\*\*", None),
+    ("review.md", r"# Review", r"## Visual diff"),
+    ("merge.md", r"# Merge", r"## Migrate"),
+)
+
+
+def lilguy_read(lane_dir: Path | None = None, parts=None) -> str | None:
+    """One `sed -n` shell command per lane file for the lines a lilguy job (or, with `parts`, another lane) runs, or None
+    when a file or anchor is missing."""
     lane_dir = Path(lane_dir) if lane_dir is not None else LANE_DIR
     ranges: dict[str, list[str]] = {}
-    for name, start, end in LILGUY_READ_PARTS:
+    for name, start, end in (parts or LILGUY_READ_PARTS):
         try:
             lines = (lane_dir / name).read_text(encoding="utf-8").splitlines()
         except OSError:
@@ -4532,7 +4544,7 @@ def lilguy_read(lane_dir: Path | None = None) -> str | None:
         starts = [i for i, ln in enumerate(lines) if re.match(start, ln)]
         if len(starts) != 1:
             return None
-        stop = next((i for i in range(starts[0] + 1, len(lines)) if re.match(end, lines[i])), None)
+        stop = len(lines) if end is None else next((i for i in range(starts[0] + 1, len(lines)) if re.match(end, lines[i])), None)
         if stop is None:
             return None
         ranges.setdefault(name, []).append(f"{starts[0] + 1},{stop}p")
@@ -8936,7 +8948,7 @@ def main(argv=None):
         return 1 if out.get("ok") is False else 0
     elif a.cmd == "lilguy-fit":
         out = cmd_lilguy_fit(a.dir, a.id)
-        read = lilguy_read() if out.get("fit") else None
+        read = lilguy_read(parts=None if out.get("fit") else STANDARD_READ_PARTS)
         if read:
             out = {**out, "read": read}
         print(json.dumps(out))

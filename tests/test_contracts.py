@@ -4747,6 +4747,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         start = next(l for l in (lanes / "commands.md").read_text().splitlines() if l.startswith("- **`/trevskills-scrum start <id>`**"))
         self.assertIn("run its `read` command", start)
         self.assertNotIn("awk '", start)
+        self.assertIn("when `fit` is false, run its `read` command", start)
+        self.assertIn("Askme text, Visual diff, Migrate, Dev migrate and Resuming sections", start)
 
 
 if __name__ == "__main__":

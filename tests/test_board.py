@@ -10498,7 +10498,22 @@ class LilguyFitTest(unittest.TestCase):
                 board.main(["--dir", str(self.root), "lilguy-fit", self.job])
             got = json.loads(out.getvalue())
             self.assertIs(got["fit"], False)
-            self.assertNotIn("read", got)
+            self.assertEqual(got["read"], board.lilguy_read(parts=board.STANDARD_READ_PARTS))
+
+    def test_standard_read_ranges_start_at_headings(self):
+        read = board.lilguy_read(parts=board.STANDARD_READ_PARTS)
+        parts = self._parts(read)
+        self.assertEqual(len(parts), len(board.STANDARD_READ_PARTS))
+        for (name, a, b), (wname, ws, we) in zip(parts, board.STANDARD_READ_PARTS):
+            lines = (board.LANE_DIR / name).read_text().splitlines()
+            self.assertEqual(name, wname)
+            self.assertRegex(lines[a - 1], "^" + ws)
+            self.assertTrue(we is None and b == len(lines) or re.match(we, lines[b]))
+        out = subprocess.run(read, shell=True, capture_output=True, text=True).stdout
+        for want in ("2. **Base:**", "## Fast lane", "## Check gate", "## Approve", "7. **Clean up:**"):
+            self.assertIn(want, out)
+        for bad in ("1c. **Askme**", "## Visual diff", "## Migrate", "## Resuming the builder"):
+            self.assertNotIn(bad, out)
 
     def test_lilguy_read_missing_heading_prints_none(self):
         tmp = Path(self.tmp.name) / "lanes"
