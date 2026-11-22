@@ -184,8 +184,11 @@ class ContractTest(unittest.TestCase):
                        "--b 'Relink the helpers now=shell: <scrum checkout>/install.sh' --c \"Remove this job=abort $ID --cascade\" "
                        "--title AGENT_MISSING --recommend <key> '<why>'` and stop.",
                        "the folder two levels above `readlink \"$HOME/.claude/skills/trevskills-scrum\"`",
-                       "ends its run with the error line in the final report"):
+                       "ends its run with the error line in the final report",
+                       "wait about 5 seconds and retry the spawn once, with the same prompt and overrides",
+                       "Only when the retry fails again"):
             self.assertIn(phrase, para, phrase)
+        self.assertLess(para.index("retry the spawn once"), para.index("Run `B ask $ID 'agent missing"))
         self.assertNotIn("fallback", routing.lower() + lane.lower())
 
     def test_skill_routes_steps_through_router(self):
