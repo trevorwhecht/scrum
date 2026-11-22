@@ -14132,14 +14132,49 @@ class StopWorktreeServersTest(unittest.TestCase):
         self.assertEqual([c.args for c in kill.call_args_list], [(101, 15), (102, 15), (106, 15), (107, 15)])
 
     def test_stop_worktree_servers_ignores_non_worktree_paths(self):
-        wts = [None, "", str(self.repo / ".claude" / "worktrees" / "gone"), str(self.repo),
-               str(self.repo / ".claude" / "worktrees"), str(self.repo / ".claude"), "/tmp"]
+        wts = [None, "", str(self.repo), str(self.repo / ".claude" / "worktrees"), str(self.repo / ".claude"), "/tmp"]
         for wt in wts:
-            with self.subTest(wt=wt), mock.patch.object(board.os, "kill") as kill, \
-                    mock.patch.object(board.subprocess, "run") as run:
-                self.assertEqual(board.stop_worktree_servers(self.repo, wt), [])
-            kill.assert_not_called()
-            run.assert_not_called()
+            for job_id in (None, "1-x"):
+                with self.subTest(wt=wt, job_id=job_id), mock.patch.object(board.os, "kill") as kill, \
+                        mock.patch.object(board.subprocess, "run") as run:
+                    self.assertEqual(board.stop_worktree_servers(self.repo, wt, job_id=job_id), [])
+                kill.assert_not_called()
+                run.assert_not_called()
+
+    def test_stop_worktree_servers_kills_base_sibling(self):
+        w = str(self.wt)
+        listening = [(111, 3000, w + "-base"), (112, 3002, w + "-base/web"), (113, 3000, w + "0"),
+                     (114, 3000, w + "-based"), (115, 3000, str(self.repo)), (116, 3001, w + "-base"),
+                     (116, 3010, w + "-base"), (os.getpid(), 4000, w + "-base")]
+        with mock.patch.object(board.os, "kill") as kill:
+            got = board.stop_worktree_servers(self.repo, w, listening)
+        self.assertEqual(got, [111, 112])
+        self.assertEqual([c.args for c in kill.call_args_list], [(111, 15), (112, 15)])
+
+    def test_stop_worktree_servers_kills_tmp_base_copy(self):
+        w = str(self.wt)
+        tmp = os.path.realpath("/tmp")
+        listening = [(121, 3000, tmp + "/scrum-base-1-x"), (122, 3002, tmp + "/scrum-base-1-x/web"),
+                     (123, 3000, tmp + "/scrum-base-1-xy"), (124, 3000, tmp + "/scrum-base-2-x"),
+                     (125, 3000, tmp)]
+        with mock.patch.object(board.os, "kill") as kill:
+            got = board.stop_worktree_servers(self.repo, w, listening, job_id="1-x")
+        self.assertEqual(got, [121, 122])
+        self.assertEqual([c.args for c in kill.call_args_list], [(121, 15), (122, 15)])
+        with mock.patch.object(board.os, "kill") as kill:
+            self.assertEqual(board.stop_worktree_servers(self.repo, w, listening), [])
+        kill.assert_not_called()
+
+    def test_stop_worktree_servers_clears_removed_worktree(self):
+        gone = str(self.repo / ".claude" / "worktrees" / "gone")
+        self.assertFalse(os.path.exists(gone))
+        tmp = os.path.realpath("/tmp")
+        listening = [(131, 3000, gone), (132, 3002, gone + "-base"), (133, 3004, tmp + "/scrum-base-9-y"),
+                     (134, 3000, str(self.wt))]
+        with mock.patch.object(board.os, "kill") as kill:
+            got = board.stop_worktree_servers(self.repo, gone, listening, job_id="9-y")
+        self.assertEqual(got, [131, 132, 133])
+        self.assertEqual([c.args for c in kill.call_args_list], [(131, 15), (132, 15), (133, 15)])
 
     def test_stop_worktree_servers_sigkills_survivors(self):
         w = str(self.wt)
@@ -14179,6 +14214,16 @@ class StopWorktreeServersTest(unittest.TestCase):
         with mock.patch.object(board, "listeners", return_value=[]):
             r = run_board("--dir", str(root), "dev-clear", job_id)
         self.assertEqual((r.returncode, json.loads(r.stdout)), (0, {"killed": []}))
+        copies = [(303, 3000, w + "-base"), (304, 3002, os.path.realpath("/tmp") + "/scrum-base-" + job_id)]
+        with mock.patch.object(board, "listeners", return_value=copies), \
+                mock.patch.object(board.os, "kill", side_effect=kill), mock.patch.object(board.time, "sleep"):
+            r = run_board("--dir", str(root), "dev-clear", job_id)
+        self.assertEqual((r.returncode, json.loads(r.stdout)), (0, {"killed": [303, 304]}))
+        shutil.rmtree(self.wt)
+        with mock.patch.object(board, "listeners", return_value=[(305, 3000, w)] + copies), \
+                mock.patch.object(board.os, "kill", side_effect=kill), mock.patch.object(board.time, "sleep"):
+            r = run_board("--dir", str(root), "dev-clear", job_id)
+        self.assertEqual((r.returncode, json.loads(r.stdout)), (0, {"killed": [305, 303, 304]}), "worktree removed")
         r = run_board("--dir", str(root), "dev-clear", "999-nope")
         self.assertEqual(r.returncode, 1)
         self.assertIn("no job '999-nope' on the board", r.stderr)
