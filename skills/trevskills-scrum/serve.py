@@ -1261,9 +1261,9 @@ def e2e_full_tick(project, repo, root) -> None:
     serve.py per Mac) and is rewritten as `error` first, keeping its head and lastGreen; then every `error`/exit-null
     record goes through e2e_full_from_log, so an orphan that finished later is filed. A `running` sweep older than
     E2E_FULL_STALE still holds the run while a claude process names its dir. A `busy` record on this HEAD is retried
-    once (retried=True)."""
+    once (retried=True). A no-git project (board.no_git, job 1362) never starts one."""
     cmd = e2e_command(root)
-    if cmd.lower() in ("", "none") or E2E_FULL["running"]:
+    if cmd.lower() in ("", "none") or E2E_FULL["running"] or board.no_git(root):
         return
     now = time.time()
     for other in board.projects().values():
@@ -1819,8 +1819,10 @@ def ui_sweep_tick(project, repo, root) -> None:
     board.machine_ok(claim=True) passes, check.lock and build.lock have no holder or waiter (a job's Check or Build
     goes first; a last record E2E_FULL_EVERY old, or none, starts anyway, job 1244) and e2e_full_due holds. It sweeps
     since the last record's head (its since after a running or error record, so a dead sweep's range is kept; HEAD~5
-    or the root commit with no record). No changed screen records a pass and starts nothing."""
-    if E2E_FULL["running"] or not board.ui_globs(root) or e2e_command(root, "Dev command").lower() in ("", "none"):
+    or the root commit with no record). No changed screen records a pass and starts nothing. A no-git project
+    (board.no_git, job 1362) never starts one."""
+    if E2E_FULL["running"] or not board.ui_globs(root) or e2e_command(root, "Dev command").lower() in ("", "none") \
+            or board.no_git(root):
         return
     now = time.time()
     for other in board.projects().values():
@@ -2154,7 +2156,10 @@ def main_ff_tick(project, repo, root, jobs) -> bool:
     """Resume each running, unpaused BigBoy parent whose reason is MAIN_FF and whose family has no live session or chain
     lock (family_live), once main is ready (main_ready) and resume_refusal and take_room let it: once per job and
     updatedAt (MAIN_FF_TRIED), so a
-    resume that leaves the job unchanged is not respawned every tick. Never writes the board. True when it spawned."""
+    resume that leaves the job unchanged is not respawned every tick. Never writes the board. True when it spawned.
+    A no-git project (board.no_git, job 1362) has no main to wait on: False, with no git call."""
+    if board.no_git(root):
+        return False
     spawned, by_id, alive = False, {j["id"]: j for j in jobs}, once(lambda: board.session_alive_fn())
     for job in jobs:
         key = f"{project}/{job['id']}"
@@ -2239,8 +2244,9 @@ def cloud_tick(project, root, jobs, now=None):
     shop.ALIAS: jobs dispatched before workers.txt ran on shopmac); after a sync with no error, one whose
     session ended (a str) and that is still in stage cloud after the sync is aborted with SHOP_ENDED
     (requeued unless a BigBoy child), after a usage-limit line in its log tail marks its account limited (note_limit);
-    once that abort took effect, shop_pr_close closes the job's open unlabelled PR, so the rerun opens no duplicate."""
-    if board.cooling_down():
+    once that abort took effect, shop_pr_close closes the job's open unlabelled PR, so the rerun opens no duplicate.
+    A no-git project (board.no_git, job 1362) is skipped: none of its jobs goes to the cloud or the shop."""
+    if board.cooling_down() or board.no_git(root):
         return
     now = time.time() if now is None else now
     if not any(j.get("stage") == "cloud" or j.get("artifactsPending") for j in jobs):
@@ -2356,9 +2362,9 @@ def shop_tick(project, repo, root) -> bool:
     (held_work: a queued `start` launch or a waiting child; never paused, board.shop_excluded (lilguy: board lane,
     `Lane: lilguy` anywhere in feature.md, or lilguy-fit.json fit true with no parent or a Run-all parent, unless this
     Mac's gates have held it over 2 h, board.SHOP_LILGUY_HELD_SECS; or naming a digest proposals.json), setup pending,
-    nor any job of a board.shop_project_excluded project (a `- Base branch:` line or docker in project.md), nor a
-    launch whose files are not clear_of_busy(busy_files), checked only when the pool holds a launch) to the first
-    shop_worker() worker (out of backoff, room, ready, an account; later workers are not probed).
+    nor any job of a board.shop_project_excluded project (a `- Base branch:` or `- Git: none` line, or docker in
+    project.md), nor a launch whose files are not clear_of_busy(busy_files), checked only when the pool holds a
+    launch) to the first shop_worker() worker (out of backoff, room, ready, an account; later workers are not probed).
     This Mac's cool-down does not stop the shop; a worker's own does (shop_worker).
     Order (job 1314): while this Mac is at its heavy cap (board.heavy_cap_reason) heavy held jobs (board.heavy_job) come
     first, then fast, then lowest id. A worker runs at most board.SHOP_HEAVY_PER_WORKER heavy jobs (board.shop_heavy_by_worker):
@@ -2945,7 +2951,10 @@ def reclaim_disk(repo: Path, jobs: list[dict]) -> int:
     """Free disk on a machine_ok free-disk refusal: `git worktree remove --force` the worktree of every done or aborted
     job that resolves strictly inside repo/.claude/worktrees/ and exists as a folder, then `git worktree prune` once.
     Never a symlinked folder, a path outside that base (a lilguy job's main checkout) or a path a job not done or
-    aborted also names. A failed remove (a locked worktree) is skipped. Branches stay. Returns the folders removed."""
+    aborted also names. A failed remove (a locked worktree) is skipped. Branches stay. Returns the folders removed.
+    A no-git project (board.no_git, job 1362) has no worktrees: 0, with no git call."""
+    if board.no_git(repo / "scrum"):
+        return 0
     base = (repo / ".claude" / "worktrees").resolve()
     final = ("done", "aborted")
     keep = {Path(j["worktree"]).resolve() for j in jobs if j.get("worktree") and j.get("stage") not in final}
@@ -3094,7 +3103,10 @@ def actions_alert(repo: Path) -> str | None:
     (a) The newest completed run failed and every job gh run view lists has 0 steps: GitHub refused to start it
     (billing or spending limit). (b) Per workflow, the newest completed `schedule` run failed, started up wrong or
     timed out. gh run list is newest first, so a later success (or a later run that started steps) clears each.
-    A result that differs from the ACTIONS_ALERT value cached for repo (none cached: None) logs one board.log_process line."""
+    A result that differs from the ACTIONS_ALERT value cached for repo (none cached: None) logs one board.log_process line.
+    A no-git project (board.no_git, job 1362) has no GitHub Actions: None, with no gh call."""
+    if board.no_git(repo / "scrum"):
+        return None
     hit = ACTIONS_ALERT.get(str(repo))
     alert = actions_alert_check(repo)
     if alert != (hit[1] if hit else None):
@@ -4024,7 +4036,8 @@ def watchdog_tick():
     then agent_links_tick (re-runs install.sh when a scrum agent link is bad, in its own guard), then hot_stop_tick once,
     before the per-project loop (stops a running UI sweep or full E2E while board.heavy_hold gives a reason, in its own
     guard; job 1312), then hard_stop_tick once (stops every scrum session on an account at board.HARD_STOP_PCT 7d, in
-    its own guard; Trevor 2026-11-20)."""
+    its own guard; Trevor 2026-11-20). A no-git project (board.no_git, job 1362) runs every pass, and each git or gh
+    pass returns early for it (main_ff_tick, e2e_full_tick, ui_sweep_tick, reclaim_disk, cloud_tick, actions_alert)."""
     global RESUME_ROOM, E2E_RESUMED
     try:
         board.record_cpu_sample()  # cpu_busy_pct's reading; first, so this tick's machine_ok sees it
@@ -5711,7 +5724,10 @@ def checkout_alert(repo: Path, jobs: list[dict]) -> str | None:
     """The board-wide alert when repo's live checkout cannot go live, else None. First: its current branch has commits
     missing from the last fetched origin/<branch> (no fetch here; that git check runs once per repo every
     CHECKOUT_ALERT_EVERY seconds). A detached HEAD, no origin/<branch> ref or a failed git call gives no ahead-alert.
-    Else: the newest done job (highest updatedAt) has a reason starting `merged, not live: fast-forward failed`."""
+    Else: the newest done job (highest updatedAt) has a reason starting `merged, not live: fast-forward failed`.
+    A no-git project (board.no_git, job 1362) has no checkout to go live: None, with no git call."""
+    if board.no_git(repo / "scrum"):
+        return None
     hit = CHECKOUT_ALERT.get(str(repo))
     now = time.time()
     if hit and now - hit[0] < CHECKOUT_ALERT_EVERY:
