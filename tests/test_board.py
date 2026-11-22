@@ -8671,8 +8671,10 @@ class ReviewPlanTest(unittest.TestCase):
         return subprocess.run(["git", "-C", str(cwd), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
                               capture_output=True, text=True).stdout.strip()
 
-    def project(self, globs):
+    def project(self, globs, has_ui=None):
         line = "" if globs is None else f"- UI globs: {globs}\n"
+        if has_ui is not None:
+            line += f"- Has UI: {has_ui}\n"
         (self.root / "project.md").write_text(f"# Project profile\n- Test: none\n{line}- Notes: x\n")
 
     def commit(self, rel, text):
@@ -8894,11 +8896,25 @@ class ReviewPlanTest(unittest.TestCase):
     def test_review_plan_ui_runs_when_globs_none(self):
         self.commit("src/a.py", "a = 2\n")
         for globs in ("none", None):
-            with self.subTest(globs=globs):
-                self.project(globs)
-                out = board.cmd_review_plan(self.root, self.job)
-                self.assertEqual(out, {"spawn": ["ux", "ui", "code"], "since": None})
-                self.assertEqual(self.files(1), ["review-security.md"])
+            for has_ui in (None, "yes", "Yes (dashboard.html only)"):
+                with self.subTest(globs=globs, has_ui=has_ui):
+                    self.project(globs, has_ui)
+                    out = board.cmd_review_plan(self.root, self.job)
+                    self.assertEqual(out, {"spawn": ["ux", "ui", "code"], "since": None})
+                    self.assertEqual(self.files(1), ["review-security.md"])
+
+    def test_review_plan_ui_skipped_when_has_ui_no(self):
+        self.commit("src/a.py", "a = 2\n")
+        for globs in ("none", None, "*.py"):
+            for has_ui in ("no", "No.", "no (CLI only)"):
+                with self.subTest(globs=globs, has_ui=has_ui):
+                    for name in self.files(1):
+                        (self.rdir(1) / name).unlink()
+                    self.project(globs, has_ui)
+                    out = board.cmd_review_plan(self.root, self.job)
+                    self.assertEqual(out, {"spawn": ["code"], "since": None})
+                    self.assertEqual(self.read(1, "ui"), self.UI_SKIP)
+                    self.assertEqual(self.read(1, "ux"), self.UI_SKIP)
 
     def test_review_plan_ui_glob_dir_component(self):
         self.assertTrue(board.glob_match("src/components/x.py", ["components/"]))

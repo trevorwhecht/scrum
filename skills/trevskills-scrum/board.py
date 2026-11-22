@@ -4371,7 +4371,7 @@ def _apply_visual_skip(root, job_id, rd, spawn, keep=()):
 
 def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
     """{"spawn": reviewers to spawn in REVIEWERS order, "since": SINCE sha or None}. Writes the round's carried-forward
-    (incremental) or UI/UX (no UI file) and security skip files (full); never writes
+    (incremental) or UI/UX (no UI file, or project.md `- Has UI: no`) and security skip files (full); never writes
     board.json."""
     job = live(read_board(root), check_id(job_id))
     wt, base = job.get("worktree"), job.get("base")
@@ -4404,7 +4404,7 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
         skips = {}
         globs = ui_globs(root)
         ui_files = [f for f in sorted(files) if f and not RUNTIME_EXCLUDE_RE.search(f) and glob_match(f, globs or [])]
-        if globs and not ui_files:
+        if (globs and not ui_files) or project_has_no_ui(root):
             skips.update(ui=UI_SKIP, ux=UI_SKIP)
         elif globs and _no_markup_change(wt, base, ui_files):
             skips.update(ui=NOMARKUP_SKIP, ux=NOMARKUP_SKIP)
@@ -6313,6 +6313,12 @@ def job_lane(root, job: dict):
     return lane
 
 
+def _has_ui_no(text) -> bool:
+    """True when project.md text has a `- Has UI:` line whose first word is `no`; a missing line is False."""
+    ui = _project_list(text, "Has UI")
+    return bool(ui) and ui[0].lower().rstrip(".,;:") == "no"
+
+
 def _project_light(root) -> bool:
     """True when root/project.md has a `- Build:` line of `none` and a `- Has UI:` line whose first word is `no`;
     a missing file or line is False."""
@@ -6320,8 +6326,15 @@ def _project_light(root) -> bool:
         text = (Path(root) / "project.md").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    build, ui = _project_list(text, "Build"), _project_list(text, "Has UI")
-    return build == [] and bool(ui) and ui[0].lower().rstrip(".,;:") == "no"
+    return _project_list(text, "Build") == [] and _has_ui_no(text)
+
+
+def project_has_no_ui(root) -> bool:
+    """True when root/project.md says `- Has UI: no` (_has_ui_no); a missing file or line is False."""
+    try:
+        return _has_ui_no((Path(root) / "project.md").read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
 
 
 def light_job(root, job: dict) -> bool:
