@@ -5688,7 +5688,8 @@ def hog_alert(today: str | None = None) -> str | None:
     """The machine-wide alert while HOGS is non-empty and a job on any board is held on cpu_load or cpu_busy (gate_held):
     `<top hog> is using <pct>% of one core while <ids, at most 3> wait for the CPU. Quit it.`, else None. Each hog is
     logged once per pid per local date as a cpu-hog waste line (caught=True, the held ids); never signalled."""
-    if not HOGS:
+    hogs = list(HOGS)  # report_hogs' watchdog thread replaces HOGS whole; one read serves the whole call
+    if not hogs:
         return None
     held = []
     for repo in board.projects().values():
@@ -5700,12 +5701,12 @@ def hog_alert(today: str | None = None) -> str | None:
     if not held:
         return None
     today = today or time.strftime("%Y-%m-%d")
-    for h in HOGS:
+    for h in hogs:
         if (h["pid"], today) not in HOG_CAUGHT:
             HOG_CAUGHT.add((h["pid"], today))
             board.log_waste("cpu-hog", project=None, jobs=held, pids=[h["pid"]], cpu_min=round(h["pct"] / 100 * h["minutes"], 1),
                             name=h["name"], pid=h["pid"], pct=h["pct"], caught=True)
-    top = HOGS[0]
+    top = hogs[0]
     more = f" and {len(held) - 3} more" if len(held) > 3 else ""
     return f"{top['name']} is using {top['pct']}% of one core while {', '.join(held[:3])}{more} wait for the CPU. Quit it."
 
