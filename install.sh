@@ -27,8 +27,8 @@ refuse_real "$dest/skills/trevskills-scrum"
 refuse_real "$dest/skills/trevskills-e2e"
 refuse_real "$codex/AGENTS.md"
 mkdir -p "$dest/skills" "$dest/agents" "$codex"
-# A scrum-*.md link whose target is gone (a retired agent) makes the agent list lie; drop it. Resolving links stay.
-for f in "$dest"/agents/scrum-*.md; do
+# A scrum-*.md or edit-*.md link whose target is gone (a retired agent) makes the agent list lie; drop it. Resolving links stay.
+for f in "$dest"/agents/scrum-*.md "$dest"/agents/edit-*.md; do
   if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; echo "removed dangling link $f"; fi
 done
 link "$here/skills/trevskills-scrum" "$dest/skills/trevskills-scrum"

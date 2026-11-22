@@ -4052,7 +4052,7 @@ def watchdog_tick():
     except (Exception, SystemExit) as e:
         print(f"watchdog: shop room: {e}", file=sys.stderr, flush=True)
     try:
-        agent_links_tick()  # relinks ~/.claude/agents/scrum-*.md when one dangles, points outside the checkout or is missing
+        agent_links_tick()  # relinks ~/.claude/agents/scrum-*.md or edit-*.md when one dangles, points outside the checkout or is missing
     except Exception as e:
         print(f"watchdog: agent links: {e}", file=sys.stderr, flush=True)
     try:
@@ -5586,36 +5586,37 @@ def e2e_lock_reap(now):
 
 
 AGENT_LINKS_RETRY_S = 3600  # the same bad link set re-runs install.sh at most this often
+AGENT_LINK_GLOBS = ("scrum-*.md", "edit-*.md")  # the checkout's agents install.sh links: the scrum's and the edit project's (job 1362)
 AGENT_LINKS_LAST: tuple[tuple[str, ...], float] | None = None  # (bad entries, time) of agent_links_tick's last re-run
 
 
 def bad_agent_links(links: Path, src: Path) -> list[str]:
-    """Sorted `<name> -> <target>` entries for the scrum-*.md symlinks in `links` that dangle or resolve to a file whose
-    parent is not src.resolve(), and `<name> -> missing` for each scrum-*.md in `src` with no entry in `links`.
-    Real files and other names are ignored."""
+    """Sorted `<name> -> <target>` entries for the AGENT_LINK_GLOBS (scrum-*.md, edit-*.md) symlinks in `links` that
+    dangle or resolve to a file whose parent is not src.resolve(), and `<name> -> missing` for each of those names in
+    `src` with no entry in `links`. Real files and other names are ignored."""
     bad, want = [], src.resolve()
-    for f in sorted(links.glob("scrum-*.md")):
+    for f in sorted(f for g in AGENT_LINK_GLOBS for f in links.glob(g)):
         if not f.is_symlink():
             continue
         if not f.exists() or f.resolve().parent != want:
             bad.append(f"{f.name} -> {os.readlink(f)}")
-    for f in sorted(src.glob("scrum-*.md")):
+    for f in sorted(f for g in AGENT_LINK_GLOBS for f in src.glob(g)):
         if not os.path.lexists(links / f.name):
             bad.append(f"{f.name} -> missing")
     return sorted(bad)
 
 
 def agent_links_tick(run=None, now=None) -> bool:
-    """Re-run the checkout's install.sh once when a claude_home()/agents scrum-*.md link is bad (bad_agent_links), and write one
-    `Agent links` processes.log line (relinked, or failed). The same bad set re-runs at most every AGENT_LINKS_RETRY_S
-    (AGENT_LINKS_LAST). False, with nothing run or logged, when every link is good, agents_dir() has no scrum-*.md,
-    install.sh is missing, or this runs under unittest with no `run`."""
+    """Re-run the checkout's install.sh once when a claude_home()/agents scrum-*.md or edit-*.md link is bad
+    (bad_agent_links), and write one `Agent links` processes.log line (relinked, or failed). The same bad set re-runs at
+    most every AGENT_LINKS_RETRY_S (AGENT_LINKS_LAST). False, with nothing run or logged, when every link is good,
+    agents_dir() has no scrum-*.md or edit-*.md, install.sh is missing, or this runs under unittest with no `run`."""
     global AGENT_LINKS_LAST
     if run is None and "unittest" in sys.modules:
         return False
     src = agents_dir()
     install = src.parent / "install.sh"
-    if not any(src.glob("scrum-*.md")) or not install.is_file():
+    if not any(f for g in AGENT_LINK_GLOBS for f in src.glob(g)) or not install.is_file():
         return False
     links = claude_home() / "agents"
     bad = bad_agent_links(links, src)
