@@ -13736,6 +13736,74 @@ class HandStartHoldTest(unittest.TestCase):
         self.assertIn(f"/trevskills-scrum start {job_id}", self.stub_log.read_text())
         self.assertNotIn("queued_launch", self.job(job_id))
 
+    def paused_spec_job(self, **extra):
+        """Job 1327: a job paused at stage spec before its spec session ever started (no runlog), plus `extra` fields."""
+        job_id = self.serve.board.cmd_new(self.root, "Paused spec")
+        self.serve.board.cmd_set(self.root, job_id, ["stage=spec"])
+        self.serve.board.cmd_pause(self.root, job_id)
+        if extra:
+            with self.serve.board.locked_board(self.root) as b:
+                self.serve.board.find(b, job_id).update(extra)
+        return job_id
+
+    def stub_prompts(self, job_id):
+        for _ in range(100):
+            if self.stub_log.exists() and job_id in self.stub_log.read_text():
+                break
+            time.sleep(0.05)
+        return self.stub_log.read_text()
+
+    def test_play_on_paused_never_started_job_on_hot_mac_queues(self):
+        job_id = self.paused_spec_job()
+        code, out, err = self.post(f"/jobs/{job_id}/resume", {"manual": True})
+        self.assertEqual(code, 202)
+        self.assertTrue(out["queued"])
+        self.assert_held(job_id, err)
+        job = self.job(job_id)
+        self.assertTrue(job["play_queued"])
+        self.assertNotIn("paused", job)
+        self.assertEqual(job["queued_launch"]["prompt"], f"/trevskills-scrum start {job_id}")
+        jobs = self.serve.board.read_board(self.root)["jobs"]
+        self.assertIn(job_id, [j["id"] for j in self.serve.held_work("repo", jobs)])
+
+    def test_play_queue_tick_starts_played_never_started_job_when_cool(self):
+        job_id = self.paused_spec_job()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.post(f"/jobs/{job_id}/resume", {"manual": True})
+        self.assertEqual(self.job(job_id)["queued_launch"]["action"], "start")
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="1"):
+            jobs = self.serve.board.read_board(self.root)["jobs"]
+            self.assertTrue(self.serve.play_queue_tick("repo", self.root, jobs))
+        self.assertIn(f'"/trevskills-scrum start {job_id}"', self.stub_prompts(job_id))
+        job = self.job(job_id)
+        self.assertNotIn("play_queued", job)
+        self.assertNotIn("queued_launch", job)
+
+    def test_play_on_paused_never_started_job_when_cool_starts(self):
+        job_id = self.paused_spec_job()
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="1"):
+            code, out, _ = self.post(f"/jobs/{job_id}/resume", {"manual": True})
+        self.assertEqual(code, 202)
+        log = self.stub_prompts(job_id)
+        self.assertIn(f'"/trevskills-scrum start {job_id}"', log)
+        self.assertNotIn("resume", log)
+        self.assertNotIn("paused", self.job(job_id))
+
+    def test_play_on_paused_spec_job_with_runlog_still_resumes(self):
+        job_id = self.paused_spec_job(runlog="runs/old.log")
+        code, out, _ = self.post(f"/jobs/{job_id}/resume", {"manual": True})
+        self.assertEqual(code, 202)
+        self.assertIn(f'"/trevskills-scrum resume {job_id}"', self.stub_prompts(job_id))
+        self.assertNotIn("queued_launch", self.job(job_id))
+
+    def test_play_on_paused_never_started_shop_job_keeps_resume_path(self):
+        job_id = self.paused_spec_job(shop={"state": "sent"})
+        with mock.patch.object(self.serve, "spawn", return_value="runs/x.log") as spawn:
+            code, out, _ = self.post(f"/jobs/{job_id}/resume", {"manual": True})
+        self.assertEqual(code, 202)
+        self.assertEqual(spawn.call_args.args[3:5], ("resume", f"/trevskills-scrum resume {job_id}"))
+        self.assertNotIn("queued_launch", self.job(job_id))
+
 
 class UiSweepTickTest(unittest.TestCase):
     """serve.py ui_sweep_tick: a later visual re-check of the screens merged on main, on e2e_full_due's schedule

@@ -585,8 +585,13 @@ def resume_job(project, root, job, jobs, manual=False, note=None):
     child in the main checkout still at spec round 0 has done no work, so it goes back to waiting for start_ready to
     claim again (nothing resumes a lilguy job, so a stalled flag would park it for good). Cool-down never holds the
     paused children (work in flight); the parent's new child claims after them (Run-all or BigBoy) wait while cooling
-    down unless `manual` (Trevor's Play)."""
+    down unless `manual` (Trevor's Play). A single job paused at spec before its spec session ever ran (no runlog, no
+    shop field) is unpaused and launched as a `start` (job 1327), so a hot Mac queues it as Run now does."""
     job_id = job["id"]
+    if (job.get("paused") and job["stage"] == "spec" and not job.get("children") and not job.get("runlog")
+            and not job.get("shop")):
+        board.cmd_set(root, job_id, ["stage=spec", "reason="], unpause=True)  # only a stage= write clears paused
+        return spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}", manual=manual)
     if job.get("children") and job.get("paused") and job["stage"] == "running":  # else its own session resumes
         board.cmd_set(root, job_id, ["stage=running", "reason="], unpause=True)
         for k in job["children"]:
