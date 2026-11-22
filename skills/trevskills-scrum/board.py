@@ -68,8 +68,9 @@
                                    for a missing file or URL or a non-local host (Check gate step 2)
   board.py cooldown-park <id>      while cooling down, stall a round-0 spec/build job at this checkpoint (serve.py resumes
                                    it after cool down), unless Trevor's click launched or queued it; print {"parked": bool}
-  board.py dev-clear <id>          stop every server listening from inside the job's .claude/worktrees/ worktree (TERM,
-                                   up to 5 s, then KILL), print {"killed": [pids]}
+  board.py dev-clear <id>          stop every server listening from inside the job worktree, its -base sibling or
+                                   /tmp/scrum-base-<id>, even once the worktree is removed (TERM, up to 5 s, then
+                                   KILL), print {"killed": [pids]}
   board.py digest-due              print {"due","undigested","questionsGrowth","reason"}: done jobs in no digests/*/jobs.txt
                                    and questions.log lines since the last digest's questions.lines; due at 10+ jobs ("10
                                    done"), 15+ lines ("questions"), or 3+ jobs and a bad windows/ scorecard (wasted >20%,
@@ -8563,23 +8564,29 @@ def db_up(env_file, wait=120, start=None, probe=None, sleep=None) -> dict:
     return {"up": up, "started": True, **({"error": error} if error and not up else {})}
 
 
-def stop_worktree_servers(repo: Path, wt: str | None, listening=None, wait: float = 0.0) -> list[int]:
-    """SIGTERM every listener whose cwd is the job worktree wt or under it; returns the pids signalled, in order.
-    wt must sit strictly inside <repo>/.claude/worktrees/ and exist, else nothing is read or signalled (a main-checkout
-    job never loses Trevor's own server). Never a pid that also listens on a KEEP_PORTS port, never this process.
-    listening defaults to listeners(). With wait > 0, each pid still alive after polling every 0.25 s for wait
-    seconds gets SIGKILL: a wedged Node event loop may never run its SIGTERM handler."""
+def stop_worktree_servers(repo: Path, wt: str | None, listening=None, wait: float = 0.0,
+                          job_id: str | None = None) -> list[int]:
+    """SIGTERM every listener whose cwd is the job worktree wt, its wt + "-base" sibling (the Check gate's base copy)
+    or, with job_id, /tmp/scrum-base-<job_id> (the Review BASE copy), or a path under one; returns the pids signalled,
+    in order. wt must sit strictly inside <repo>/.claude/worktrees/, else nothing is read or signalled (a main-checkout
+    job never loses Trevor's own server); it need not exist, so a removed worktree's servers still stop. Never a pid
+    that also listens on a KEEP_PORTS port, never this process. listening defaults to listeners(). With wait > 0,
+    each pid still alive after polling every 0.25 s for wait seconds gets SIGKILL: a wedged Node event loop may never
+    run its SIGTERM handler."""
     if not wt:
         return []
     base = os.path.realpath(Path(repo) / ".claude" / "worktrees") + os.sep
     wt = os.path.realpath(wt)
-    if not wt.startswith(base) or not os.path.isdir(wt):
+    if not wt.startswith(base):
         return []
+    roots = [wt, wt + "-base"]
+    if isinstance(job_id, str) and job_id and os.sep not in job_id:
+        roots.append(os.path.join(os.path.realpath("/tmp"), f"scrum-base-{job_id}"))
     listening = listeners() if listening is None else listening
     keep = {pid for pid, port, _ in listening if port in KEEP_PORTS} | {os.getpid()}
     killed = []
     for pid, _, cwd in listening:
-        if pid in keep or pid in killed or not (cwd == wt or cwd.startswith(wt + os.sep)):
+        if pid in keep or pid in killed or not any(cwd == r or cwd.startswith(r + os.sep) for r in roots):
             continue
         try:
             os.kill(pid, signal.SIGTERM)
@@ -8831,7 +8838,7 @@ def main(argv=None):
         print("".join(f"{line}\n" for line in cmd_artifacts(a.dir, a.id)), end="")
     elif a.cmd == "dev-clear":
         wt = find(read_board(a.dir), a.id).get("worktree")
-        print(json.dumps({"killed": stop_worktree_servers(Path(a.dir).resolve().parent, wt, wait=5)}))
+        print(json.dumps({"killed": stop_worktree_servers(Path(a.dir).resolve().parent, wt, wait=5, job_id=a.id)}))
     elif a.cmd == "cooldown-park":
         print(json.dumps(cmd_cooldown_park(a.dir, a.id)))
     elif a.cmd == "digest-due":

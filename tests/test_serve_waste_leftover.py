@@ -155,6 +155,7 @@ class LeftoverTest(unittest.TestCase):
         self.assertEqual(sorted(c.args for c in kill.call_args_list),
                          [(100, signal.SIGTERM), (101, signal.SIGTERM), (102, signal.SIGTERM)])
         self.assertEqual(servers.call_args.args, (self.repo, str(self.wt)))
+        self.assertEqual(servers.call_args.kwargs, {"job_id": "002-kid"})
         self.assertEqual(sorted(got), [100, 101, 102, 200])
         (line,) = self.lines()
         self.assertEqual(line["kind"], "leftover")
@@ -162,6 +163,12 @@ class LeftoverTest(unittest.TestCase):
         self.assertEqual(line["jobs"], ["002-kid"])
         self.assertEqual(sorted(line["pids"]), [100, 101, 102, 200])
         self.assertEqual(line["cpu_min"], 6.7)
+
+    def test_stop_job_servers_passes_job_id(self):
+        with mock.patch.object(board, "stop_worktree_servers") as servers:
+            serve.stop_job_servers(self.root, "002-kid")
+        self.assertEqual(servers.call_args.args, (self.repo, str(self.wt)))
+        self.assertEqual(servers.call_args.kwargs, {"job_id": "002-kid"})
 
     def test_grace_period_left_alone(self):
         self.edit("002-kid", updatedAt=ago(5))

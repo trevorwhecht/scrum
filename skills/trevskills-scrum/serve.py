@@ -100,13 +100,14 @@ def stop(project, job_id):
 
 
 def stop_job_servers(root, job_id):
-    """SIGTERM the dev servers listening from inside the job's worktree (board.stop_worktree_servers, no wait so the
-    HTTP handler never blocks). A job missing from the board or with no worktree signals nothing."""
+    """SIGTERM the dev servers listening from inside the job's worktree, its -base sibling or /tmp/scrum-base-<id>
+    (board.stop_worktree_servers, no wait so the HTTP handler never blocks). A job missing from the board or with no
+    worktree signals nothing."""
     try:
         wt = board.find(board.read_board(root), job_id).get("worktree")
     except (SystemExit, OSError, ValueError):
         return
-    board.stop_worktree_servers(root.parent, wt)
+    board.stop_worktree_servers(root.parent, wt, job_id=job_id)
 
 
 def kill_session(project, root, job_id):
@@ -3308,9 +3309,9 @@ def stop_leftovers(procs=None) -> list[int]:
     """Stop leftover sessions: a claude line (board._is_claude) running /trevskills-scrum <cmd> <id> whose cwd
     (proc_cwds, one lsof call) is a registered project's repo or inside it, whose job and hand-off family are finished
     (leftover_job, LEFTOVER_GRACE_MIN), and with a descendant still running a test, server or build (LEFTOVER_WORK_RE).
-    Each one gets stop_tree, then board.stop_worktree_servers on its job's worktree, and one board.log_waste("leftover")
-    line (once per session pid: LEFTOVER_LOGGED). procs defaults to process_scan(). Returns every pid signalled.
-    SCRUM_IDLE_CLEANUP=0 turns it off, as idle_cleanup."""
+    Each one gets stop_tree, then board.stop_worktree_servers on its job's worktree and base copies, and one
+    board.log_waste("leftover") line (once per session pid: LEFTOVER_LOGGED). procs defaults to process_scan(). Returns
+    every pid signalled. SCRUM_IDLE_CLEANUP=0 turns it off, as idle_cleanup."""
     if os.environ.get("SCRUM_IDLE_CLEANUP") == "0":
         return []
     procs = process_scan() if procs is None else procs
@@ -3351,7 +3352,7 @@ def stop_leftovers(procs=None) -> list[int]:
         if not job or not any(LEFTOVER_WORK_RE.search(cmds.get(p, "")) for p in below):
             continue
         pids, _ = stop_tree(spid, procs)
-        pids += [p for p in board.stop_worktree_servers(repo, job.get("worktree")) if p not in pids]
+        pids += [p for p in board.stop_worktree_servers(repo, job.get("worktree"), job_id=job_id) if p not in pids]
         stopped += [p for p in pids if p not in stopped]
         if pids and spid not in LEFTOVER_LOGGED:
             LEFTOVER_LOGGED.add(spid)
