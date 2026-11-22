@@ -7637,10 +7637,11 @@ def ancestor_pids() -> set:
         rows = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=5).stdout.split()
     except (OSError, subprocess.SubprocessError):
         return set()
-    parent, found, pid = dict(zip(rows[::2], rows[1::2])), set(), str(os.getppid())
+    parent, found, pid = dict(zip(rows[::2], rows[1::2])), [], str(os.getppid())
     while pid.isdigit() and int(pid) > 1 and int(pid) not in found:
-        pid = parent.get(pid, "") if found.add(int(pid)) is None else ""
-    return found
+        found.append(int(pid))
+        pid = parent.get(pid, "")
+    return set(found)
 
 
 def caller_headless() -> bool:
@@ -9223,8 +9224,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         job = find(read_board(root), job_id)
     except (SystemExit, OSError):  # not on the board (run-all, digest, weekly), or no board yet
         job = {}
-    skip = ({caller} | ancestor_pids()) if caller else None  # job 1329: the caller's whole process tree, not one pid
-    if job and session_alive_fn(skip=skip)(job):  # job 1275: two sessions on one job fight over its worktree
+    if job and session_alive_fn(skip=({caller} | ancestor_pids()) if caller else None)(job):  # job 1329: caller's whole tree  # job 1275: two sessions on one job fight over its worktree
         pid = job.get("pid") if job.get("pid") != caller else None  # the caller's own pid is not the live one
         raise LiveSession(f"job {job_id} already has a live session (pid {pid or 'unknown'})")
     if hot_hold and action == "start" and job.get("stage") == "spec" and not job.get("shop") \
