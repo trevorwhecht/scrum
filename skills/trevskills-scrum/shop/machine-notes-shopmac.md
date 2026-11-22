@@ -26,3 +26,4 @@ Only the main Mac has these, so the main Mac's scrum never sends a job that need
 - Keychain, Homebrew, brew, PR merge
 - scrum/briefs, scroll-lab, agent draft API, AGENT_API_TOKEN
 - Blender, saas-animation, vid-img-editing, Video folder
+- Kind: edit-reel, Kind: edit-animation, Kind: edit-vector, Kind: edit-photo, VectorCraft

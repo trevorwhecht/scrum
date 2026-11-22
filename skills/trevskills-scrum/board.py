@@ -202,11 +202,12 @@ FABLE_SWITCH_7D_PCT = 85
 STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "deploying", "done",
           "needs-human", "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "runlog", "lane", "setup",
-          "waiting", "specwriter", "cloud", "outcome", "account", "reset", "shop", "worker")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
+          "waiting", "specwriter", "cloud", "outcome", "account", "reset", "shop", "worker", "kind")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
 ACTIVE = ("spec", "build", "check", "review", "approve", "merging", "deploying")  # stages an interactive session can pause in
 # Where the job's terminal and run log are: both are matched or read by path, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
-          "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy|video)$"),  # no lane key = standard
+          "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy|edit)$"),  # no lane key = standard
+          "kind": re.compile(r"^edit-(?:reel|animation|vector|photo)$"),  # an edit job's kind (edit_kind, lanes/edit.md)
           "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
           "account": re.compile(r"^[a-z0-9-]{1,20}$"),  # the accounts() name board.spawn ran the session on
           "reset": re.compile(r"^[0-9]{0,12}$"),  # the account's seven_day resets_at when board.spawn recorded it: fallback_account favours the recorded account only until then
@@ -3008,7 +3009,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
         hits["fable_misuse"] += [job_id for line in fable if simple and line.split("\t")[2:3] == ["fable"]]
         job = board.get(job_id, {})
         if job.get("stage") == "done" and (str(job.get("reason") or "").startswith("merged, not live")
-                                          or job.get("lane") not in ("lilguy", "runall", "bigboy", "video") and not job.get("pr")):
+                                          or job.get("lane") not in ("lilguy", "runall", "bigboy", "edit") and not job.get("pr")):
             m = re.search(r"/pull/(\d+)/?$", str(job.get("pr") or ""))
             if m and m[1] in on_main():  # main holds the PR: a stale reason must not flag it
                 continue
@@ -4712,13 +4713,35 @@ def shop_room_path() -> Path:
     return registry_path().parent / "shop-room.json"
 
 
+NO_GIT_RE = re.compile(r"^- Git: *none\s*$", re.M | re.I)
+EDIT_KIND_RE = re.compile(r"^Kind: (edit-reel|edit-animation|edit-vector|edit-photo)\s*$", re.M)
+
+
+def no_git(root) -> bool:
+    """True only when root/project.md has the line `- Git: none` (job 1362): a project kept in a plain folder with no
+    git, which Setup marks and every per-project git or gh pass skips. A missing or unreadable project.md is False."""
+    try:
+        return bool(NO_GIT_RE.search((Path(root) / "project.md").read_text(errors="replace")))
+    except OSError:
+        return False
+
+
+def edit_kind(text: str) -> str | None:
+    """The kind on the first `Kind: edit-reel|edit-animation|edit-vector|edit-photo` line of a feature.md text, else
+    None (job 1362). A job with a kind runs lane=edit (lanes/edit.md)."""
+    m = EDIT_KIND_RE.search(text or "")
+    return m.group(1) if m else None
+
+
 def shop_project_excluded(root) -> bool:
-    """A project the shop never runs: project.md has a `- Base branch:` line or names docker (any case)."""
+    """A project the shop never runs: project.md has a `- Base branch:` line, names docker (any case), or marks a
+    no-git project (no_git: `- Git: none`)."""
     try:
         profile = (Path(root) / "project.md").read_text(errors="replace")
     except OSError:
         profile = ""
-    return bool(re.search(r"^- Base branch:", profile, re.M) or "docker" in profile.lower())  # docker: as docker_projects reads it
+    return bool(re.search(r"^- Base branch:", profile, re.M) or "docker" in profile.lower()  # docker: as docker_projects reads it
+                or NO_GIT_RE.search(profile))
 
 
 def shop_room(root) -> bool:
@@ -7021,10 +7044,10 @@ def lilguy_in_checkout(job: dict) -> bool:
 
 def merge_refusal(job: dict) -> str | None:
     """Why `job` may not move to done, or None. Its PR must be MERGED; a PR-less job may finish only on a parent
-    (bigboy/runall) lane, a video job (lanes/video.md: no worktree or PR) or a lilguy job in the main checkout."""
+    (bigboy/runall) lane, an edit job (lanes/edit.md: no worktree or PR) or a lilguy job in the main checkout."""
     pr = job.get("pr")
     if not pr:
-        return None if job.get("lane") in ("bigboy", "runall", "video") or lilguy_in_checkout(job) else "not done: no PR recorded"
+        return None if job.get("lane") in ("bigboy", "runall", "edit") or lilguy_in_checkout(job) else "not done: no PR recorded"
     m = re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", pr)
     if not m:
         return f"not done: could not confirm PR {pr} is merged: not a GitHub pull request URL"
