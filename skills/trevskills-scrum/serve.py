@@ -1352,26 +1352,86 @@ HOT_STOP_WAIT = 5  # stop_group: seconds between TERM and KILL
 def stop_group(pid, wait=HOT_STOP_WAIT) -> bool:
     """SIGTERM the process group of pid, then SIGKILL it when still there after polling every 0.25 s for wait seconds.
     Never pid 1 or below, never serve's own process group; a group gone or not ours (ProcessLookupError,
-    PermissionError) is ignored. True when TERM was sent (job 1312)."""
+    PermissionError) is ignored. True when TERM was sent (job 1312). Job 1322: one `processes()` snapshot of pid's
+    descendant tree (ppid links), taken before the group TERM, catches what runs in a group of its own (Playwright's
+    webServer, its workers, chrome-headless-shell). After the group step, each descendant a fresh scan still lists
+    with the same command line gets SIGTERM, then, after the same 0.25 s polling for wait seconds, SIGKILL when a
+    fresh scan still lists it unchanged. Never serve, its ancestors, its group, pid 0 or 1; ps failing gives no
+    descendants, so only the group is signalled, and nothing left after the group step means no extra wait."""
     try:
         if not isinstance(pid, int) or pid <= 1:
             return False
         pgid = os.getpgid(pid)
-        if pgid <= 1 or pgid == os.getpgrp():
+        own = os.getpgrp()
+        if pgid <= 1 or pgid == own:
             return False
+        procs = processes()
         os.killpg(pgid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         return False
-    for _ in range(int(wait / 0.25)):
+    kids, cmds = {}, {p: cmd for p, _, cmd in procs}
+    for p, ppid, _ in procs:
+        kids.setdefault(ppid, []).append(p)
+    ppids = {p: ppid for p, ppid, _ in procs}
+    spared, p = {0, 1, pid}, os.getpid()
+    while p not in spared:  # serve and every ancestor of it
+        spared.add(p)
+        p = ppids.get(p, 0)
+    tree, todo = [], list(kids.get(pid, []))
+    while todo:
+        p = todo.pop()
+        if p in spared or p in tree:
+            continue
+        try:
+            if os.getpgid(p) != own:
+                tree.append(p)
+        except (ProcessLookupError, PermissionError):
+            pass
+        todo.extend(kids.get(p, []))
+
+    def poll(alive):  # True when alive() went false within wait seconds
+        for _ in range(int(wait / 0.25)):
+            if not alive():
+                return True
+            time.sleep(0.25)
+        return False
+
+    def signal_same(pids, sig):  # only pids a fresh scan lists with the snapshot's command, outside serve's group
+        fresh = {p: cmd for p, _, cmd in processes()} if pids else {}
+        sent = []
+        for p in pids:
+            try:
+                if fresh.get(p) == cmds[p] and os.getpgid(p) != own:
+                    os.kill(p, sig)
+                    sent.append(p)
+            except (ProcessLookupError, PermissionError):
+                pass
+        return sent
+
+    def live(pids):
+        out = []
+        for p in pids:
+            try:
+                os.kill(p, 0)
+                out.append(p)
+            except (ProcessLookupError, PermissionError):
+                pass
+        return out
+
+    def group_alive():
         try:
             os.killpg(pgid, 0)
-        except (ProcessLookupError, PermissionError):
             return True
-        time.sleep(0.25)
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+        except (ProcessLookupError, PermissionError):
+            return False
+    if not poll(group_alive):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    termed = signal_same(tree, signal.SIGTERM)  # the fresh scan is the liveness check: no row, no signal
+    if termed and not poll(lambda: live(termed)):
+        signal_same(termed, signal.SIGKILL)
     return True
 
 
