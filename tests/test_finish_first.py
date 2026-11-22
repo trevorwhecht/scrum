@@ -1,7 +1,8 @@
 """Job 971: finish the task at hand before new work. No automatic new claim (backlog next, a Run-all or BigBoy child,
 auto-continue, wake) in any project while a job anywhere waits on the Check or E2E queue, or a stalled job waits on
 the machine gate; a stalled job whose own idle session is in the CPU load resumes past the cpu_load gate."""
-import json, os, sys, tempfile, unittest
+import json, os, sys, tempfile, time, unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -132,6 +133,64 @@ class FinishFirst(unittest.TestCase):
                         {"id": "071-kid", "parent": "070-parent", "stage": "build", "stalled": True, "reason": "stalled: x"})
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="10"):
             self.assertIsNone(board.finish_first(self.root))
+
+    # --- (c) the solo reservation (job 1361) ---
+    SOLOWAIT = "stalled: waiting for a solo run: failed under machine load 3 times"
+
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", 4)  # a heavy start counts 2 young
+    def test_solo_run_in_another_project_holds_claims(self):
+        parent, (a, b) = self.runall()
+        self.other_jobs({"id": "090-solo", "stage": "build", "soloRun": "build", "soloAt": board.now()})
+        hold = "finishing work in flight first: other/090-solo runs alone"
+        self.assertEqual(board.finish_first(self.root), hold)
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual(out["ready"], [])
+        self.assertEqual(out["held"], hold)
+        self.assertEqual(serve.held_gate(hold), "finish_first")
+        jobs = self.jobs()
+        self.assertEqual((jobs[a]["stage"], jobs[b]["stage"]), ("waiting", "waiting"))
+
+    def test_solo_wait_holds_claims_not_resumes(self):
+        self.other_jobs({"id": "091-wait", "stage": "check", "stalled": True, "reason": self.SOLOWAIT,
+                         "loadWaits": 3, "loadSolo": 1})
+        self.assertIsNone(board.resume_gate(self.other / "scrum", {"id": "x", "stage": "check"}), "the machine has room")
+        self.assertEqual(board.finish_first(self.root),
+                         "finishing work in flight first: other/091-wait waits for a solo run")
+        self.assertIsNone(board.solo_hold(waiting=False))
+        self.assertEqual(board.solo_hold(), "other/091-wait waits for a solo run")
+
+    def test_solo_run_ends_with_its_stage_or_cap(self):
+        fresh = board.now()
+        old = (datetime.now(timezone.utc) - timedelta(seconds=board.SOLO_RUN_MAX_S + 60)).isoformat(timespec="seconds")
+        live = {"id": "092-solo", "stage": "build", "soloRun": "build", "soloAt": fresh}
+        self.other_jobs(live)
+        self.assertEqual(board.solo_hold(), "other/092-solo runs alone", "the live holder, as a baseline")
+        self.other_jobs(dict(live, stalled=True, reason=self.SOLOWAIT))
+        self.assertEqual(board.solo_hold(), "other/092-solo runs alone", "resumed, its session has not cleared the stall")
+        for name, job in [("paused", dict(live, paused=True)),
+                          ("needs-human", dict(live, stage="needs-human", soloRun="needs-human")),
+                          ("done", dict(live, stage="done", soloRun="done")),
+                          ("aborted", dict(live, stage="aborted", soloRun="aborted")),
+                          ("other stall", dict(live, stalled=True, reason="stalled: no live session")),
+                          ("old", dict(live, soloAt=old)),
+                          ("malformed", dict(live, soloAt="yesterday")),
+                          ("moved on", dict(live, stage="check"))]:
+            self.other_jobs(job)
+            self.assertIsNone(board.solo_hold(), name)
+        (self.root / "board.json").write_text(json.dumps({"jobs": [live]}))
+        board.cmd_set(self.root, "092-solo", ["stage=review"])
+        job = self.jobs()["092-solo"]
+        self.assertNotIn("soloRun", job)
+        self.assertNotIn("soloAt", job)
+
+    def test_mark_solo_run_sets_stage_and_time(self):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "093-wait", "stage": "check", "stalled": True, "reason": self.SOLOWAIT}]}))
+        board.mark_solo_run(self.root, "093-wait")
+        job = self.jobs()["093-wait"]
+        self.assertEqual(job["soloRun"], "check")
+        self.assertLess(abs(datetime.fromisoformat(job["soloAt"]).timestamp() - time.time()), 60)
+        self.assertEqual(board.solo_hold(), "repo/093-wait runs alone")
 
     # --- (b) own idle session under the cpu_load gate ---
     def live_idle(self):
