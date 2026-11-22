@@ -12452,6 +12452,33 @@ class ProcessHealthTest(unittest.TestCase):
         self.assertEqual(self.run_health("001")["metrics"]["overburned_windows"]["jobs"],
                          ["five_hour-200000", "seven_day-1795309200"])
 
+    def test_overburned_multi_account_flags_only_hours_every_account_was_held(self):
+        self.board()
+        self.digest("001")
+        H = 3600
+        card = lambda reset, acc, held, early: {"window": "seven_day", "resets_at": reset, "account": acc, "budget": {
+            "left_at_reset_pct": 0, "cap_idle_secs": held * H, "hit_90_at": reset - early * H}}
+        # main drained on purpose 58h while owa carried the work: owa was held its last 6h, 4h of it before main's reset
+        self.put("digests/001/windows.json", json.dumps([
+            card(1795309200, "main", 58, 70), card(1795309200 + 7200, "owa", 6, 20)]))
+        m = self.run_health("001")["metrics"]["overburned_windows"]["jobs"]
+        self.assertEqual(m, ["seven_day-1795309200-main (every account held 4.0h)",
+                             "seven_day-1795316400-owa (every account held 4.0h)"])
+        # owa never held: main alone was drained on purpose, even at 100% and 70h early
+        self.put("digests/001/windows.json", json.dumps([
+            card(1795309200, "main", 58, 70), card(1795316400, "owa", 0, 20)]))
+        self.assertEqual(self.run_health("001")["metrics"]["overburned_windows"]["jobs"], [])
+
+    def test_overburned_multi_account_holds_that_never_overlap(self):
+        self.board()
+        self.digest("001")
+        H = 3600
+        card = lambda reset, acc, held: {"window": "seven_day", "resets_at": reset, "account": acc, "budget": {
+            "left_at_reset_pct": 0, "cap_idle_secs": held * H, "hit_90_at": None}}
+        self.put("digests/001/windows.json", json.dumps([
+            card(1795309200, "main", 10), card(1795309200 + 20 * H, "owa", 5)]))  # main held to reset; owa held later
+        self.assertEqual(self.run_health("001")["metrics"]["overburned_windows"]["jobs"], [])
+
     def unused_with_pulse(self, cards, rows):
         """unused_windows' jobs for windows.json `cards` with pulse.log rows (t, {project: auto})."""
         self.board()
