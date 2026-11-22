@@ -7631,6 +7631,25 @@ def caller_claude_pid():
     return None
 
 
+def ancestor_pids(limit: int = 30) -> set:
+    """Every ancestor of this process (at most `limit` up), from one ps scan; empty when ps fails. A chat's own Bash
+    command line (its `zsh -c`, whose text may hold the job id) is one of them (job 1329)."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    parent = {}
+    for l in out.splitlines():
+        f = l.split()
+        if len(f) == 2 and f[0].isdigit() and f[1].isdigit():
+            parent[int(f[0])] = int(f[1])
+    found, pid = set(), os.getppid()
+    while pid > 1 and pid not in found and len(found) < limit:
+        found.add(pid)
+        pid = parent.get(pid, 0)
+    return found
+
+
 def caller_headless() -> bool:
     """True when the nearest claude ancestor runs with `-p`/`--print` (unattended), and also when none is found or ps
     fails (fail closed: an unattended session can't approve a `.claude/` edit)."""
@@ -8127,11 +8146,11 @@ def _is_claude(command):
     return bool(toks) and (os.path.basename(toks[0]) == "claude" or "claude" in toks or "claude-code" in command)
 
 
-def session_alive_fn(skip: int | None = None):
+def session_alive_fn(skip: int | set | None = None):
     """One `ps` scan; a job is alive when a claude process line has its id, or when its recorded claude pid is live
     (a job with no pid: when a claude process runs on its recorded tty). When ps can't be read, every job counts as
-    alive, so the watchdog never flags on a guess. `skip` (spawn's caller, job 1275) is a claude pid whose line is left
-    out: the calling session never counts as the job's live session."""
+    alive, so the watchdog never flags on a guess. `skip` (spawn's caller, job 1275) is a pid or set of pids whose lines
+    are left out: the calling session never counts as the job's live session (job 1329: nor its Bash `zsh -c` line)."""
     try:
         r = subprocess.run(["ps", "-axo", "pid=,tty=,command="], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
@@ -8139,8 +8158,9 @@ def session_alive_fn(skip: int | None = None):
     out = r.stdout or ""
     if r.returncode != 0 or not out.strip():  # denied (a sandboxed call) or empty: unknown, never "all dead"
         return lambda job: True
+    skipped = {str(p) for p in ({skip} if isinstance(skip, int) else skip or ())}
     lines = [l.strip() for l in out.splitlines() if _is_claude((l.split(None, 2) + ["", ""])[2])  # drop pid and tty
-             and not (skip and l.split()[0] == str(skip))]
+             and l.split()[0] not in skipped]
     pids = {int(l.split()[0]) for l in lines if l.split()[0].isdigit()}
     ttys = {l.split()[1] for l in lines if len(l.split()) > 1}
     # ponytail: a reused tty (pid-less jobs only), a recycled claude pid, or an id inside another command reads as
@@ -9211,7 +9231,8 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         job = find(read_board(root), job_id)
     except (SystemExit, OSError):  # not on the board (run-all, digest, weekly), or no board yet
         job = {}
-    if job and session_alive_fn(skip=caller)(job):  # job 1275: two sessions on one job fight over its worktree
+    skip = ({caller} | ancestor_pids()) if caller else None  # job 1329: the caller's whole process tree, not one pid
+    if job and session_alive_fn(skip=skip)(job):  # job 1275: two sessions on one job fight over its worktree
         pid = job.get("pid") if job.get("pid") != caller else None  # the caller's own pid is not the live one
         raise LiveSession(f"job {job_id} already has a live session (pid {pid or 'unknown'})")
     if hot_hold and action == "start" and job.get("stage") == "spec" and not job.get("shop") \
