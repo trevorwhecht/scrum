@@ -3539,6 +3539,23 @@ def checkout_rel(cwd: str) -> str:
         return ""
 
 
+def claude_step(line: str) -> tuple[str | None, str | None]:
+    """(job id, agent name) from a claude command line. `/trevskills-scrum <action> <job id>` gives the id and, with no
+    `--agent <name>` (or `--agent=<name>`), the action as the agent; a part it cannot find is None."""
+    toks = [t.strip("\"'") for t in line.split()]
+    job = agent = action = None
+    for i, t in enumerate(toks):
+        if t == "/trevskills-scrum" and i + 1 < len(toks) and not toks[i + 1].startswith("-"):
+            action = toks[i + 1]
+            if i + 2 < len(toks) and not toks[i + 2].startswith("-"):
+                job = toks[i + 2]
+        elif t == "--agent" and i + 1 < len(toks):
+            agent = toks[i + 1]
+        elif t.startswith("--agent=") and len(t) > 8:
+            agent = t[8:]
+    return job, agent or action
+
+
 def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> list[int]:
     """Waste kind same-tests. A run is the topmost process line, never a claude line (board._is_claude), that suite_run
     matches against a registered project's `- Test:` or `- E2E:` command (e2e_command; "" or none skipped); a matching
@@ -3547,7 +3564,8 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
     Twins: 2+ runs with one project, command, head and checkout_rel(cwd) (the same relative command in two
     subdirectories is not a twin). One proc_ages call ages them all (a group with a pid it lacks is
     skipped); the oldest, or on a tie the lower pid, is kept, and each other run gets stop_tree and one
-    board.log_waste("same-tests", ..., kept=, head=, command=) line.
+    board.log_waste("same-tests", ..., kept=, head=, command=, via=, ages=) line: via is the nearest claude process above
+    both runs as {"pid", "job", "agent"} (claude_step; None when they share none), ages {"kept", "stopped"} in minutes.
     Rerun: a run of its project's E2E command that this call did not stop, on the head of a finished (pass or fail)
     e2e-full.json record, gets one log_waste line with pids [] and rerun=True, and no signal.
     A line is written once per run pid (SAME_TESTS_LOGGED); a survivor gets stop_tree again. procs defaults to
@@ -3604,14 +3622,18 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
         if any(pid not in ages for pid, _ in runs):
             continue
         (kept, kept_cwd), *rest = sorted(runs, key=lambda r: (-ages[r[0]], r[0]))
+        line_of = {p: ln for p, _, _, ln in procs}
         for pid, cwd in rest:
             hit.add(pid)
+            shared = set(above(kept))
+            up = next((a for a in above(pid) if a in shared and board._is_claude(line_of.get(a, ""))), None)
+            via = None if up is None else dict(zip(("pid", "job", "agent"), (up, *claude_step(line_of[up]))))
             pids, cpu = stop_tree(pid, procs)
             stopped += [p for p in pids if p not in stopped]
             if pids and pid not in SAME_TESTS_LOGGED:
                 SAME_TESTS_LOGGED.add(pid)
                 board.log_waste("same-tests", name, job_ids(cwd, kept_cwd), pids, cpu, kept=kept, head=head,
-                                command=c)
+                                command=c, via=via, ages={"kept": ages[kept], "stopped": ages[pid]})
     kids: dict[int, list[int]] = {}
     for p, pp, _, _ in procs:
         kids.setdefault(pp, []).append(p)
