@@ -6321,7 +6321,8 @@ def heavy_job(root, job: dict, parent_lane=None) -> bool:
 
 def heavy_count(root, skip=None) -> int:
     """How many heavy_job jobs run on this Mac (job 1314): jobs on any registered board (and root's) in a WATCHED stage
-    with no `shop` field and no queued launch, except the job id `skip` on root's board."""
+    with no `shop` field, no queued launch and not paused by Trevor (a paused job runs no session), except the job id
+    `skip` on root's board."""
     here = Path(root).resolve()
     roots = {here: Path(root)}
     for repo in projects().values():
@@ -6334,7 +6335,8 @@ def heavy_count(root, skip=None) -> int:
             continue
         by_id = {j["id"]: j for j in jobs}
         for j in jobs:
-            if j.get("stage") not in WATCHED or j.get("shop") or j.get("queued_launch") or (skip == j["id"] and key == here):
+            if j.get("stage") not in WATCHED or j.get("shop") or j.get("queued_launch") or j.get("paused") \
+                    or (skip == j["id"] and key == here):
                 continue
             pl = job_lane(r, by_id[j["parent"]]) if j.get("parent") in by_id else None
             n += heavy_job(r, j, parent_lane=pl)

@@ -14725,6 +14725,12 @@ class HeavyCapReasonTest(HeavyCapBase):
                   {"id": "002-b", "stage": "build", "lane": "standard"})
         self.assertIsNone(board.heavy_cap_reason(self.root))
 
+    def test_paused_job_not_counted(self):
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard", "paused": True},
+                  {"id": "002-b", "stage": "build", "lane": "debug", "paused": True}, {"id": "003-c", "stage": "check", "lane": "standard"})
+        self.assertIsNone(board.heavy_cap_reason(self.root))
+        self.assertEqual(board.heavy_count(self.root), 1)
+
     def test_job_heavy_classification(self):
         self.jobs({"id": "010-p", "stage": "running", "lane": "bigboy"}, {"id": "011-k", "stage": "waiting", "parent": "010-p", "lane": "fast"},
                   {"id": "012-n", "stage": "spec"}, {"id": "013-r", "stage": "running", "lane": "runall"})
