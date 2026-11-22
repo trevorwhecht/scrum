@@ -3343,16 +3343,14 @@ class ContractTest(unittest.TestCase):
         text = skill_text()
         merge = self.section(text, "## Merge", "## Routing")
         guard = self.section(merge, "**Main checkout guard", "2. Run `B set $ID stage=merging`")
-        for phrase in ("run project.md's Test command (its `- Test:` line; `none` or missing counts as a fail) in `$REPO`",
-                       "invoke `/trevskills-commitpush` via the Skill tool in `$REPO`", "continue the merge",
+        for phrase in ("never run Test or `/trevskills-commitpush` here (the git guard refuses a commit on main). Write those",
                        """--a "Keep my changes and carry on=resume $ID" --b 'Throw away the changes=shell: git checkout -- <the files>' """
                        """--c "Remove this job=abort $ID --cascade" --title UNCOMMITTED_CHANGES --recommend <key> '<why>'""",
                        '--a "Carry on=resume $ID" --b "Remove this job=abort $ID --cascade"',
-                       "write those files to `$F/jobs/$ID/stop.md`",
+                       "Write those files to `$F/jobs/$ID/stop.md`",
                        "Never stash, clean or switch branches in the main checkout on your own",
                        "Only the Throw away the changes option Trevor picks throws anything away."):
             self.assertIn(phrase, guard, phrase)
-        self.assertLess(guard.index("Test command"), guard.index("/trevskills-commitpush"))
         dirty = next(l for l in guard.splitlines() if "**Uncommitted changes (self-heal):**" in l)
         dirty_q = self.ask_question(re.search(r"`(B ask [^`]+)`", dirty).group(1))
         wrong = next(l for l in guard.splitlines() if "**Wrong branch:**" in l)
@@ -3363,6 +3361,8 @@ class ContractTest(unittest.TestCase):
                        "throws away this job"):
             self.assertIn(phrase, dirty_q, phrase)
         self.assertNotIn("git commit", dirty_q)
+        self.assertNotIn("failing tests", dirty_q)
+        self.assertLess(len(dirty_q.split()), 40)
         for phrase in ("git checkout <default>", "Carry on, the recommended option", "throws away this job"):
             self.assertIn(phrase, wrong_q, phrase)
         ahead = next(l for l in guard.splitlines() if "**Unpushed commits:**" in l)
