@@ -3296,13 +3296,12 @@ class BoardTest(unittest.TestCase):
 
     def test_cooldown_park_no_park_keeps_play_queue(self):
         queued = {"action": "start", "prompt": "p", "stage": "spec"}
-        for name, edits in (("not cooling", None), ("paused", {"paused": True}), ("stalled", {"stalled": True}),
-                            ("round", {"round": 1}), ("stage", {"stage": "review"}), ("lilguy", {"lane": "lilguy"}),
-                            ("cloud", {"lane": "cloud"})):
+        for name, edits in (("not cooling", None), ("spec", {}), ("build", {"stage": "build"}),
+                            ("paused", {"paused": True}), ("round", {"round": 1}), ("lilguy", {"lane": "lilguy"})):
             job_id = board.cmd_new(self.root, name)
             with board.locked_board(self.root) as b:
                 board.find(b, job_id).update({"stage": "spec", "play_queued": 5.0, "queued_launch": queued, **(edits or {})})
-            with (self.cooling() if edits else mock.patch.dict(os.environ)):
+            with (self.cooling() if edits is not None else mock.patch.dict(os.environ)):
                 self.assertEqual(board.cmd_cooldown_park(self.root, job_id), {"parked": False}, name)
             job = board.find(board.read_board(self.root), job_id)
             self.assertEqual((job["play_queued"], job["queued_launch"]), (5.0, queued), name)
@@ -10470,10 +10469,9 @@ class LilguyFitTest(unittest.TestCase):
 
     def test_lilguy_read_ranges_start_at_headings(self):
         want = [("newjob.md", r"2\. \*\*Base:\*\*", r"3\. \*\*Spec:\*\*"), ("newjob.md", r"4\. \*\*Worktree:\*\*", r"5\. \*\*Build:\*\*"),
-                ("newjob.md", r"2\. \*\*Runtime files\*\*", r"4\. "), ("merge.md", r"3\. \*\*PR\.\*\*", r"## Cool-down park"),
-                ("merge.md", r"## Cool-down park", r"## ")]
+                ("newjob.md", r"2\. \*\*Runtime files\*\*", r"4\. "), ("merge.md", r"3\. \*\*PR\.\*\*", r"## Migrate")]
         parts = self._parts(board.lilguy_read())
-        self.assertEqual(len(parts), 5)
+        self.assertEqual(len(parts), 4)
         for (name, a, b), (wname, ws, we) in zip(parts, want):
             lines = (board.LANE_DIR / name).read_text().splitlines()
             self.assertEqual(name, wname)
@@ -10485,9 +10483,9 @@ class LilguyFitTest(unittest.TestCase):
         res = subprocess.run(read, shell=True, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0)
         for want in ("2. **Base:**", "4. **Worktree:**", "2. **Runtime files**", "Write `round-$N/check.md`", "3. **PR.**",
-                     "7. **Clean up:**", "## Cool-down park"):
+                     "7. **Clean up:**"):
             self.assertIn(want, res.stdout)
-        for bad in ("3. **Spec:**", "## Fast lane", "5. If it says PASS", "## Migrate", "## Dev migrate", "## Resuming the builder"):
+        for bad in ("3. **Spec:**", "## Fast lane", "5. If it says PASS", "## Migrate", "Cool-down park", "## Dev migrate", "## Resuming the builder"):
             self.assertNotIn(bad, res.stdout)
         whole = sum(len((board.LANE_DIR / n).read_text()) for n in ("newjob.md", "merge.md"))
         self.assertLess(len(res.stdout), whole * 2 / 3)
@@ -14376,7 +14374,7 @@ class LockRankTest(unittest.TestCase):
 
 
 class CooldownParkTest(unittest.TestCase):
-    """Job 622: `board.py cooldown-park <id>` stalls a far-off job at its next checkpoint while cooling down."""
+    """Job 1346: `board.py cooldown-park <id>` (job 622) never parks; it stays as a no-op for older lane copies."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -14401,37 +14399,26 @@ class CooldownParkTest(unittest.TestCase):
     def get(self, job_id):
         return board.find(board.read_board(self.root), job_id)
 
-    def park(self, job_id):
-        r = run_board("--dir", str(self.root), "cooldown-park", job_id)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        return json.loads(r.stdout)
-
-    def test_parks_spec_and_round0_build(self):
-        for pairs in (("stage=spec",), ("stage=build",)):
-            j = self.job(*pairs)
-            self.assertEqual(self.park(j), {"parked": True})
-            got = self.get(j)
-            self.assertEqual((got["stage"], got["stalled"], got["reason"]),
-                             (pairs[0][6:], True, "stalled: parked for cool down; resumes when cool down ends"))
-            self.assertTrue(board.stalled(got))
-            before = (self.root / "board.json").read_text()
-            self.assertEqual(self.park(j), {"parked": False}, "already parked")
-            self.assertEqual((self.root / "board.json").read_text(), before, "nothing written")
-
-    def test_does_not_park(self):
-        cases = {"build round 1": self.job("stage=build", "round=1"), "check": self.job("stage=check"),
-                 "stalled": self.job("stage=build", stalled=True, reason="stalled: no session"),
-                 "lilguy": self.job("stage=build", "lane=lilguy"), "cloud": self.job("stage=build", lane="cloud"),
-                 "paused": self.job("stage=build", paused=True)}
+    def test_never_parks(self):
+        """Job 1346: cool down never parks a started job; the CLI stays and answers {"parked": false}."""
+        queued = {"action": "start", "prompt": "p", "stage": "spec"}
+        cases = {"spec": self.job("stage=spec"), "build": self.job("stage=build"),
+                 "queued": self.job("stage=spec", play_queued=5.0, queued_launch=queued),
+                 "manual": self.job("stage=spec", play_queued=6.0, play_queued_manual=True)}
         for name, j in cases.items():
-            before = self.get(j)
-            self.assertEqual(self.park(j), {"parked": False}, name)
-            self.assertEqual(self.get(j), before, name)
-        self.flag.unlink()
-        j = self.job("stage=build")
-        self.assertEqual(self.park(j), {"parked": False}, "cool down off")
-        self.assertNotIn("stalled", self.get(j))
-        self.assertIn("cooldown-park <id>", board.__doc__)
+            before = (self.root / "board.json").read_bytes()
+            self.assertEqual(board.cmd_cooldown_park(self.root, j), {"parked": False}, name)
+            r = run_board("--dir", str(self.root), "cooldown-park", j)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.strip(), '{"parked": false}', name)
+            self.assertEqual((self.root / "board.json").read_bytes(), before, name)
+        got = self.get(cases["queued"])
+        self.assertEqual((got["play_queued"], got["queued_launch"]), (5.0, queued))
+        got = self.get(cases["manual"])
+        self.assertEqual((got["play_queued"], got["play_queued_manual"]), (6.0, True))
+        self.assertNotIn("stalled", self.get(cases["spec"]))
+        self.assertIn("cooldown-park <id>      never parks", board.__doc__)
+        self.assertIn("Never parks", board.cmd_cooldown_park.__doc__)
 
 
 class StartedByTest(unittest.TestCase):
