@@ -13531,10 +13531,11 @@ class HardStopTickTest(unittest.TestCase):
         self.assertIsNone(owa.poll(), "owa is under the line")
         self.assertIsNone(stray.poll(), "a pid whose argv does not name the job is never signalled")
         rows = {j["id"]: j for j in json.loads((self.root / "board.json").read_text())["jobs"]}
-        self.assertEqual((rows["1798-x"]["stage"], rows["1798-x"]["limitResetAt"]), ("review", reset))
+        back = reset - self.serve.board.FINAL_HOUR_SECS  # Trevor 2026-11-21: the final hour runs to 100 %
+        self.assertEqual((rows["1798-x"]["stage"], rows["1798-x"]["limitResetAt"]), ("review", back))
         self.assertNotIn("limitResetAt", rows["1800-z"])
         self.assertTrue(self.serve.RUNS["repo/1798-x"]["handled"], "respawn_exited never resumes it")
-        self.assertEqual(self.serve.board.limited_until("main", time.time()), reset, "pick_account skips main")
+        self.assertEqual(self.serve.board.limited_until("main", time.time()), back, "pick_account skips main")
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0]["reason"].startswith("hard stop: main 98% weekly, back "), lines)
 
