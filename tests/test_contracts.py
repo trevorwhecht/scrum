@@ -1201,6 +1201,17 @@ class ContractTest(unittest.TestCase):
 
     def test_spec_writer_documents_obsolete_marker(self):
         self.assertIn("OBSOLETE:", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
+        line = next(l for l in (ROOT / "agents" / "scrum-spec-writer.md").read_text().splitlines()
+                    if l.startswith("- **Obsolete requests.**"))
+        for phrase in ("OBSOLETE: needs Trevor — <that step>", "the main Mac"):
+            self.assertIn(phrase, line, phrase)
+
+    def test_cloud_sync_needs_trevor_manual_add(self):
+        cloud = (SKILL_DIR / "lanes" / "cloud.md").read_text()
+        line = next(l for l in cloud.splitlines() if l.strip().startswith("- PR `OPEN` with label `scrum:needs-human`"))
+        self.assertIn("`obsolete: needs Trevor`", line)
+        self.assertIn("B manual-add '<line without obsolete: > (from $ID)'", line)
+        self.assertLess(line.index("B manual-add"), line.index("becomes `B abort $ID --reason"))
 
     def test_spec_writer_checks_earlier_work(self):
         t = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
