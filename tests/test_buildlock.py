@@ -165,25 +165,36 @@ class BuildLockTest(unittest.TestCase):
 
     def test_killed_wrapper_keeps_lock_until_build_exits(self):
         log = self.dir / "log.txt"
+        release = self.dir / "release"
         child = ("import os, sys, time\n"
                  "open(sys.argv[1], 'a').write('start %d\\n' % os.getpid())\n"
-                 "time.sleep(2)\n"
+                 "deadline = time.monotonic() + 120\n"
+                 "while not os.path.exists(sys.argv[2]) and time.monotonic() < deadline:\n"
+                 "    time.sleep(0.05)\n"
                  "open(sys.argv[1], 'a').write('end\\n')\n")
-        a = self.start_wrap(sys.executable, "-c", child, str(log))
+        a = self.start_wrap(sys.executable, "-c", child, str(log), str(release))
         try:
-            for _ in range(100):
-                if log.exists() and log.read_text().endswith("\n"):
-                    break
-                time.sleep(0.1)
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and not (log.exists() and log.read_text().endswith("\n")):
+                time.sleep(0.05)
             self.assertTrue(log.read_text().startswith("start "))
-            a.send_signal(signal.SIGKILL)  # orphans the child
+            a.send_signal(signal.SIGKILL)  # orphans the child, which waits on the release file
             b = self.start_wrap(sys.executable, "-c", "open(%r, 'a').write('B\\n')" % str(log),
-                                SCRUM_BUILD_LOCK_TIMEOUT="20")
-            out, err = b.communicate(timeout=30)
+                                SCRUM_BUILD_LOCK_TIMEOUT="100")
+            # B is blocked on the lock once it has printed its waiting line; only then release the child
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                if select.select([b.stderr], [], [], 0.2)[0]:
+                    break
+            first = b.stderr.readline()
+            self.assertEqual(first, f"buildlock: waiting for the build lock ({self.lock})\n")
+            release.write_text("")
+            out, rest = b.communicate(timeout=120)
             self.assertEqual(b.returncode, 0)
-            self.assertEqual(err, f"buildlock: waiting for the build lock ({self.lock})\n")
+            self.assertEqual(rest, "")
             self.assertEqual(log.read_text().split("\n")[1:], ["end", "B", ""])
         finally:
+            release.write_text("")
             first = log.read_text().split("\n")[0].split()
             if len(first) == 2:
                 try:

@@ -13729,10 +13729,9 @@ class HandStartHoldTest(unittest.TestCase):
         with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="1"):
             jobs = self.serve.board.read_board(self.root)["jobs"]
             self.assertTrue(self.serve.play_queue_tick("repo", self.root, jobs))
-        for _ in range(100):
-            if self.stub_log.exists():
-                break
-            time.sleep(0.05)
+            deadline = time.monotonic() + 60  # job 1328: wait on the stub log, never a fixed sleep or a short bound
+            while time.monotonic() < deadline and not (self.stub_log.exists() and self.stub_log.read_text()):
+                time.sleep(0.05)
         self.assertIn(f"/trevskills-scrum start {job_id}", self.stub_log.read_text())
         self.assertNotIn("queued_launch", self.job(job_id))
 
