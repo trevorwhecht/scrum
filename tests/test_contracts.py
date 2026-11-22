@@ -3347,7 +3347,7 @@ class ContractTest(unittest.TestCase):
                        """--a "Keep my changes and carry on=resume $ID" --b 'Throw away the changes=shell: git checkout -- <the files>' """
                        """--c "Remove this job=abort $ID --cascade" --title UNCOMMITTED_CHANGES --recommend <key> '<why>'""",
                        '--a "Carry on=resume $ID" --b "Remove this job=abort $ID --cascade"',
-                       "write those files to `$F/jobs/$ID/stop.md`",
+                       "Write those files to `$F/jobs/$ID/stop.md`",
                        "Never stash, clean or switch branches in the main checkout on your own",
                        "Only the Throw away the changes option Trevor picks throws anything away."):
             self.assertIn(phrase, guard, phrase)
