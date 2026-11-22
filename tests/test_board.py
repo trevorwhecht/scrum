@@ -8334,14 +8334,73 @@ class CloudSyncTest(unittest.TestCase):
         self.assertEqual((job["stage"], job["pr"], job["reason"]),
                          ("aborted", self.URL, "requeue: spec writer produced nothing"))
         self.assertEqual(self.backlog_texts(), ["Cloud thing"])
+        self.assertEqual(self.open_manual(), [])
 
     def test_obsolete_and_already_fixed_comments_abort_without_requeue(self):
-        for line in ("obsolete: nothing to change", "looks already fixed: see main"):
+        for line in ("obsolete: nothing to change", "looks already fixed: see main",
+                     "obsolete: needs a rewrite, Trevor"):
             with self.subTest(line=line):
                 self.setUp()
                 self.self_abort(line)
                 self.assertEqual((self.get()["stage"], self.get()["reason"]), ("aborted", line))
                 self.assertEqual(self.backlog_texts(), [])
+                self.assertEqual(self.open_manual(), [])
+
+    TREVOR = "obsolete: needs Trevor — add a global CLAUDE.md line"
+
+    def open_manual(self):
+        return [i["text"] for i in board.manual_items(self.root) if not i["done"]]
+
+    def test_cloud_sync_obsolete_needs_trevor_adds_manual_check(self):
+        out = self.self_abort(self.TREVOR)
+        self.assertEqual(out["moved"][0]["state"], "ABORTED")
+        job = self.get()
+        self.assertEqual((job["stage"], job["pr"], job["reason"]), ("aborted", self.URL, self.TREVOR))
+        self.assertEqual(self.open_manual(), [f"needs Trevor — add a global CLAUDE.md line (from {self.job})"])
+        self.assertEqual(self.backlog_texts(), [])
+
+    def test_cloud_sync_obsolete_needs_trevor_no_duplicate_or_moved_job(self):
+        self.self_abort(self.TREVOR)
+        with board.locked_board(self.root) as data:  # reset to stage cloud, as a re-run of the same reason
+            next(j for j in data["jobs"] if j["id"] == self.job)["stage"] = "cloud"
+        self.calls = []
+        self.self_abort(self.TREVOR)
+        self.assertEqual(self.get()["stage"], "aborted")
+        self.assertEqual(self.open_manual(), [f"needs Trevor — add a global CLAUDE.md line (from {self.job})"])
+
+        self.setUp()
+        labelled = self.pr(labels=[{"name": "scrum:needs-human"}])
+        comments = [{"user": self.TREV, "body": f"{self.TREVOR}\n<!-- scrum needs-human -->"}]
+        real_read = board.read_board
+        def moved_read(root):  # the job leaves stage cloud between the plan and the re-check
+            data = real_read(root)
+            if any(c[1] == "repos/{owner}/{repo}/issues/7/comments?per_page=100" for c in self.calls):
+                for j in data["jobs"]:
+                    if j["id"] == self.job:
+                        j["stage"] = "needs-human"
+            return data
+        with self.gh([labelled], comments), mock.patch.object(board, "read_board", side_effect=moved_read):
+            out = board.cmd_cloud_sync(self.root)
+        self.assertEqual(out["moved"], [])
+        self.assertEqual(self.open_manual(), [])
+
+    def test_cloud_sync_manual_add_failure_still_aborts(self):
+        err = io.StringIO()
+        with mock.patch.object(board, "cmd_manual_add", side_effect=OSError("disk full")), \
+                mock.patch("sys.stderr", err):
+            out = self.self_abort(self.TREVOR)
+        self.assertEqual(out["moved"][0]["state"], "ABORTED")
+        self.assertEqual((self.get()["stage"], self.get()["reason"]), ("aborted", self.TREVOR))
+        self.assertIn(f"cloud-sync: {self.job}: manual-add failed: disk full", err.getvalue())
+        self.assertEqual(self.open_manual(), [])
+
+        self.setUp()
+        err = io.StringIO()
+        with mock.patch.object(board, "cmd_manual_add", side_effect=SystemExit("board locked")), \
+                mock.patch("sys.stderr", err):
+            self.self_abort(self.TREVOR)
+        self.assertEqual(self.get()["stage"], "aborted")
+        self.assertIn(f"cloud-sync: {self.job}: manual-add failed: board locked", err.getvalue())
 
     def test_pr_close_failure_still_aborts(self):
         labelled = self.pr(labels=[{"name": "scrum:needs-human"}])

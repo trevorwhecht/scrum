@@ -7653,6 +7653,11 @@ def cmd_cloud_sync(root: Path) -> dict:
                 continue  # moved meanwhile: add no worktree for it
             if abort:
                 lane = next((p[5:] for p in pairs if p.startswith("lane=")), None)
+                if reason.startswith("obsolete: needs Trevor"):  # newjob 3b's manual-add, lost on the cloud's own board
+                    try:
+                        cmd_manual_add(root, [f"{reason[len('obsolete: '):]} (from {job_id})"])
+                    except (OSError, SystemExit) as e:  # never blocks the abort
+                        print(f"cloud-sync: {job_id}: manual-add failed: {e}", file=sys.stderr)
                 _cloud_abort(root, job_id, url, abort[0], reason, lane)
             else:
                 worktree = cloud_worktree(repo, job_id, head) if wants_worktree else None
