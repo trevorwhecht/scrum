@@ -9604,6 +9604,19 @@ class UiSweepTargetsTest(unittest.TestCase):
             {"path": "/admin/users", "jobs": ["011-price"], "marked": False,
              "why": "changed src/app/admin/layout.tsx"}])
 
+    def test_load_timeout_retry_joins_next_targets(self):
+        """Job 1338: a path the last sweep only timed out on under load is a target again, once, even with no new commit."""
+        since = self.commit("start")
+        self.commit("Docs only (#12)", "docs/notes.md")
+        (self.root / "ui-sweep.json").write_text(json.dumps({"result": "pass", "retry": ["/admin/dashboard", "/admin/dashboard"]}))
+        self.assertEqual(board.ui_sweep_targets(self.repo, self.root, since, "HEAD")["targets"], [
+            {"path": "/admin/dashboard", "jobs": [], "marked": False, "why": "timed out under load in the last sweep"}])
+        self.commit("Grid rows (#13)", "src/app/admin/views/Grid.tsx")
+        (self.root / "ui-sweep.json").write_text(json.dumps({"retry": ["/leads", "/admin/dashboard"]}))
+        paths = [t["path"] for t in board.ui_sweep_targets(self.repo, self.root, since, "HEAD")["targets"]]
+        self.assertEqual(paths.count("/leads"), 1, "a retry path already a target is not added twice")
+        self.assertIn("/admin/dashboard", paths)
+
     def test_docs_only_and_dash(self):
         since = self.commit("start")
         self.commit("Docs only (#12)", "docs/notes.md")
@@ -9667,6 +9680,20 @@ class UiSweepRecordTest(unittest.TestCase):
         self.assertEqual(out["result"], "fail")
         board.cmd_ui_sweep_record(self.root, f)
         self.assertEqual(self.items(), want, "a re-run adds no duplicate")
+
+    def test_load_timeout_files_nothing_and_is_kept_for_retry(self):
+        """Job 1338: an Unrendered line that only timed out under load files no item; its path waits in ui-sweep.json retry."""
+        f = self.review("VERDICT: CHANGES\n- ok /leads\n- ok /\n- ok /pricing\n"
+                        "- Unrendered: /admin/views — page timed out under machine load\n")
+        out = board.cmd_ui_sweep_record(self.root, f)
+        self.assertEqual(self.items(), [])
+        self.assertEqual((out["result"], out["findings"], out["retry"]), ("pass", 0, ["/admin/views"]))
+        self.assertEqual(self.record()["retry"], ["/admin/views"])
+        f = self.review("VERDICT: CHANGES\n- ok /leads\n- ok /\n- ok /pricing\n"
+                        "- Unrendered: /admin/views — needs a signed-in session\n")
+        board.cmd_ui_sweep_record(self.root, f)
+        self.assertEqual(len(self.items()), 1, "a reason that is not a load timeout is still filed")
+        self.assertNotIn("retry", self.record())
 
     def test_all_ok_passes(self):
         f = self.review("VERDICT: PASS\n- ok /leads\n- ok /\n- ok /admin/views\n- ok /pricing\n")
