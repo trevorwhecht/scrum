@@ -13474,6 +13474,90 @@ class HotStopTest(unittest.TestCase):
                     mock.patch.object(self.serve.os, "killpg", side_effect=err):
                 self.assertFalse(stop(4242, 0))
         self.assertFalse(stop(2 ** 22 - 3, 0), "no such pid")
+        # job 1322: ps missing or failing gives no descendants, so only the group is signalled, as before
+        with mock.patch.object(self.serve, "processes", return_value=[]), \
+                mock.patch.object(self.serve.os, "getpgid", return_value=4242), \
+                mock.patch.object(self.serve.os, "killpg") as killpg, mock.patch.object(self.serve.os, "kill") as kill:
+            self.assertTrue(stop(4242, 0))
+        self.assertEqual(killpg.call_args_list, [mock.call(4242, signal.SIGTERM), mock.call(4242, signal.SIGKILL)])
+        kill.assert_not_called()
+        # a descendant row naming serve, an ancestor of serve, serve's group, pid 0 or pid 1 is never signalled
+        me, mid = os.getpid(), 2 ** 22 - 7
+        rows = [(mid, 4242, "sh"), (me, mid, "serve"), (0, 4242, "kernel"), (1, 4242, "launchd"),
+                (2 ** 22 - 9, 4242, "same group")]
+        with mock.patch.object(self.serve, "processes", return_value=rows), \
+                mock.patch.object(self.serve.os, "getpgid",
+                                  side_effect=lambda p: os.getpgrp() if p == 2 ** 22 - 9 else 4242), \
+                mock.patch.object(self.serve.os, "killpg"), mock.patch.object(self.serve.os, "kill") as kill:
+            self.assertTrue(stop(4242, 0))
+        kill.assert_not_called()
+
+    def tree(self, child_ignores_term=False):
+        """Job 1322: a leader in its own session (self.group's pattern), a child it starts in a session of its own
+        (like Playwright's webServer) and a `sleep 60` grandchild under that child. Returns (leader, child, grandchild)."""
+        child = ("import os,signal,subprocess,time\ng = subprocess.Popen(['sleep', '60'])\n"
+                 + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if child_ignores_term else "")
+                 + "print(os.getpid(), g.pid, flush=True)\ntime.sleep(60)\n")
+        code = ("import os,subprocess,sys,time\n"
+                f"c = subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True, stdout=subprocess.PIPE,"
+                " text=True)\nprint(os.getpid(), c.stdout.readline().strip(), flush=True)\ntime.sleep(60)\n")
+        p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, start_new_session=True, text=True)
+        self.procs.append(p)
+        leader, kid, grand = (int(x) for x in p.stdout.readline().split())
+        self.assertEqual(leader, p.pid)
+        self.assertNotEqual(os.getpgid(kid), os.getpgid(leader), "the child has a group of its own")
+        for pid in (kid, grand):
+            self.addCleanup(self.kill_quietly, pid)
+        threading.Thread(target=p.wait, daemon=True).start()
+        return p, kid, grand
+
+    @staticmethod
+    def kill_quietly(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    def assertGone(self, pid, within=5):
+        end = time.time() + within
+        while time.time() < end:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail(f"pid {pid} still alive {within} s after the stop")
+
+    def test_hot_stop_leaves_no_descendant(self):
+        proc, kid, grand = self.tree()
+        self.serve.E2E_FULL.update(running="repo", pid=proc.pid)
+        stopped, _ = self.tick(SCRUM_VM_PRESSURE="2")
+        self.assertEqual(stopped, ["repo/e2e-full"])
+        proc.wait(timeout=5)
+        self.assertGone(kid)
+        self.assertGone(grand)
+
+    def test_stop_group_kills_term_ignoring_descendant(self):
+        proc, kid, grand = self.tree(child_ignores_term=True)
+        started = time.time()
+        self.assertTrue(self.serve.stop_group(proc.pid, 1))
+        self.assertGreaterEqual(time.time() - started, 0.9, "the child ignored TERM: KILL came after wait")
+        proc.wait(timeout=5)
+        self.assertGone(kid)
+        self.assertGone(grand)
+
+    def test_stop_group_skips_reused_pid(self):
+        reused, same = 2 ** 22 - 11, 2 ** 22 - 13
+        first = [(reused, 4242, "node next dev"), (same, 4242, "node worker")]
+        later = [(reused, 1, "other"), (same, 1, "node worker")]
+        calls = []
+        with mock.patch.object(self.serve, "processes", side_effect=lambda: calls.append(1) or (later if calls[1:] else first)), \
+                mock.patch.object(self.serve.os, "getpgid", return_value=4242), \
+                mock.patch.object(self.serve.os, "killpg"), mock.patch.object(self.serve.os, "kill") as kill:
+            self.assertTrue(self.serve.stop_group(4242, 0))
+        self.assertNotIn(reused, [c.args[0] for c in kill.call_args_list], "a reused pid is never signalled")
+        self.assertIn(mock.call(same, signal.SIGTERM), kill.call_args_list)
+        self.assertIn(mock.call(same, signal.SIGKILL), kill.call_args_list)
 
     def test_hot_stop_error_never_stops_the_tick(self):
         err = io.StringIO()
