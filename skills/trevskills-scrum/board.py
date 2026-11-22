@@ -2862,9 +2862,11 @@ def _first_flag_only(owner, hits):
 
 
 def _burned_early(b, span, reset):
-    """True when a window sat at its cap (cap_idle_secs) or reached 90% more than HEALTH_EARLY_90_SHARE of its span early."""
+    """True when a window sat at its cap (cap_idle_secs) or reached 90% more than HEALTH_EARLY_90_SHARE of its span
+    before its reset."""
     return bool(is_num(b.get("cap_idle_secs")) and b["cap_idle_secs"] > 0
-                or span and is_num(b.get("hit_90_at")) and is_num(reset) and reset - b["hit_90_at"] > HEALTH_EARLY_90_SHARE * span)
+                or span and is_num(b.get("hit_90_at")) and is_num(reset)
+                and reset - b["hit_90_at"] > HEALTH_EARLY_90_SHARE * span)
 
 
 def _flag_weekly(weekly, flagged):
