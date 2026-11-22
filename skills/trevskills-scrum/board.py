@@ -4194,11 +4194,26 @@ def ui_sweep_targets(repo, root, since: str, head: str) -> dict:
     targets = list(marked.values()) + [
         {"path": t["path"], "jobs": t["jobs"], "marked": False, "why": "changed " + ", ".join(t["files"])}
         for t in sorted(plain.values(), key=lambda t: t["path"])]
+    try:  # screens the last sweep could only time out on under machine load (cmd_ui_sweep_record) get another look
+        retry = json.loads((root / "ui-sweep.json").read_text()).get("retry") or []
+    except (OSError, ValueError, AttributeError):
+        retry = []
+    have = {t["path"] for t in targets}
+    targets += [{"path": p, "jobs": [], "marked": False, "why": "timed out under load in the last sweep"}
+                for p in dict.fromkeys(retry) if isinstance(p, str) and p and p not in have]
     return {"since": since, "head": head, "targets": targets}
 
 
 SWEEP_BLOCKING_RE = re.compile(r"^- \[blocking\] (.+?) — (.+) — (.+?)\s*$")
 SWEEP_UNRENDERED_RE = re.compile(r"^- Unrendered: (.+?)(?: — (.*?))?\s*$")
+SWEEP_LOAD_RE = re.compile(r"(?=.*\btime[sd]?[ -]?outs?\b)(?=.*\bload(?:ed)?\b)", re.I)  # "timed out under load"
+
+
+def _load_timeout(reason) -> bool:
+    """True when an `- Unrendered:` reason says the page only timed out because the machine was loaded."""
+    return bool(SWEEP_LOAD_RE.search(reason or ""))
+
+
 SWEEP_OK_RE = re.compile(r"^- ok (.+)")  # the rest is the path plus any note; cmd_ui_sweep_record matches known paths
 
 
@@ -4215,8 +4230,9 @@ def _ui_sweep_live(root, d):
 
 def cmd_ui_sweep_record(root, review_file) -> dict:
     """File the sweep review's findings (lanes/uisweep.md): each `- [blocking] <path> — <finding> — <png>` and each
-    target that is `- Unrendered:` or not named becomes a p4 Trevor backlog item (an open one is never added twice), then
-    ui-sweep.json gets result fail (anything filed) or pass and the count. A missing review.md or targets.json, or a
+    target that is `- Unrendered:` or not named becomes a p4 Trevor backlog item (an open one is never added twice; an
+    unrendered line whose reason says it timed out under load files nothing and its path goes to ui-sweep.json `retry`,
+    which ui_sweep_targets adds to the next sweep), then ui-sweep.json gets result fail (anything filed) or pass and the count. A missing review.md or targets.json, or a
     folder that is not the record's dir, changes nothing."""
     review = Path(review_file)
     d = review.parent
@@ -4227,7 +4243,7 @@ def cmd_ui_sweep_record(root, review_file) -> dict:
     except (OSError, ValueError) as e:
         raise SystemExit(f"cannot read the sweep review or targets: {e}")
     jobs = {t["path"]: ", ".join(t.get("jobs") or []) or "?" for t in targets.get("targets") or []}
-    named, items = set(), []  # items: (text, unless_open)
+    named, items, retry = set(), [], []  # items: (text, unless_open); retry: paths that only timed out under load
     by_len = sorted(jobs, key=len, reverse=True)  # a path may hold spaces, "/admin (Orders)": longest known path wins
     known = lambda s: next((p for p in by_len if s == p or s.startswith(p + " ") or s.startswith(p + " —")), s)
     for line in text.splitlines():
@@ -4237,6 +4253,9 @@ def cmd_ui_sweep_record(root, review_file) -> dict:
             items.append((f"{key} (merged job {jobs.get(m[1], '?')}; screenshot {m[3]})", key))
         elif m := SWEEP_UNRENDERED_RE.match(line):
             named.add(known(m[1]))
+            if _load_timeout(m[2]):  # not a finding: ui_sweep_targets adds the page to the next sweep
+                retry.append(known(m[1]))
+                continue
             items.append((f"UI sweep could not render {m[1]} (merged job {jobs.get(m[1], '?')}): "
                           f"{m[2] or 'no reason given'}", f"UI sweep could not render {m[1]} ("))
         elif m := SWEEP_OK_RE.match(line):
@@ -4250,6 +4269,8 @@ def cmd_ui_sweep_record(root, review_file) -> dict:
     rec = _ui_sweep_live(root, d)  # re-read: a newer sweep may have started meanwhile
     out = {"at": time.time(), "head": targets.get("head") or rec.get("head"), "since": targets.get("since") or rec.get("since"),
            "result": "fail" if items else "pass", "findings": len(items), "dir": rec["dir"]}
+    if retry:
+        out["retry"] = list(dict.fromkeys(retry))
     tmp = Path(root) / "ui-sweep.json.tmp"
     tmp.write_text(json.dumps(out, indent=1) + "\n")
     os.replace(tmp, Path(root) / "ui-sweep.json")
