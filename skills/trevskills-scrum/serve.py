@@ -1103,6 +1103,7 @@ E2E_FULL_MERGES, E2E_FULL_EVERY, E2E_FULL_STALE = 5, 86400, 7200
 # 2026-11-21 crash: a `loaded` run due at once was hot stopped and restarted 152 times in 11 h (start passes,
 # the run pushes memory pressure to level 2, hot_stop_tick kills it, pressure falls, repeat) until the Mac hung.
 E2E_FULL_LOADED_WAIT = 600  # the first wait after a loaded stop on a head; each further one on that head doubles, up to E2E_FULL_EVERY
+E2E_FULL_BUSY_WAIT = 1800  # a `busy` record naming a live pid waits for that pid to exit, or this many seconds (job 1352)
 E2E_FULL_LOAD_SECS = 60  # e2e_full_run samples board.cpu_load_pct once per this many seconds of the run, and at exit
 E2E_FULL_FAILED_RE = re.compile(r"^\s*(\d+) failed\s*$")
 E2E_FULL_ENTRY_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*›\s*)?(\S+?):(\d+):\d+\s*›\s*(.+?)[\s─]*$")  # ─ pads the line
@@ -1120,11 +1121,15 @@ def e2e_full_due(record, head, merges, now, settled=False) -> bool:
     """A full run is due with no record yet, else only when HEAD moved and 5+ commits or 24 h passed since the last,
     or the project is settled (cool down is on and no job blocks a restart there). An `error` or `running` record
     24 h+ old is due whatever the HEAD, so a failed or orphaned run is retried. A `busy` record (another dev server
-    held the checkout) is due at once; a `loaded` one (a fail under load, or hot stopped) once its wait has passed
+    held the checkout) is due at once, or, when it names a `pid` still alive, once that pid exits or
+    E2E_FULL_BUSY_WAIT passed since its start (job 1352); a `loaded` one (a fail under load, or hot stopped) once its wait has passed
     since its start, whatever the HEAD or merges: E2E_FULL_LOADED_WAIT doubled per loaded stop counted in its `loads`
     on this head (job 1345), capped at E2E_FULL_EVERY; a record of another HEAD waits the first one."""
-    if not record or record.get("result") == "busy":
+    if not record:
         return True
+    if record.get("result") == "busy":
+        pid = record.get("pid")
+        return not isinstance(pid, int) or e2e_full_pid_gone(pid) or now - (record.get("at") or 0) >= E2E_FULL_BUSY_WAIT
     if record.get("result") == "loaded":
         loads = record.get("loads") if head == record.get("head") else None  # a moved HEAD starts the waits over
         wait = min(E2E_FULL_EVERY, E2E_FULL_LOADED_WAIT * 2 ** (max(int(loads or 1), 1) - 1))
@@ -1284,6 +1289,17 @@ def e2e_full_from_log(repo, root, rec) -> dict | None:
     return new
 
 
+def e2e_full_pid_gone(pid) -> bool:
+    """True when no process has pid (os.kill signal 0 finds none); a pid that is not ours (PermissionError) is alive."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        pass
+    return False
+
+
 def e2e_full_term_kill(pids, wait) -> list[int]:
     """SIGTERM each pid, then SIGKILL each one still alive after polling every 0.25 s for wait seconds, as
     board.stop_worktree_servers does; a pid gone or not ours (ProcessLookupError, PermissionError) is skipped. Returns
@@ -1296,20 +1312,12 @@ def e2e_full_term_kill(pids, wait) -> list[int]:
         except (ProcessLookupError, PermissionError):
             pass
 
-    def gone(pid):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            pass
-        return False
     alive = list(killed)
     for _ in range(int(wait / 0.25)):
         if not alive:
             break
         time.sleep(0.25)
-        alive = [pid for pid in alive if not gone(pid)]
+        alive = [pid for pid in alive if not e2e_full_pid_gone(pid)]
     for pid in alive:
         try:
             os.kill(pid, signal.SIGKILL)
@@ -1602,7 +1610,8 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
     board.MAX_CPU_LOAD_PCT (it keeps exit and failed, adds nothing, and e2e_full_due re-runs it); otherwise a
     non-zero exit with parsed failures is fail; a non-zero exit whose log says Playwright's `webServer exited early`
     (another dev server held the checkout) is busy, due at once, unless retried (the record before was busy on this
-    head), when it is error; any other non-zero exit (lock timeout 124, a dev-server error) is error and adds nothing.
+    head), when it is error, except that a retried run whose lock block names a pid still alive is busy with that
+    `pid` in its record, which e2e_full_due waits on (job 1352); any other non-zero exit (lock timeout 124, a dev-server error) is error and adds nothing.
     Unless retried, a non-zero exit whose lock block (e2e_full_lock) names a pid and a port off board.KEEP_PORTS whose
     E2E_FULL_DEV_LOG exists (an earlier run's webServer, which e2e_full_stop_new_servers spared as it was in `before`)
     stops that pid (e2e_full_stop_pid) and runs cmd once more (job 1269); a lock block left (none of that, or the
@@ -1625,9 +1634,9 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
                 if E2E_FULL.get("hot_stop"):  # hot_stop_tick ended it: no lock-block retry
                     lock = None
                     break
-                lock = e2e_full_lock(repo, output, started) if code and not retried else None
+                lock = e2e_full_lock(repo, output, started) if code else None
                 pid, port = lock or (None, None)
-                if stopped or not (pid and port and port not in board.KEEP_PORTS
+                if retried or stopped or not (pid and port and port not in board.KEEP_PORTS
                                    and os.path.exists(E2E_FULL_DEV_LOG.format(port))):
                     break
                 e2e_full_stop_pid(pid)
@@ -1640,12 +1649,14 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
         hot = E2E_FULL.get("hot_stop")  # hot_stop_tick's reason: stopped under load, whatever the CPU readings
         failed = e2e_full_failures(output, test_dir) if code and not hot else []
         loaded = bool(hot) or (code != 0 and any((load or 0) > board.MAX_CPU_LOAD_PCT for load in loads))
-        busy = not hot and not retried and (lock or E2E_FULL_EARLY in ANSI_RE.sub("", output))
+        held = lock[0] if lock and lock[0] and not e2e_full_pid_gone(lock[0]) else None  # the live pid holding the lock
+        busy = not hot and (held if retried else lock or E2E_FULL_EARLY in ANSI_RE.sub("", output))
         result = "pass" if code == 0 and not hot else "loaded" if loaded else "fail" if failed else "busy" if busy else "error"
         prior = (e2e_full_record(root) or {}).get("loads") or 0  # the tick's running record carries this head's count
         rec = {"at": at, "head": head, "result": result, "exit": code, "failed": failed,
                "lastGreen": head if code == 0 and not hot else last_green, **({"reason": hot} if hot else {}),
-               **({"loads": prior + 1} if result == "loaded" else {})}
+               **({"loads": prior + 1} if result == "loaded" else {}),
+               **({"pid": lock[0]} if result == "busy" and lock and lock[0] else {})}
         write_e2e_full(root, rec)
         named = lock or stopped
         board.log_process("Full E2E on main", result, repo=str(repo), head=head, exit=code, failed=len(failed),
