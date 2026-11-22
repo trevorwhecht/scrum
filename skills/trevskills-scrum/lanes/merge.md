@@ -89,7 +89,7 @@ Applies in the Check gate, step 2, before the E2E run, when `git -C "$WT" diff -
 ## Resuming the builder
 
 Use SendMessage to the recorded `builder` (the name `builder-$ID`, or the stored agent id) with a message naming the exact file(s) to read. If SendMessage fails because the agent no longer exists (for example after a session restart):
-1. Spawn a fresh `scrum-builder` with the 5 lines plus `You are resuming this job. Read spec.md, build.md, and <the file(s) above>, then continue.` Pass Agent override `model: "sonnet"` only when `$F/jobs/$ID/jev.log` has a `model` line that decided `sonnet` and no `promote` line; otherwise (jev.log missing included) no override (Opus). It makes no Jev call.
+1. Spawn a fresh `scrum-builder` with the 5 lines plus `You are resuming this job. Read spec.md, build.md, and <the file(s) above>, then continue.` Pass Agent override `model: "sonnet"` only when `$F/jobs/$ID/jev.log` has no `promote` line and either a `model` line in it decided `sonnet` or `$F/jobs/$ID/feature.md` has a `Complex: no` line above its first `## `, which a rework can add after that decision; **Sonnet promotion** counts that builder as Sonnet. Otherwise no override (Opus). It makes no Jev call.
 2. Run `B set $ID builder=<new id>`.
 
 In a headless (`claude -p`) session, skip SendMessage: its reply would arrive after the turn ends, and the process exits with it (see **Headless sessions block.**). Resume through step 1 instead (spawn a fresh `scrum-builder` in the foreground and wait for it to return), then step 2.
