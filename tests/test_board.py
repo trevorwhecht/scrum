@@ -7869,7 +7869,6 @@ print("stub err", file=sys.stderr)
         """Job 1329: the chat's `zsh -c` line holding the job id (a child of its claude caller) is not a live session."""
         job_id = "913-chat-shell"
         (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": job_id, "stage": "spec"}]}))
-        (self.root / "jobs" / job_id).mkdir(parents=True)
         ps = lambda out: mock.patch.object(board.subprocess, "run", return_value=mock.Mock(stdout=out, returncode=0))
         chat = f"5151 ttys003 claude\n5152 ttys003 zsh -c claude B spawn {job_id} start\n"
         with mock.patch.object(board, "ancestor_pids", return_value={5152, 5151}):

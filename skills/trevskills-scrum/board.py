@@ -7638,9 +7638,8 @@ def ancestor_pids() -> set:
     except (OSError, subprocess.SubprocessError):
         return set()
     parent, found, pid = dict(zip(rows[::2], rows[1::2])), set(), str(os.getppid())
-    while pid.isdigit() and int(pid) > 1 and pid not in found:
-        found.add(int(pid))
-        pid = parent.get(pid, "")
+    while pid.isdigit() and int(pid) > 1 and int(pid) not in found:
+        pid = parent.get(pid, "") if found.add(int(pid)) is None else ""
     return found
 
 
@@ -8153,8 +8152,7 @@ def session_alive_fn(skip: int | set | None = None):
     if r.returncode != 0 or not out.strip():  # denied (a sandboxed call) or empty: unknown, never "all dead"
         return lambda job: True
     skipped = {str(p) for p in ({skip} if isinstance(skip, int) else skip or ())}
-    lines = [l.strip() for l in out.splitlines() if _is_claude((l.split(None, 2) + ["", ""])[2])  # drop pid and tty
-             and l.split()[0] not in skipped]
+    lines = [l.strip() for l in out.splitlines() if _is_claude((l.split(None, 2) + ["", ""])[2]) and l.split()[0] not in skipped]
     pids = {int(l.split()[0]) for l in lines if l.split()[0].isdigit()}
     ttys = {l.split()[1] for l in lines if len(l.split()) > 1}
     # ponytail: a reused tty (pid-less jobs only), a recycled claude pid, or an id inside another command reads as
