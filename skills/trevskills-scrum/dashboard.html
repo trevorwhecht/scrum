@@ -435,7 +435,8 @@ const hue = p => projectHue[p] ?? fnv1a(p) % 12 * 30;
 // A stored colour (poll() fills it from GET /api/projects): a hue, or a #rrggbb set as --c, which the .tag CSS prefers.
 let projectColour = {};
 const tagStyle = p => { const c = projectColour[p]; return typeof c === "string" ? `--h:${hue(p)};--c:${esc(c)}` : `--h:${Number.isInteger(c) ? c : hue(p)}`; };
-const tag = p => `<span class="tag" data-project="${esc(p)}" style="${tagStyle(p)}">${esc(p)}</span>`;
+// text: what the tag reads; an edit job's card passes its kind (job 1362), every other caller the project name.
+const tag = (p, text = p) => `<span class="tag" data-project="${esc(p)}" style="${tagStyle(p)}">${esc(text)}</span>`;
 const tagButton = p => `<button type="button" class="tag" data-project="${esc(p)}" style="${tagStyle(p)}" aria-label="Change ${esc(p)} colour">${esc(p)}</button>`;
 
 // Pinned by test_dashboard_lane_label.
@@ -631,7 +632,7 @@ function card(job) {
   const stale = !human && !hold && !held && !stall && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
   return `<button class="card${human || setup ? " human" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}${shop ? " shop" : ""}" data-key="${esc(job.key)}">
-    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.account ? `<span class="lanechip">${esc(job.account)}</span>` : ""}${GROUPED[job.stage] && colOf(job) === GROUPED[job.stage] ? `<span class="lanechip">${esc(job.stage)}</span>` : ""}${job.fable ? '<span class="lanechip">Fable</span>' : ""}${runsOn ? `<span class="lanechip" title="Runs on">${runsOn}</span>` : ""}${shop ? `<span class="lanechip">${job.worker ? `Shop · ${esc(job.worker)}` : "Shop"}</span>` : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${titled ? `<span class="badge">${esc(titled)}</span>` : ""}${hold ? '<span class="badge">paused</span>' : ""}${stall || held ? `<span class="badge" data-agent-hint="The session stopped (usage limit, RAM guard, crash or the 30-minute watchdog). serve.py resumes it by itself at the retry time; Resume in its panel starts it now.">${job.nextRetryAt ? `stalled · retry ${esc(when(job.nextRetryAt))}` : "stalled"}</span>` : ""}
+    ${tag(job.project, job.kind || job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.account ? `<span class="lanechip">${esc(job.account)}</span>` : ""}${GROUPED[job.stage] && colOf(job) === GROUPED[job.stage] ? `<span class="lanechip">${esc(job.stage)}</span>` : ""}${job.fable ? '<span class="lanechip">Fable</span>' : ""}${runsOn ? `<span class="lanechip" title="Runs on">${runsOn}</span>` : ""}${shop ? `<span class="lanechip">${job.worker ? `Shop · ${esc(job.worker)}` : "Shop"}</span>` : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${titled ? `<span class="badge">${esc(titled)}</span>` : ""}${hold ? '<span class="badge">paused</span>' : ""}${stall || held ? `<span class="badge" data-agent-hint="The session stopped (usage limit, RAM guard, crash or the 30-minute watchdog). serve.py resumes it by itself at the retry time; Resume in its panel starts it now.">${job.nextRetryAt ? `stalled · retry ${esc(when(job.nextRetryAt))}` : "stalled"}</span>` : ""}
     ${bigboyLines(job)}
     ${waitingNote(job, "meta")}
     ${(job.rounds || []).map(roundRow).join("")}
