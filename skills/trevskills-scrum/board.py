@@ -7633,10 +7633,8 @@ def caller_claude_pid():
 
 def ancestor_pids() -> set:
     """Every ancestor of this process, from one ps scan (empty when ps fails): a chat's own `zsh -c` line holds the job id."""
-    try:
-        rows = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=5).stdout.split()
-    except (OSError, subprocess.SubprocessError):
-        return set()
+    try: rows = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=5).stdout.split()
+    except (OSError, subprocess.SubprocessError): return set()
     parent, found, pid = dict(zip(rows[::2], rows[1::2])), [], str(os.getppid())
     while pid.isdigit() and int(pid) > 1 and int(pid) not in found:
         found.append(int(pid))
