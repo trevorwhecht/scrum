@@ -150,6 +150,45 @@ class SameTestsTest(unittest.TestCase):
         self.assertEqual((line["kept"], line["head"], line["command"]), (101, HEAD, TEST))
         self.assertNotIn("rerun", line)
 
+    def test_via_is_nearest_shared_claude(self):
+        """Claude chain 10 > 20 > 30; the kept run sits under 30, the stopped one under 40 (a claude below 30)."""
+        self.cwds.update({101: self.wt["2001-a"], 201: self.wt["2002-b"]})
+        self.ages.update({101: 20.0, 201: 2.0})
+        procs = [(10, 1, 1.0, cl("2001-a")), (20, 10, 1.0, cl("2001-a")),
+                 (30, 20, 1.0, "/usr/local/bin/claude -p /trevskills-scrum build 2001-a --agent scrum-builder"),
+                 (40, 30, 1.0, cl("2002-b")), (100, 30, 0.1, "/bin/zsh -c y"),
+                 (101, 100, 0.1, zsh(TEST)), (102, 101, 3.0, f"{PY}{TEST[7:]}"),
+                 (200, 40, 0.1, "/bin/zsh -c z"), (201, 200, 0.1, zsh(TEST)), (202, 201, 3.0, f"{PY}{TEST[7:]}")]
+        self.run_pass(procs)
+        (line,) = self.lines()
+        self.assertEqual(line["via"], {"pid": 30, "job": "2001-a", "agent": "scrum-builder"})
+        self.assertEqual(line["ages"], {"kept": 20.0, "stopped": 2.0})
+
+    def test_ages_and_via_on_twin_pair(self):
+        procs = [(100, 1, 5.0, cl("2001-a")), *bash_run(100, TEST), (200, 100, 5.0, cl("2002-b")), *bash_run(200, TEST)]
+        self.cwds.update({101: self.wt["2001-a"], 201: self.wt["2002-b"]})
+        self.ages.update({101: 20.0, 201: 2.0})
+        self.run_pass(procs)
+        (line,) = self.lines()
+        self.assertEqual(line["ages"], {"kept": 20.0, "stopped": 2.0})
+        self.assertEqual(line["via"], {"pid": 100, "job": "2001-a", "agent": "build"})
+
+    def test_no_shared_claude_via_none_still_stopped(self):
+        procs = self.twin_pair()
+        got, killed = self.run_pass(procs)
+        self.assertEqual(killed, [201, 202, 203])
+        (line,) = self.lines()
+        self.assertIsNone(line["via"])
+        self.assertEqual(line["ages"], {"kept": 20.0, "stopped": 2.0})
+
+    def test_claude_step(self):
+        self.assertEqual(serve.claude_step("/usr/local/bin/claude -p /trevskills-scrum build 1336-x --permission-mode b"),
+                         ("1336-x", "build"))
+        self.assertEqual(serve.claude_step('claude -p "/trevskills-scrum review 77-y" --agent=scrum-ux'),
+                         ("77-y", "scrum-ux"))
+        self.assertEqual(serve.claude_step("claude --agent scrum-builder"), (None, "scrum-builder"))
+        self.assertEqual(serve.claude_step("claude -p hello"), (None, None))
+
     def test_e2e_full_tick_run_kept_as_older(self):
         tick = f"{sys.executable} {Path(serve.buildlock.__file__).resolve()} {E2E}"  # e2e_full_run's Popen argv
         procs = [(300, os.getpid(), 0.5, tick), (301, 300, 0.1, f"/bin/sh -c {E2E}"),
