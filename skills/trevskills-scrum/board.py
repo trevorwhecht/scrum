@@ -6278,16 +6278,17 @@ def machine_ok(path, manual=False, claim=False, own_load=False):
     return None
 
 
-def heavy_hold() -> str | None:
+def heavy_hold(warn_ok=False) -> str | None:
     """machine_ok's CPU load reason, else its memory pressure reason (vm_pressure_reason, kernel level 2+), else its swap
     reason, else None: gates running jobs' Build, Test/Typecheck/Lint, E2E and render.py starts (buildlock.py on
     build.lock, check.lock and e2e.lock, render.py; jobs 1227, 1312) and the hot stop of a UI sweep or full E2E on main
     (serve.py hot_stop_tick). No cool-down, disk, busy or session check; free RAM is read only when swap is over
-    MAX_SWAP_PCT. An unknown reading passes."""
+    MAX_SWAP_PCT. An unknown reading passes. warn_ok=True lets kernel level 2 (warn) pass, so the swap check still
+    runs; critical, CPU load and swap still hold (serve.py hot_stop_tick keeps a full E2E that caused the warn)."""
     load = cpu_load_pct()
     if load is not None and load > MAX_CPU_LOAD_PCT:
         return f"CPU load {load:.0f}% of {os.cpu_count()} cores (> {MAX_CPU_LOAD_PCT}%)"
-    if mem := vm_pressure_reason():
+    if (mem := vm_pressure_reason()) and not (warn_ok and vm_pressure_level() == 2):
         return mem
     swap = swap_used_pct()
     if swap is not None and swap > MAX_SWAP_PCT and swap_pressing(free_ram_pct(), swap, MAX_SWAP_PCT):
