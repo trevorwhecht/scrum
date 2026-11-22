@@ -9794,6 +9794,57 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertIs(self.job("010-old").get("autoPlayed"), True)
         self.assertNotIn("autoPlayed", self.job("011-new"))
 
+    def weekly_window_tick(self, *windows):
+        """window_tick over this project with board.cmd_window_report returning one scorecard per window name."""
+        s, b = self.serve, self.board
+        with mock.patch.object(b, "projects", return_value={"idle": self.root.parent}), \
+                mock.patch.object(b, "cmd_window_report", return_value=[{"window": w} for w in windows]), \
+                mock.patch.object(b, "cmd_digest_due", return_value={"reason": "not due"}), \
+                mock.patch.object(s, "note_run_limits"), mock.patch.object(s, "running", return_value=False), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            s.window_tick()
+        return err.getvalue()
+
+    def test_weekly_reset_queues_every_eligible_paused_job(self):
+        self.queue_board({"id": "010-old", "stage": "build", "paused": True, "reason": self.PAUSED},
+                         {"id": "011-new", "stage": "spec", "paused": True, "reason": self.PAUSED},
+                         {"id": "012-held", "stage": "build", "paused": True, "reason": self.PAUSED, "holdPause": True},
+                         {"id": "013-live", "stage": "build", "reason": None})
+        log = self.weekly_window_tick("five_hour", "seven_day")
+        for jid in ("010-old", "011-new"):
+            j = self.job(jid)
+            self.assertTrue(j["autoPlayed"] and j["play_queued"])
+            self.assertNotIn("play_queued_manual", j)
+        self.assertTrue(self.job("010-old")["reason"].startswith("stalled in build: auto-played"))
+        for jid in ("012-held", "013-live"):
+            self.assertNotIn("play_queued", self.job(jid))
+        self.assertIn("watchdog: idle: weekly reset: auto-played 010-old", log)
+        self.assertNotIn("012-held", log)
+
+    def test_five_hour_reset_alone_plays_nothing(self):
+        self.queue_board({"id": "010-old", "stage": "build", "paused": True, "reason": self.PAUSED})
+        self.weekly_window_tick("five_hour")
+        self.assertNotIn("play_queued", self.job("010-old"))
+        self.assertNotIn("autoPlayed", self.job("010-old"))
+
+    def test_weekly_reset_plays_again_once_trevors_play_pops_hold_pause(self):
+        self.queue_board({"id": "010-old", "stage": "build", "paused": True, "reason": self.PAUSED,
+                          "holdPause": True, "autoPlayed": True})
+        self.weekly_window_tick("seven_day")
+        self.assertNotIn("play_queued", self.job("010-old"))
+        self.queue_board({"id": "010-old", "stage": "build", "paused": True, "reason": self.PAUSED,
+                          "autoPlayed": True})  # Trevor's Play popped holdPause, then it was paused again
+        self.weekly_window_tick("seven_day")
+        self.assertTrue(self.job("010-old")["play_queued"])
+
+    def test_weekly_reset_leaves_a_child_of_a_paused_parent(self):
+        self.queue_board({"id": "001-par", "stage": "running", "paused": True, "reason": self.PAUSED,
+                          "children": ["002-kid"]},
+                         {"id": "002-kid", "stage": "build", "paused": True, "reason": self.PAUSED, "parent": "001-par"})
+        self.weekly_window_tick("seven_day")
+        self.assertNotIn("play_queued", self.job("002-kid"))
+        self.assertNotIn("autoPlayed", self.job("002-kid"))
+
     def test_watchdog_tick_no_auto_play_of_held_pause(self):
         self.queue_board({"id": "010-old", "stage": "build", "paused": True, "reason": self.PAUSED,
                           "holdPause": True, "autoPlayed": True})
