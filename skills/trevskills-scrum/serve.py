@@ -264,8 +264,7 @@ def cpu_held(root, job):
 
 
 def gate_held(root, job, gates):
-    """True for a non-manual queued launch (play_queued + queued_launch still in its stage, no play_queued_manual) whose
-    fresh queue-gates.txt names any of `gates`."""
+    """cpu_held's test for any of `gates`: a non-manual queued launch whose fresh queue-gates.txt names one."""
     launch = job.get("queued_launch")
     if not (job.get("play_queued") and launch) or job.get("play_queued_manual") or job.get("stage") != launch.get("stage"):
         return False
@@ -5707,8 +5706,8 @@ def hog_alert(today: str | None = None) -> str | None:
             board.log_waste("cpu-hog", project=None, jobs=held, pids=[h["pid"]], cpu_min=round(h["pct"] / 100 * h["minutes"], 1),
                             name=h["name"], pid=h["pid"], pct=h["pct"], caught=True)
     top = HOGS[0]
-    names = ", ".join(map(str, held[:3])) + (f" and {len(held) - 3} more" if len(held) > 3 else "")
-    return f"{top['name']} is using {top['pct']}% of one core while {names} wait for the CPU. Quit it."
+    more = f" and {len(held) - 3} more" if len(held) > 3 else ""
+    return f"{top['name']} is using {top['pct']}% of one core while {', '.join(held[:3])}{more} wait for the CPU. Quit it."
 
 
 JOB_COST_TTL = 300  # seconds one board.transcript_tokens read serves every project's job costs
