@@ -2861,6 +2861,42 @@ def _first_flag_only(owner, hits):
         pass
 
 
+def _burned_early(b, span, reset):
+    """True when a window sat at its cap (cap_idle_secs) or reached 90% more than HEALTH_EARLY_90_SHARE of its span
+    before its reset."""
+    return bool(is_num(b.get("cap_idle_secs")) and b["cap_idle_secs"] > 0
+                or span and is_num(b.get("hit_90_at")) and is_num(reset)
+                and reset - b["hit_90_at"] > HEALTH_EARLY_90_SHARE * span)
+
+
+def _flag_weekly(weekly, flagged):
+    """Append to flagged the names of the seven_day cards that overburned. With one account that is _burned_early; with
+    several, pick_account drains one on purpose while another carries the work, so a card counts only for the time every
+    account sat at its cap at once before its reset (cap_idle_secs back from its resets_at). Returns {name: hours} for
+    those multi-account flags."""
+    accounts_seen = {a for _, a, *_ in weekly}
+    if len(accounts_seen) < 2:
+        flagged += [n for n, _, reset, b, span in weekly if _burned_early(b, span, reset)]
+        return {}
+    held = {}  # account -> (start, end) intervals held at the cap
+    for _, acc, reset, b, _ in weekly:
+        if is_num(reset) and is_num(b.get("cap_idle_secs")) and b["cap_idle_secs"] > 0:
+            held.setdefault(acc, []).append((reset - b["cap_idle_secs"], reset))
+    names = sorted(accounts_seen)
+    both = held.get(names[0], [])
+    for acc in names[1:]:
+        both = [(max(s, c), min(e, f)) for s, e in both for c, f in held.get(acc, []) if max(s, c) < min(e, f)]
+    hours = {}
+    for name, acc, reset, b, _ in weekly:
+        if acc in held and is_num(reset) and is_num(b.get("cap_idle_secs")) and b["cap_idle_secs"] > 0:
+            lo = reset - b["cap_idle_secs"]
+            secs = sum(max(0, min(reset, e) - max(lo, s)) for s, e in both)
+            if secs > 0:
+                hours[name] = round(secs / 3600, 1)
+    flagged += list(hours)
+    return hours
+
+
 FIT_RANK = {"lilguy": 0, "fast": 1, "standard": 2, "debug": 2}  # cheaper_lane_jobs: a fit below its lane
 
 
@@ -2976,6 +3012,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
                 continue
             hits["not_shipped"].append(job_id)
     pulse = pulse_auto(_json_lines(pulse_path()))
+    weekly = []  # (name, account, reset, budget, span) of every seven_day card, flagged after the loop
     for card in _health_file(d / "windows.json", list):
         b = card.get("budget") if isinstance(card, dict) else None
         if not isinstance(b, dict):
@@ -2989,11 +3026,14 @@ def cmd_process_health(root, digest_id: str) -> dict:
         paused = bool(inside) and not any(inside)  # Auto continue off in every project all window: a deliberate pause
         if is_num(b.get("left_at_reset_pct")) and b["left_at_reset_pct"] > HEALTH_UNUSED_PCT and not burned and not paused:
             hits["unused_windows"].append(name)
-        if (is_num(b.get("cap_idle_secs")) and b["cap_idle_secs"] > 0
-                or span and is_num(b.get("hit_90_at")) and is_num(reset)
-                and reset - b["hit_90_at"] > HEALTH_EARLY_90_SHARE * span):
+        if card.get("window") == "seven_day":
+            weekly.append((name, card.get("account") or "", reset, b, span))
+        elif _burned_early(b, span, reset):
             hits["overburned_windows"].append(name)
+    held_hours = _flag_weekly(weekly, hits["overburned_windows"])
     _first_flag_only(f"{root}:{digest_id}", hits)
+    hits["overburned_windows"] = [f"{n} (every account held {held_hours[n]}h)" if n in held_hours else n
+                                  for n in hits["overburned_windows"]]
     prev_id, prev = _previous_health(root, str(digest_id))
     metrics = {}
     for name, limit in HEALTH_LIMITS.items():
