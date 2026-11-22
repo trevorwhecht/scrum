@@ -8277,11 +8277,62 @@ class AutoResumeTest(unittest.TestCase):
     def test_auto_resume_solo_wait_resumes_when_alone(self):
         s = self.serve
         self.jobs = [{"id": "solo", "stage": "check", "stalled": True, "reason": self.SOLOWAIT, "loadWaits": 3, "loadSolo": 1}]
-        resume, hold = self.solo_sweep(None, 0)
+        with mock.patch.object(s.board, "mark_solo_run") as mark:
+            resume, hold = self.solo_sweep(None, 0)
+        mark.assert_called_once_with(self.root, "solo")
         resume.assert_called_once()
         self.assertEqual(resume.call_args.kwargs, {"note": self.CHECKNOTE})
         hold.assert_not_called()
         self.assertNotIn("p/solo", s.AUTO_RESUME)
+
+    def test_auto_resume_solo_resume_holds_later_resumes(self):
+        """Job 1361: once the solo job resumes, nothing else resumes in the same call, and it is reserved first."""
+        s = self.serve
+        self.jobs = [{"id": "solo", "stage": "check", "stalled": True, "reason": self.SOLOWAIT, "loadWaits": 3, "loadSolo": 1},
+                     {"id": "chk", "stage": "check", "stalled": True, "reason": self.LOADWAIT, "loadWaits": 1}]
+        order = mock.Mock()
+        with mock.patch.object(s.board, "mark_solo_run", side_effect=lambda *a: order("mark", *a)) as mark, \
+                mock.patch.object(s.board, "live_sessions", return_value=0), \
+                mock.patch.object(s, "note_stall_hold") as hold, \
+                mock.patch.object(s, "resume_job", side_effect=lambda *a, **k: order("resume", a[2]["id"])) as resume, \
+                mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s, "resume_refusal", return_value=None), mock.patch.object(s, "park_spent"):
+            s.auto_resume("p", self.root, self.jobs)
+        self.assertEqual([c.args[2]["id"] for c in resume.call_args_list], ["solo"])
+        mark.assert_called_once_with(self.root, "solo")
+        self.assertEqual(order.call_args_list, [mock.call("mark", self.root, "solo"), mock.call("resume", "solo")])
+        hold.assert_called_once_with(self.root, "chk", "solo_run")
+        self.assertNotIn("p/chk", s.AUTO_RESUME)
+
+    def test_auto_resume_solo_wait_held_while_full_e2e_runs(self):
+        s = self.serve
+        self.jobs = [{"id": "solo", "stage": "check", "stalled": True, "reason": self.SOLOWAIT, "loadWaits": 3, "loadSolo": 1}]
+        s.E2E_FULL["running"] = "other"
+        self.addCleanup(s.E2E_FULL.update, running=None)
+        with mock.patch.object(s.board, "mark_solo_run") as mark:
+            resume, hold = self.solo_sweep(None, 0)
+        resume.assert_not_called()
+        mark.assert_not_called()
+        hold.assert_called_once_with(self.root, "solo", "solo_wait")
+
+    def test_resume_budget_zero_while_solo_run_lives(self):
+        s = self.serve
+        repo = self.root / "repo"
+        (repo / "scrum").mkdir(parents=True)
+        (self.root / "projects.json").write_text(json.dumps([str(repo)]))
+        holder = {"id": "009-solo", "stage": "build", "soloRun": "build", "soloAt": s.board.now()}
+        board_file = repo / "scrum" / "board.json"
+        board_file.write_text(json.dumps({"jobs": [holder]}))
+        self.addCleanup(setattr, s, "RESUME_ROOM", None)
+        with mock.patch.object(s.board, "ram_room", return_value=3):
+            self.assertEqual(s.resume_budget(), 0)
+            s.RESUME_ROOM = s.resume_budget()
+            self.assertFalse(s.take_room())
+            board_file.write_text(json.dumps({"jobs": [dict(holder, stalled=True, reason=self.SOLOWAIT,
+                                                            queued_launch={"action": "resume", "prompt": "p", "stage": "build"})]}))
+            self.assertEqual(s.resume_budget(), 3, "its own queued launch can still start")
+            board_file.write_text(json.dumps({"jobs": [dict(holder, stage="check")]}))
+            self.assertEqual(s.resume_budget(), 3, "the run moved on: no holder")
 
     def test_auto_resume_solo_wait_held_while_machine_refuses(self):
         self.jobs = [{"id": "solo", "stage": "check", "stalled": True, "reason": self.SOLOWAIT, "loadWaits": 3, "loadSolo": 1}]
@@ -13176,6 +13227,14 @@ class E2eFullTest(unittest.TestCase):
         board_file.write_text(json.dumps({"jobs": [{"id": "001-w", "stage": "check", "reason": "waiting: Check queue"}]}))
         self.assertEqual(self.tick(), 1, "a Check queue wait does not hold the run")
 
+    def test_skip_solo_hold(self):
+        """Job 1361: no full run starts beside a solo run, or while a job waits for one."""
+        with mock.patch.object(self.serve.board, "solo_hold", return_value="other/9 runs alone"):
+            self.assertEqual(self.tick(), 0)
+        self.assertFalse((self.root / "e2e-full.json").exists())
+        self.assertIsNone(self.serve.E2E_FULL["running"])
+        self.assertEqual(self.tick(), 1, "starts once the hold ends")
+
     def test_tick_skips_when_machine_refuses(self):
         """Job 966: full runs under load filed load failures as bugs; a refused machine starts none."""
         with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2"):
@@ -14267,6 +14326,15 @@ class UiSweepTickTest(unittest.TestCase):
         self.assertEqual((spawn.call_count, targets.call_count), (0, 0))
         board_file.write_text(json.dumps({"jobs": []}))
         self.assertEqual(self.tick()[0].call_count, 1)
+
+    def test_skip_solo_hold(self):
+        """Job 1361: no sweep starts beside a solo run, or while a job waits for one."""
+        rec = self.due_with_targets(86400)
+        with mock.patch.object(self.serve.board, "solo_hold", return_value="other/9 runs alone"):
+            spawn, targets = self.tick()
+        self.assertEqual((spawn.call_count, targets.call_count), (0, 0))
+        self.assertEqual(self.read(), rec)
+        self.assertEqual(self.tick()[0].call_count, 1, "starts once the hold ends")
 
     def due_with_targets(self, age):
         """A due record `age` s old (5 merges since its head) and one changed screen."""

@@ -1611,7 +1611,8 @@ def pulse_path():
 # or scrum-folder file no entry names, and on a log_process name that is no entry.
 PROCESSES = (
     ("Session starts", ("spawn", "auto_continue_tick", "play_queue_tick", "auto_resume", "auto_play", "idle_claim",
-                        "start_ready", "wake_waiting", "sweep_parents", "main_ff_tick", "terminal_batch_tick"), ()),
+                        "start_ready", "wake_waiting", "sweep_parents", "main_ff_tick", "terminal_batch_tick",
+                        "resume_budget"), ()),
     ("Stalls and exits", ("cmd_watchdog", "respawn_exited", "record_outcomes", "cmd_migrate_paused", "claude_migrate"),
      ("questions.log",)),
     ("Full E2E on main", ("e2e_full_tick", "e2e_full_run", "hot_stop_tick"), ("e2e-full.json", "e2e-full.log", "e2e-full-rerun.log")),
@@ -7104,6 +7105,8 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False, spa
         if job["stage"] != was:
             job.pop("limitResetAt", None)  # serve.py's usage-limit hold ends when the job leaves its stage
             job.pop("stalled", None)  # so does a stall in that stage
+            job.pop("soloRun", None)  # and a solo run's reservation (job 1361)
+            job.pop("soloAt", None)
         job["files"], job["diverged"] = files, div
         job["updatedAt"] = now()
     if job["stage"] != was and job["stage"] in ("done", "needs-human"):
@@ -7996,6 +7999,7 @@ LOAD_BLOCK_RE = re.compile(r"CPU load|machine load|overload|load average|\bload 
 LOAD_BLOCK_WAIT = "failed under machine load; retrying on a quiet machine"  # serve.py auto_resume re-runs the stage
 LOAD_WAITS_MAX = 3  # load waits per job; the next load ask waits for a solo run, the one after parks at needs-human
 LOAD_SOLO_WAIT = "waiting for a solo run: failed under machine load 3 times"  # serve.py auto_resume resumes when live_sessions() == 0
+SOLO_RUN_MAX_S = 3 * 3600  # a solo run (soloRun/soloAt, mark_solo_run) holds the Mac at most this long: solo_hold
 LOAD_ASK_TITLES = ("CHECKS_FAILING", "BUILDER_BLOCKED", "REVIEW_ESCALATED")
 QUIET_PREFIX = "waiting on a quiet machine"  # a lane asks it on purpose
 
@@ -8049,13 +8053,50 @@ def resume_waits(job: dict, by_id: dict) -> bool:
         and p.get("lane") in ("runall", "bigboy")
 
 
+def mark_solo_run(root, job_id) -> None:
+    """Reserve the Mac for job_id's solo run (job 1361): soloRun = its current stage, soloAt = now. serve.py auto_resume
+    calls it just before it resumes a LOAD_SOLO_WAIT job; solo_hold reads it, cmd_set drops it on a stage change."""
+    with locked_board(root) as b:
+        job = find(b, job_id)
+        job["soloRun"], job["soloAt"] = job.get("stage"), now()
+
+
+def solo_hold(root=None, jobs=None, waiting=True) -> str | None:
+    """`<project>/<id> runs alone` for the first solo holder on root's board (`jobs` when given) or any registered
+    project's, else, only when `waiting`, `<project>/<id> waits for a solo run` for the first solo waiter, else None
+    (job 1361). A holder has soloRun equal to its stage (not needs-human, done or aborted), is not paused, has a soloAt
+    at most SOLO_RUN_MAX_S old, and is not stalled, or still stalled on its LOAD_SOLO_WAIT reason (resumed, its session
+    has not cleared the stall yet). A waiter is stalled on LOAD_SOLO_WAIT with no soloRun and resume_waits."""
+    here = Path(root).resolve() if root else None
+    first_wait = None
+    for scrum in dict.fromkeys(([here] if here else []) + [(p / "scrum").resolve() for p in projects().values()]):
+        try:
+            js = jobs if jobs is not None and scrum == here else read_board(scrum)["jobs"]
+        except SystemExit:
+            continue
+        name, by_id = scrum.parent.name, {j.get("id"): j for j in js}
+        for j in js:
+            solo = str(j.get("reason") or "").startswith(STALL + LOAD_SOLO_WAIT)
+            at = _epoch(j.get("soloAt"))
+            if j.get("soloRun") and j.get("soloRun") == j.get("stage") \
+                    and j.get("stage") not in ("needs-human", "done", "aborted") and not j.get("paused") \
+                    and at is not None and time.time() - at <= SOLO_RUN_MAX_S and (not stalled(j) or solo):
+                return f"{name}/{j.get('id')} runs alone"
+            if waiting and first_wait is None and solo and not j.get("soloRun") and stalled(j) and resume_waits(j, by_id):
+                first_wait = f"{name}/{j.get('id')} waits for a solo run"
+    return first_wait
+
+
 def finish_first(root=None, jobs=None) -> str | None:
     """Why no automatic new claim (backlog next, a Run-all or BigBoy child, auto-continue, wake) may start in any
     project now, or None (job 971: finish the task at hand first). Read across root's board (`jobs` when given: the
     caller's locked copy) and every registered project's: a job held on the E2E, Check or Build queue (queue_waiting, or
     stalled on E2E_WAIT_REASON or CHECK_WAIT_REASON), else a stalled job auto_resume restarts (resume_waits) that waits
     on the machine gate: spawn's gate queued its resume (queued_launch), or resume_gate refuses it. Paused and
-    needs-human jobs never hold it (job 751); Trevor's clicks (Play, Resume, Run now) never ask it."""
+    needs-human jobs never hold it (job 751); Trevor's clicks (Play, Resume, Run now) never ask it. Before those checks, a
+    solo run in flight or a job waiting for one (solo_hold, job 1361) holds it too."""
+    if solo := solo_hold(root, jobs):
+        return f"{FINISH_FIRST}: {solo}"
     here = Path(root).resolve() if root else None
     waiting = []
     for scrum in dict.fromkeys(([here] if here else []) + [(p / "scrum").resolve() for p in projects().values()]):
