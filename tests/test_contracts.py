@@ -3343,7 +3343,7 @@ class ContractTest(unittest.TestCase):
         text = skill_text()
         merge = self.section(text, "## Merge", "## Routing")
         guard = self.section(merge, "**Main checkout guard", "2. Run `B set $ID stage=merging`")
-        for phrase in ("never run Test or `/trevskills-commitpush` here (the git guard refuses a commit on main)",
+        for phrase in ("never run Test or `/trevskills-commitpush` here (the git guard refuses a commit on main). Write those",
                        """--a "Keep my changes and carry on=resume $ID" --b 'Throw away the changes=shell: git checkout -- <the files>' """
                        """--c "Remove this job=abort $ID --cascade" --title UNCOMMITTED_CHANGES --recommend <key> '<why>'""",
                        '--a "Carry on=resume $ID" --b "Remove this job=abort $ID --cascade"',
