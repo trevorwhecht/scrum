@@ -7631,22 +7631,16 @@ def caller_claude_pid():
     return None
 
 
-def ancestor_pids(limit: int = 30) -> set:
-    """Every ancestor of this process (at most `limit` up), from one ps scan; empty when ps fails. A chat's own Bash
-    command line (its `zsh -c`, whose text may hold the job id) is one of them (job 1329)."""
+def ancestor_pids() -> set:
+    """Every ancestor of this process, from one ps scan (empty when ps fails): a chat's own `zsh -c` line holds the job id."""
     try:
-        out = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=5).stdout
+        rows = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=5).stdout.split()
     except (OSError, subprocess.SubprocessError):
         return set()
-    parent = {}
-    for l in out.splitlines():
-        f = l.split()
-        if len(f) == 2 and f[0].isdigit() and f[1].isdigit():
-            parent[int(f[0])] = int(f[1])
-    found, pid = set(), os.getppid()
-    while pid > 1 and pid not in found and len(found) < limit:
-        found.add(pid)
-        pid = parent.get(pid, 0)
+    parent, found, pid = dict(zip(rows[::2], rows[1::2])), set(), str(os.getppid())
+    while pid.isdigit() and int(pid) > 1 and pid not in found:
+        found.add(int(pid))
+        pid = parent.get(pid, "")
     return found
 
 

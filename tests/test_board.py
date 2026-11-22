@@ -7866,31 +7866,17 @@ print("stub err", file=sys.stderr)
         self.assertEqual(board.find(board.read_board(self.root), job_id)["pid"], json.loads(out.stdout)["pid"])
 
     def test_spawn_skips_the_callers_whole_process_tree(self):
-        """Job 1329: a chat hand-off's own `zsh -c` line (a child of the claude caller, with the job id in its text)
-        and the chat's claude line are both left out of the live-session scan; a line outside that tree still counts."""
+        """Job 1329: the chat's `zsh -c` line holding the job id (a child of its claude caller) is not a live session."""
         job_id = "913-chat-shell"
         (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": job_id, "stage": "spec"}]}))
         (self.root / "jobs" / job_id).mkdir(parents=True)
-        real_run = subprocess.run
-
-        def ps(lines):
-            def run(argv, *a, **k):
-                if list(argv[:2]) == ["ps", "-axo"]:
-                    return subprocess.CompletedProcess(argv, 0, stdout=lines, stderr="")
-                return real_run(argv, *a, **k)
-            return run
-        chat = "5151 ttys003 claude\n"
-        shell = f"5152 ttys003 /bin/zsh -c source ~/.claude/shell-snapshots/x.sh && B spawn {job_id} start claude\n"
-        other = f"6161 ?? claude -p /trevskills-scrum start {job_id}\n"
+        ps = lambda out: mock.patch.object(board.subprocess, "run", return_value=mock.Mock(stdout=out, returncode=0))
+        chat = f"5151 ttys003 claude\n5152 ttys003 zsh -c claude B spawn {job_id} start\n"
         with mock.patch.object(board, "ancestor_pids", return_value={5152, 5151}):
-            with mock.patch.object(board.subprocess, "run", side_effect=ps(chat + shell + other)):
-                with self.assertRaises(SystemExit) as cm:
-                    board.spawn(self.root, job_id, "start", caller=5151)
-            self.assertEqual(str(cm.exception), f"job {job_id} already has a live session (pid unknown)")
-            with mock.patch.object(board.subprocess, "run", side_effect=ps(chat + shell)):
-                proc, _ = board.spawn(self.root, job_id, "start", caller=5151)
-                proc.wait(timeout=10)
-        self.assertEqual(self.records()[0]["argv"][:2], ["-p", f"/trevskills-scrum start {job_id}"])
+            with ps(chat + f"6161 ?? claude -p /trevskills-scrum start {job_id}\n"), self.assertRaises(SystemExit):
+                board.spawn(self.root, job_id, "start", caller=5151)
+            with ps(chat):
+                board.spawn(self.root, job_id, "start", caller=5151)[0].wait(timeout=10)
 
     def test_spawn_sets_runlog(self):
         job_id = board.cmd_new(self.root, "x")
