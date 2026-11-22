@@ -8253,6 +8253,37 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(resume.call_args.kwargs, {"note": self.CHECKNOTE})
         self.assertNotIn("p/chk", s.AUTO_RESUME)
 
+    SOLOWAIT = "stalled: waiting for a solo run: failed under machine load 3 times"
+
+    def solo_sweep(self, refusal, live):
+        s = self.serve
+        with mock.patch.object(s.board, "live_sessions", return_value=live), \
+                mock.patch.object(s, "note_stall_hold") as hold:
+            resume = self.load_sweep(refusal)
+        return resume, hold
+
+    def test_auto_resume_solo_wait_held_while_other_session_runs(self):
+        s = self.serve
+        self.jobs = [{"id": "solo", "stage": "check", "stalled": True, "reason": self.SOLOWAIT, "loadWaits": 3, "loadSolo": 1}]
+        resume, hold = self.solo_sweep(None, 1)
+        resume.assert_not_called()
+        hold.assert_called_once_with(self.root, "solo", "solo_wait")
+        self.assertNotIn("p/solo", s.AUTO_RESUME)
+
+    def test_auto_resume_solo_wait_resumes_when_alone(self):
+        s = self.serve
+        self.jobs = [{"id": "solo", "stage": "check", "stalled": True, "reason": self.SOLOWAIT, "loadWaits": 3, "loadSolo": 1}]
+        resume, hold = self.solo_sweep(None, 0)
+        resume.assert_called_once()
+        self.assertEqual(resume.call_args.kwargs, {"note": self.CHECKNOTE})
+        hold.assert_not_called()
+        self.assertNotIn("p/solo", s.AUTO_RESUME)
+
+    def test_auto_resume_solo_wait_held_while_machine_refuses(self):
+        self.jobs = [{"id": "solo", "stage": "check", "stalled": True, "reason": self.SOLOWAIT, "loadWaits": 3, "loadSolo": 1}]
+        resume, hold = self.solo_sweep(self.serve.board.MACHINE_WAIT + "CPU load 14", 0)
+        resume.assert_not_called()
+
     def test_auto_resume_debug_lane_stalled_in_check_gets_check_note(self):
         self.jobs = [{"id": "dbg", "stage": "check", "lane": "debug", "stalled": True, "reason": self.LOADWAIT, "loadWaits": 1}]
         resume = self.load_sweep(None)

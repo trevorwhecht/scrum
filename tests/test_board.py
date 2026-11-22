@@ -909,7 +909,14 @@ class BoardTest(unittest.TestCase):
         with mock.patch.object(board, "play") as play:
             for _ in range(3):
                 board.cmd_ask(self.root, job_id, self.LOAD_Q, opts, title="BUILDER_BLOCKED")
+            out = board.cmd_ask(self.root, job_id, self.LOAD_Q, opts, title="BUILDER_BLOCKED")
+            self.assertEqual(out, {"stalled": True})
             self.assertEqual(play.call_count, 0)
+            job = next(j for j in self.jobs() if j["id"] == job_id)
+            self.assertEqual((job["stage"], job["stalled"], job["reason"], job["loadSolo"]),
+                             ("build", True, "stalled: waiting for a solo run: failed under machine load 3 times", 1))
+            for k in ("question", "options"):
+                self.assertNotIn(k, job)
             board.cmd_ask(self.root, job_id, self.LOAD_Q, opts, title="BUILDER_BLOCKED")
             self.assertEqual(play.call_count, 1)
         job = next(j for j in self.jobs() if j["id"] == job_id)
@@ -967,6 +974,12 @@ class BoardTest(unittest.TestCase):
         with mock.patch.object(board, "play") as play:
             for _ in range(3):
                 self.assertEqual(self.check_ask(job_id, self.Q1678, title="CHECKS_FAILING"), {"stalled": True})
+            self.assertEqual(self.check_ask(job_id, self.Q1678, title="CHECKS_FAILING"), {"stalled": True})
+            play.assert_not_called()
+            job = next(j for j in self.jobs() if j["id"] == job_id)
+            self.assertEqual((job["stage"], job["stalled"], job["reason"], job["loadSolo"]),
+                             ("check", True, "stalled: waiting for a solo run: failed under machine load 3 times", 1))
+            self.assertNotIn("question", job)
             self.check_ask(job_id, self.Q1678, title="CHECKS_FAILING")
         play.assert_called_once()
         job = next(j for j in self.jobs() if j["id"] == job_id)

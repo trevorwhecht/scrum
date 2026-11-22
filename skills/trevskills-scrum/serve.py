@@ -1960,6 +1960,14 @@ def auto_resume(project, root, jobs):
                 busy = True
                 resume_job(project, root, job, jobs, note=LOAD_BLOCK_NOTE if job.get("lane") == "debug" and job["stage"] == "build" else LOAD_WAIT_NOTE)
             continue
+        if str(job.get("reason") or "").startswith(board.STALL + board.LOAD_SOLO_WAIT):  # no try spent, never spent
+            if board.live_sessions() == 0 and refused(job) is None and room(job):
+                busy = True
+                resume_job(project, root, job, jobs, note=LOAD_BLOCK_NOTE if job.get("lane") == "debug" and job["stage"] == "build" else LOAD_WAIT_NOTE)
+            else:
+                busy = True  # no new claims while it waits for a quiet Mac
+                note_stall_hold(root, job["id"], "solo_wait")
+            continue
         tries, due = AUTO_RESUME.get(key, [0, 0.0])
         if tries >= AUTO_RESUME_MAX:
             park_spent(root, job, board.stall_stage(job), AUTO_RESUME_MAX)

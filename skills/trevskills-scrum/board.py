@@ -7160,11 +7160,12 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
         job = live(board, check_id(job_id))
         if job["stage"] in WATCHED and _load_ask(question, title):  # the machine, not the bug: wait, no unblocker
             waits = job.get("loadWaits", 0)
-            if waits < LOAD_WAITS_MAX:
-                reason = f"{STALL}{LOAD_BLOCK_WAIT}"
+            solo = waits >= LOAD_WAITS_MAX and not job.get("loadSolo")
+            if waits < LOAD_WAITS_MAX or solo:
+                reason = f"{STALL}{LOAD_SOLO_WAIT if solo else LOAD_BLOCK_WAIT}"
                 for k in ("question", "options", "recommend", "stopTitle", "outcome"):
                     job.pop(k, None)
-                job.update(stalled=True, reason=reason, loadWaits=waits + 1, updatedAt=now())
+                job.update(stalled=True, reason=reason, updatedAt=now(), **({"loadSolo": 1} if solo else {"loadWaits": waits + 1}))
                 questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
                                      "question": question, "reason": reason, "kind": "stall", "auto": True})
                 return {"stalled": True}
@@ -7932,7 +7933,8 @@ BUILD_QUEUE_WAIT = "waiting: Build queue"  # a second Build 124 (job 1250): auto
 CI_BILLING_RE = re.compile(r"failed account payments|spending limit|CI refused: GitHub billing", re.I)
 LOAD_BLOCK_RE = re.compile(r"CPU load|machine load|overload|load average|\bload \d|swap|out of memory|low memory|memory pressure|free RAM", re.I)
 LOAD_BLOCK_WAIT = "failed under machine load; retrying on a quiet machine"  # serve.py auto_resume re-runs the stage
-LOAD_WAITS_MAX = 3  # load waits per job; the next load ask parks at needs-human
+LOAD_WAITS_MAX = 3  # load waits per job; the next load ask waits for a solo run, the one after parks at needs-human
+LOAD_SOLO_WAIT = "waiting for a solo run: failed under machine load 3 times"  # serve.py auto_resume resumes when live_sessions() == 0
 LOAD_ASK_TITLES = ("CHECKS_FAILING", "BUILDER_BLOCKED", "REVIEW_ESCALATED")
 QUIET_PREFIX = "waiting on a quiet machine"  # a lane asks it on purpose
 
