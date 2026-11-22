@@ -4507,8 +4507,8 @@ LILGUY_HARD_STOP_RE = re.compile(
     r"|api\s+keys?|env\s+vars?|environment\s+variables?)\b|\.env\b"
     r"|\b(?:login|auth|user|cookie|token)\w*\s+sessions?\b|\bsessions?\s+(?:login|auth|user|cookie|token)", re.I)
 LILGUY_JEV_MAX_SCORE, LILGUY_JEV_MIN_CONFIDENCE = 1.5, 0.7
-# lilguy_estimate: a feature.md's named file paths, at LILGUY_LINES_PER_FILE added lines each (a heuristic; Route
-# still promotes from the real diff).
+# lilguy_estimate: a feature.md's named file paths that exist in the repo (or name a new file in an existing folder), at
+# LILGUY_LINES_PER_FILE added lines each (a heuristic; Route still promotes from the real diff).
 LILGUY_LINES_PER_FILE = 10
 LILGUY_PATH_RE = re.compile(r"[\w./~$-]+\.(?:py|md|html|js|ts|tsx|json|css|sh|ya?ml)\b")
 # A repo-relative .claude/ path (not ~/.claude, $HOME/.claude, an absolute path or a job worktree): Claude Code refuses
@@ -4522,9 +4522,13 @@ def _request_text(feature_text: str) -> str:
     return re.sub(r"[ \t]\(from \d+-[\w-]+\)\s*\Z", "", feature_text)
 
 
-def lilguy_estimate(text: str) -> tuple[int, int]:
-    """(files, lines): the distinct file paths text names, and LILGUY_LINES_PER_FILE added lines per file."""
-    files = len(set(LILGUY_PATH_RE.findall(text)))
+def lilguy_estimate(text: str, repo) -> tuple[int, int]:
+    """(files, lines): the distinct file paths text names that exist under repo, or hold a `/` with their folder
+    existing there (a new file), and LILGUY_LINES_PER_FILE added lines per file. A bare or short name matching no
+    repo path (an example in the prose) is not counted (job 1339)."""
+    repo = Path(repo)
+    files = sum(1 for p in set(LILGUY_PATH_RE.findall(text))
+                if (repo / p).exists() or ("/" in p and (repo / p).parent.is_dir()))
     return files, files * LILGUY_LINES_PER_FILE
 
 
@@ -4741,7 +4745,7 @@ def cmd_lilguy_fit(root, job_id: str) -> dict:
         parent = re.search(r"[ \t]\(from (\d+-[\w-]+)\)\s*\Z", feature.read_text(encoding="utf-8", errors="replace")) if feature.is_file() else None
         item = next((i for i in read_backlog(root)[1] if i["job"] == job_id), None)
         raw = _jev_model(folder) or {}
-        files, lines = lilguy_estimate(text)
+        files, lines = lilguy_estimate(text, Path(root).parent)
         hard = LILGUY_HARD_STOP_RE.search(text)
         _write_json(out, {**verdict, "parent": parent[1] if parent else None, "points": item["points"] if item else None,
                           "hard_stop": hard[0] if hard else None, "estimate": {"files": files, "lines": lines},
@@ -4768,7 +4772,7 @@ def _lilguy_verdict(root, job_id: str) -> dict:
     text = _request_text(feature.read_text(encoding="utf-8", errors="replace")) if feature.is_file() else ""
     if m := LILGUY_HARD_STOP_RE.search(text):
         return {"fit": False, "why": f"hard-stop word {m[0]!r} in feature.md"}
-    files, lines = lilguy_estimate(text)
+    files, lines = lilguy_estimate(text, Path(root).parent)
     if lines > LILGUY_MAX_LINES or files > LILGUY_MAX_FILES:
         return {"fit": False, "why": f"estimate over lilguy limits: about {lines} added lines in {files} files "
                                      f"(limits {LILGUY_MAX_LINES} lines, {LILGUY_MAX_FILES} files)"}
