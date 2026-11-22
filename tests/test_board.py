@@ -10387,6 +10387,13 @@ class LilguyFitTest(unittest.TestCase):
     def fit(self):
         return board.cmd_lilguy_fit(self.root, self.job)
 
+    def touch(self, *names):
+        """Create each repo-relative file under the repo (the scrum dir's parent), so lilguy_estimate counts it."""
+        for name in names:
+            p = self.root.parent / name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("")
+
     def test_lilguy_fit_writes_and_overwrites_verdict_file(self):
         self.points(1)
         out = self.fit()
@@ -10509,6 +10516,15 @@ class LilguyFitTest(unittest.TestCase):
         self.jev('{"type":"score","score":1.2,"confidence":0.79}', '{"type":"score","score":2.8,"confidence":0.9}')
         self.assertIs(self.fit()["fit"], False)  # the last model line decides
 
+    def test_lilguy_fit_counts_only_repo_paths(self):
+        self.touch("skills/trevskills-scrum/board.py")
+        (self.jd / "feature.md").write_text(
+            "Fix skills/trevskills-scrum/board.py; examples named: promoted.md, feature.md, SKILL.md, scrum-builder.md, "
+            "lanes/merge.md and nowhere/x.py\n")
+        self.jev('{"type":"score","score":1.2,"confidence":0.79}')
+        self.assertIs(self.fit()["fit"], True)
+        self.assertEqual(json.loads((self.jd / "lilguy-fit.json").read_text())["estimate"], {"files": 1, "lines": 10})
+
     def test_lilguy_fit_jev_low_confidence_fails(self):
         self.jev('{"type":"score","score":1.2,"confidence":0.69}')
         self.assertIs(self.fit()["fit"], False)
@@ -10582,6 +10598,7 @@ class LilguyFitTest(unittest.TestCase):
 
     def test_lilguy_fit_logs_check_inputs(self):
         self.points(2)
+        self.touch("src/a.ts")
         (self.jd / "feature.md").write_text("Fix mergeLeads in src/a.ts (from 016-x)\n")
         self.jev('{"score":1.2,"confidence":0.8}')
         self.fit()
@@ -10614,6 +10631,7 @@ class LilguyFitTest(unittest.TestCase):
 
     def test_lilguy_fit_from_suffix_ignored(self):
         self.points(2)
+        self.touch("src/services/leadService.ts")
         (self.jd / "feature.md").write_text("Fix mergeLeads in src/services/leadService.ts (from 1287-fix-login-schema)\n")
         got = self.fit()
         self.assertIs(got["fit"], True)
@@ -10633,6 +10651,7 @@ class LilguyFitTest(unittest.TestCase):
 
     def test_lilguy_fit_delete_cascade_description_passes(self):
         self.points(2)
+        self.touch("src/services/leadService.ts")
         (self.jd / "feature.md").write_text("mergeLeads in src/services/leadService.ts deletes rows by cascade\n")
         self.assertIs(self.fit()["fit"], True)
 
@@ -10696,6 +10715,7 @@ class LilguyFitTest(unittest.TestCase):
 
     def test_lilguy_fit_over_estimate_refused(self):
         self.points(1)
+        self.touch("board.py", "serve.py", "dashboard.html", "lanes/lilguy.md")
         (self.jd / "feature.md").write_text("Edit board.py, serve.py, dashboard.html and lanes/lilguy.md\n")
         got = self.fit()
         self.assertIs(got["fit"], False)
@@ -10705,6 +10725,7 @@ class LilguyFitTest(unittest.TestCase):
         self.assertIs(self.fit()["fit"], False)  # a confident Jev answer does not override it either
 
     def test_lilguy_fit_names_file_passes(self):
+        self.touch("skills/trevskills-scrum/dashboard.html", "board.py", "tests/test_board.py", "README.md")
         (self.jd / "feature.md").write_text("Reword the hint in skills/trevskills-scrum/dashboard.html\n")
         self.assertEqual(self.fit(), {"fit": True, "why": "names 1 file(s), estimate about 10 added lines"})
         (self.jd / "feature.md").write_text("Touch board.py, tests/test_board.py and README.md\n")
@@ -10714,6 +10735,7 @@ class LilguyFitTest(unittest.TestCase):
         self.assertIn("about 30 added lines", got["why"])
 
     def test_lilguy_fit_names_file_still_refused(self):
+        self.touch("dashboard.html", "a.py", "b.py", "c.md", "d.html")
         for text in ("Fix the login copy in dashboard.html", "Edit .claude/rules/x.md",
                      "Edit a.py, b.py, c.md and d.html"):
             with self.subTest(text):
@@ -10723,9 +10745,14 @@ class LilguyFitTest(unittest.TestCase):
         self.assertTrue(self.fit()["why"].startswith("not tiny"))
 
     def test_lilguy_fit_estimate_counts_distinct_paths(self):
-        self.assertEqual(board.lilguy_estimate("Edit board.py, then board.py again and `board.py`; also x.md\n"),
+        self.touch("board.py", "x.md")
+        repo = self.root.parent
+        self.assertEqual(board.lilguy_estimate("Edit board.py, then board.py again and `board.py`; also x.md\n", repo),
                          (2, 20))
-        self.assertEqual(board.lilguy_estimate("No paths here\n"), (0, 0))
+        self.assertEqual(board.lilguy_estimate("No paths here\n", repo), (0, 0))
+        self.assertEqual(board.lilguy_estimate("Add src/new.ts; see SKILL.md and lanes/merge.md\n", repo), (0, 0))
+        self.touch("src/a.ts")
+        self.assertEqual(board.lilguy_estimate("Add src/new.ts; see SKILL.md and lanes/merge.md\n", repo), (1, 10))
 
     def test_lilguy_fit_unknown_job_exits(self):
         r = run_board("--dir", str(self.root), "lilguy-fit", "999-nope")
