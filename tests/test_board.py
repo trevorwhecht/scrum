@@ -7865,6 +7865,18 @@ print("stub err", file=sys.stderr)
         self.assertEqual(self.records()[0]["argv"][:2], ["-p", f"/trevskills-scrum start {job_id}"])
         self.assertEqual(board.find(board.read_board(self.root), job_id)["pid"], json.loads(out.stdout)["pid"])
 
+    def test_spawn_skips_the_callers_whole_process_tree(self):
+        """Job 1329: the chat's `zsh -c` line holding the job id (a child of its claude caller) is not a live session."""
+        job_id = "913-chat-shell"
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": job_id, "stage": "spec"}]}))
+        ps = lambda out: mock.patch.object(board.subprocess, "run", return_value=mock.Mock(stdout=out, returncode=0))
+        chat = f"5151 ttys003 claude\n5152 ttys003 zsh -c claude B spawn {job_id} start\n"
+        with mock.patch.object(board, "ancestor_pids", return_value={5152, 5151}):
+            with ps(chat + f"6161 ?? claude -p /trevskills-scrum start {job_id}\n"), self.assertRaises(SystemExit):
+                board.spawn(self.root, job_id, "start", caller=5151)
+            with ps(chat):
+                board.spawn(self.root, job_id, "start", caller=5151)[0].wait(timeout=10)
+
     def test_spawn_sets_runlog(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["tty=ttys004"])
