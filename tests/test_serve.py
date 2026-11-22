@@ -12829,6 +12829,30 @@ class E2eFullTest(unittest.TestCase):
         rec, runs, calls, _, _ = self.run_attempts([lock], [1], retried=True)
         self.assertEqual((rec["result"], runs, calls), ("error", 1, []))
 
+    def test_retried_run_blocked_by_live_pid_is_busy_with_pid(self):
+        """Job 1352: a retried run whose lock block names a live pid is busy with that pid (never error, which waits
+        24 h), is not stopped or run again, and e2e_full_due waits for the pid to exit or E2E_FULL_BUSY_WAIT."""
+        self.dev_log(61566).write_text("x\n")
+        lock = next_dev_lock_output()
+        rec, runs, calls, _, lines = self.run_attempts([lock], [1], alive=True, retried=True)
+        self.assertEqual((rec["result"], rec["exit"], rec["pid"], runs, calls), ("busy", 1, 62501, 1, []))
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
+        self.assertEqual([{k: line.get(k) for k in ("result", "pid", "port")} for line in lines],
+                         [{"result": "busy", "pid": 62501, "port": 61566}])
+        due, at = self.serve.e2e_full_due, rec["at"]
+        with mock.patch.object(self.serve.os, "kill"):  # signal 0 succeeds: the pid is alive
+            self.assertFalse(due(rec, rec["head"], 0, at + 60))
+            self.assertFalse(due(rec, rec["head"], 0, at + self.serve.E2E_FULL_BUSY_WAIT - 1))
+            self.assertTrue(due(rec, rec["head"], 0, at + self.serve.E2E_FULL_BUSY_WAIT))
+        with mock.patch.object(self.serve.os, "kill", side_effect=ProcessLookupError):
+            self.assertTrue(due(rec, rec["head"], 0, at + 60), "the pid exited")
+        with mock.patch.object(self.serve.os, "kill", side_effect=PermissionError):
+            self.assertFalse(due(rec, rec["head"], 0, at + 60), "a pid that is not ours is alive")
+        self.assertTrue(due({k: v for k, v in rec.items() if k != "pid"}, rec["head"], 0, at + 1), "no pid: at once")
+        # a lock block with no parsable pid, or a dead pid, on a retried run stays error
+        rec, runs, calls, _, _ = self.run_attempts([next_dev_lock_output(pid="?")], [1], retried=True, alive=True)
+        self.assertEqual((rec["result"], "pid" in rec), ("error", False))
+
     def test_stale_dev_lock_kept_port_or_no_log_is_busy(self):
         for port in (3001, 8765, 61567):
             self.dev_log(port).write_text("x\n")
