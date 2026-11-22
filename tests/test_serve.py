@@ -13584,6 +13584,9 @@ class HotStopTest(unittest.TestCase):
                   mock.patch.object(serve.board, "listeners", return_value=[])):
             p.start()
             self.addCleanup(p.stop)
+        self.live = mock.patch.object(serve.board, "live_sessions", return_value=1)  # a job session is live by default
+        self.live.start()
+        self.addCleanup(self.live.stop)
         serve.RUNS.clear()
         serve.UI_SWEEP_BEFORE.clear()
         serve.E2E_FULL.clear()
@@ -13680,6 +13683,48 @@ class HotStopTest(unittest.TestCase):
         proc = self.group(ignore_term)
         self.serve.E2E_FULL.update(running="repo", pid=proc.pid)
         return proc
+
+    def test_memory_warn_keeps_full_e2e_with_no_job_session(self):
+        """Job 1359: the E2E's own run causes a memory warn; with 0 live job sessions only critical, swap, CPU or a
+        session stops it."""
+        proc = self.e2e_child()
+        with mock.patch.object(self.serve.board, "live_sessions", return_value=0):
+            stopped, lines = self.tick(SCRUM_VM_PRESSURE="2")
+            self.assertEqual((stopped, lines), ([], []))
+            self.assertIsNone(proc.poll())
+            self.assertNotIn("hot_stop", self.serve.E2E_FULL)
+            with mock.patch.object(self.serve.board, "swap_used_pct", return_value=90.0), \
+                    mock.patch.object(self.serve.board, "free_ram_pct", return_value=1.0):
+                stopped, lines = self.tick(SCRUM_VM_PRESSURE="2")
+            self.assertEqual(stopped, ["repo/e2e-full"])
+            self.assertIn("swap used", lines[0]["reason"])
+        self.assertEqual(proc.wait(timeout=5), -signal.SIGTERM)
+
+    def test_memory_warn_stops_full_e2e_once_a_job_session_runs(self):
+        proc = self.e2e_child()
+        with mock.patch.object(self.serve.board, "live_sessions", return_value=1):
+            stopped, _ = self.tick(SCRUM_VM_PRESSURE="2")
+        self.assertEqual(stopped, ["repo/e2e-full"])
+        self.assertEqual(proc.wait(timeout=5), -signal.SIGTERM)
+
+    def test_memory_critical_and_cpu_stop_full_e2e_with_no_job_session(self):
+        for env, why in ((dict(SCRUM_VM_PRESSURE="4"), "memory pressure critical (kernel level 4)"),
+                         (dict(SCRUM_CPU_LOAD_PCT="400"), self.HOT)):
+            with self.subTest(why=why):
+                proc = self.e2e_child()
+                with mock.patch.object(self.serve.board, "live_sessions", return_value=0):
+                    stopped, lines = self.tick(**env)
+                self.assertEqual((stopped, lines[0]["reason"]), (["repo/e2e-full"], why))
+                self.assertEqual(proc.wait(timeout=5), -signal.SIGTERM)
+                self.serve.E2E_FULL.pop("hot_stop", None)
+
+    def test_memory_warn_still_stops_ui_sweep_with_no_job_session(self):
+        proc = self.group()
+        self.sweep(proc)
+        with mock.patch.object(self.serve.board, "live_sessions", return_value=0), \
+                mock.patch.object(self.serve, "e2e_full_stop_new_servers", return_value=[]):
+            stopped, _ = self.tick(SCRUM_VM_PRESSURE="2")
+        self.assertEqual(stopped, ["repo/ui-sweep"])
 
     def test_hot_stop_ends_full_e2e(self):
         proc = self.e2e_child()

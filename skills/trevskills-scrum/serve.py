@@ -1514,7 +1514,8 @@ def hot_stop_tick() -> list[str]:
     """While board.heavy_hold() gives a reason, stop the two maintenance runs on a main checkout (job 1312): a running
     UI sweep session (RUNS `<project>/ui-sweep`, live) and a full E2E in flight (E2E_FULL["pid"], its buildlock child).
     Each group gets TERM, then KILL after HOT_STOP_WAIT (stop_group). The E2E sets E2E_FULL["hot_stop"] to the reason
-    first, so e2e_full_run records `loaded` and files nothing; the sweep stops the main-checkout listeners started since
+    first, so e2e_full_run records `loaded` and files nothing; with no job session live (board.live_sessions() is 0) a
+    memory pressure warn (kernel level 2) alone does not stop the E2E, but critical, swap, CPU load and a live job do; the sweep stops the main-checkout listeners started since
     UI_SWEEP_BEFORE[project] (e2e_full_stop_new_servers) and, only while ui-sweep.json still holds the same running
     record, rewrites it `loaded` with the reason and no `dir`, so it reruns and files nothing. One processes.log line
     per stop. Job sessions are never signalled. Returns the `<project>/ui-sweep` and `<project>/e2e-full` names stopped."""
@@ -1539,7 +1540,9 @@ def hot_stop_tick() -> list[str]:
             board.log_process("UI sweep", "stopped", repo=str(repo), reason=why)
             stopped.append(f"{project}/ui-sweep")
     pid, running = E2E_FULL.get("pid"), E2E_FULL.get("running")
-    if pid and running:
+    if pid and running and board.live_sessions() == 0:
+        why = board.heavy_hold(warn_ok=True)  # the full E2E's own run causes a memory warn: it alone never stops it (job 1359)
+    if pid and running and why:
         E2E_FULL["hot_stop"] = why
         if stop_group(pid):
             repo = board.projects().get(running)
