@@ -11477,6 +11477,57 @@ class RotateServeLogTest(unittest.TestCase):
             self.assertEqual(log.read_text(), "x")
 
 
+class HogAlertTest(unittest.TestCase):
+    """serve.hog_alert: a line naming the top hog and the jobs held on cpu_load or cpu_busy; one catch per pid per day."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.tmp = Path(os.path.realpath(tempfile.mkdtemp()))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = self.tmp / "app" / "scrum"
+        self.root.mkdir(parents=True)
+        (self.tmp / "projects.json").write_text(json.dumps([str(self.tmp / "app")]))
+        for patch in (mock.patch.dict(os.environ, SCRUM_REGISTRY=str(self.tmp / "projects.json"),
+                                      SCRUM_PULSE=str(self.tmp / "pulse.log")),
+                      mock.patch.object(serve, "HOGS", [{"name": "Spotify Helper", "pid": 93334, "pct": 110, "minutes": 20}]),
+                      mock.patch.object(serve, "HOG_CAUGHT", set())):
+            patch.start()
+            self.addCleanup(patch.stop)
+        serve.BOARD_CACHE.clear()
+
+    def put(self, *held):
+        jobs = []
+        for job_id, gate in held:
+            (self.root / "jobs" / job_id).mkdir(parents=True, exist_ok=True)
+            (self.root / "jobs" / job_id / "queue-gates.txt").write_text(gate + "\n")
+            jobs.append({"id": job_id, "stage": "build", "play_queued": "2026-11-22T10:00:00+00:00",
+                         "queued_launch": {"stage": "build"}, **({"play_queued_manual": True} if gate == "manual" else {})})
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+
+    def test_names_app_pct_and_held_jobs(self):
+        self.put(("1-a", "cpu_load(95%)"), ("2-b", "cpu_busy(91%)"), ("3-c", "ram_room"))
+        self.assertEqual(self.serve.hog_alert("2026-11-22"),
+                         "Spotify Helper is using 110% of one core while 1-a, 2-b wait for the CPU. Quit it.")
+        self.assertIn("1-a, 2-b", self.serve.board_with_activity(self.root, "p")["hogAlert"])
+        self.put(*[(f"{n}-x", "cpu_load") for n in range(1, 6)])
+        self.assertIn("1-x, 2-x, 3-x and 2 more wait", self.serve.hog_alert("2026-11-22"))
+
+    def test_none_without_hog_or_held_job(self):
+        self.put(("1-a", "ram_room"), ("2-b", "manual"))
+        self.assertIsNone(self.serve.hog_alert("2026-11-22"), "no job held on the CPU gate")
+        self.put(("1-a", "cpu_load"))
+        self.serve.HOGS.clear()
+        self.assertIsNone(self.serve.hog_alert("2026-11-22"), "no hog")
+
+    def test_one_catch_per_pid_per_day(self):
+        self.put(("1-a", "cpu_load"))
+        for day in ("2026-11-22", "2026-11-22", "2026-11-23"):
+            self.serve.hog_alert(day)
+        log = [json.loads(l) for l in (self.tmp / "waste.log").read_text().splitlines()]
+        self.assertEqual([(c["kind"], c["jobs"], c["pids"]) for c in log], [("cpu-hog", ["1-a"], [93334])] * 2)
+
+
 class CheckoutAlertTest(unittest.TestCase):
     """board.json's checkoutAlert: the live checkout has commits not on origin/<branch>, else the newest done job is
     `merged, not live: fast-forward failed`; None otherwise."""
