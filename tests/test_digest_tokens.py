@@ -445,6 +445,16 @@ class WriteTokensTest(unittest.TestCase):
         dear = board._token_reasons("1-a", 1.00, groups(0.40, 0.60), None, set())  # at the floor: still flagged
         self.assertEqual([r for r in dear if "of job cost" in r], ["scrum-spec-writer 60% of job cost"])
 
+    def test_top_cost_skips_jobs_under_min_usd(self):
+        self.assertEqual(board.TOKENS_FLAG["top_cost_min_usd"], 1.00)
+        g = {("main", None, "claude-opus-4-5"): (1, 0.33)}
+        cheap = board._token_reasons("1-a", 0.33, g, None, {"1-a"})  # job 1327: $0.33, one shop session
+        self.assertNotIn("top 3 cost", cheap)
+        floor = board._token_reasons("1-a", 1.00, {("main", None, "claude-opus-4-5"): (1, 1.00)}, None, {"1-a"})
+        self.assertIn("top 3 cost", floor)  # at the floor: still flagged
+        dear = board._token_reasons("1-a", 4.20, {("main", None, "claude-opus-4-5"): (1, 4.20)}, None, {"1-a"})
+        self.assertIn("top 3 cost", dear)
+
     def test_tokens_no_rows_and_no_added(self):
         self.board_jobs(("1-a", None), ("2-b", None), ("3-c", None), ("4-d", None), ("5-e", None))
         self.jobs_txt("4-d", "5-e", "1-a", "3-c", "2-b")
