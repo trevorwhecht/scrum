@@ -689,6 +689,22 @@ class ShopTickTest(unittest.TestCase):
                 self.assertEqual((acct_dir / "limit_until").read_text(), f"{until}\n")
                 self.assertEqual(self.job(root, "050-x")["stage"], "aborted")
 
+    def test_usage_limit_skips_job_gone_after_sync(self):
+        # job 1414 moved note_limit before the stage check; a job no longer on the board still names no account
+        root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
+        self.sh.ended.side_effect = lambda *a, **kw: "Working\nYou've hit your limit\n"
+
+        def sync(r, ended=()):
+            with self.board.locked_board(r) as b:
+                b["jobs"].clear()
+            return {"moved": [], "arrived": [], "error": None}
+
+        with mock.patch.object(self.board, "cmd_cloud_sync", side_effect=sync) as cs:
+            self.assertEqual(self.cloud(), "")
+        self.assertEqual(cs.call_args, mock.call(root, ended=["050-x"]))
+        for d in (self.main, self.owa):
+            self.assertFalse((d / "limit_until").exists(), d.name)
+
     def test_unreachable_shop_leaves_cloud_job(self):
         root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
         self.sh.ended.return_value = None  # shop asleep, or the pid still runs claude

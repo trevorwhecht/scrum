@@ -2466,7 +2466,7 @@ def cloud_tick(project, root, jobs, now=None):
             live = {j["id"]: j for j in board.read_board(root)["jobs"]}
             for job_id, tail in ended.items():
                 job = live.get(job_id) or {}
-                if not isinstance(tail, str):
+                if not isinstance(tail, str) or not job:  # a job gone from the board names no account
                     continue
                 if LIMIT_RE.search(tail):  # before the stage check: a brought-home job still marks its account
                     reset = limit_in(tail, datetime.now())[1]
