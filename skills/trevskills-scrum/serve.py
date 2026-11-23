@@ -6050,6 +6050,50 @@ def job_costs(project):
         return costs.get(project, {})
 
 
+PREVIEW_TYPES = {".mp4": ("video", "video/mp4"), ".m4v": ("video", "video/mp4"), ".mov": ("video", "video/quicktime"),
+                 ".png": ("image", "image/png"), ".jpg": ("image", "image/jpeg"), ".jpeg": ("image", "image/jpeg"),
+                 ".webp": ("image", "image/webp"), ".gif": ("image", "image/gif")}  # suffix -> (kind, MIME type)
+PREVIEW_CHUNK = 1 << 20  # bytes per write when send_preview streams a preview file
+
+
+def preview_files(root, job):
+    """[(realpath, kind, MIME type, rev)] for an edit job's jobs/<id>/preview.md (job 1398): one `- <absolute path>` line per
+    file the dashboard's stop box shows, `~` expanded. Any line that is relative, not a file, outside the project folder
+    (root.parent, realpath; a `..` or a symlink out counts) or of a suffix not in PREVIEW_TYPES refuses the whole list,
+    so a half-moved cut never shows; so do a job not in lane `edit` and a missing or unreadable preview.md: []. rev is
+    "<mtime_ns>-<size>", so a new cut written under the same name reads as a new file."""
+    if job.get("lane") != "edit":
+        return []
+    try:
+        lines = (root / "jobs" / str(job.get("id")) / "preview.md").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    base = os.path.realpath(root.parent) + os.sep
+    out = []
+    for line in lines:
+        if not (m := re.fullmatch(r"- (.+)", line.rstrip())):
+            continue
+        path = os.path.expanduser(m.group(1).strip())
+        real = os.path.realpath(path)
+        kind = PREVIEW_TYPES.get(Path(real).suffix.lower())
+        if not os.path.isabs(path) or not real.startswith(base) or not kind or not os.path.isfile(real):
+            return []
+        try:
+            st = os.stat(real)
+        except OSError:
+            return []
+        out.append((real, *kind, f"{st.st_mtime_ns}-{st.st_size}"))
+    return out
+
+
+def edit_preview(root, job):
+    """[{"n", "name", "type": "video"|"image", "rev"}] for the files preview_files keeps, in list order: what the
+    dashboard's stop box renders, each fetched from GET /api/p/<project>/jobs/<id>/preview/<n>. rev (mtime and size)
+    tells the dashboard a new cut from the one it is playing."""
+    return [{"n": i, "name": os.path.basename(path), "type": kind, "rev": rev}
+            for i, (path, kind, _, rev) in enumerate(preview_files(root, job))]
+
+
 def board_with_activity(root, project):
     """board.json plus a computed `activity` on every job that isn't done or aborted, and `routed` on every job
     (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it). A job whose Play/Resume could show (the
@@ -6062,7 +6106,7 @@ def board_with_activity(root, project):
     `nextRetryAt` (epoch seconds, or None). A cpu_held job without ram_hold gets `cpuHeldSecs` (seconds since play_queued).
     A check job with an E2E waiter over E2E_WAIT_RECORD_SECS gets `e2eWait`
     (e2e_wait_info). A job with transcript rows in the last board.JOB_COST_DAYS days gets `costUsd` and `costTokens`
-    (job_costs). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
+    (job_costs). A needs-human job in lane `edit` with files in its preview.md gets `preview` (edit_preview). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
     cannot go live, or None), `hogAlert` (hog_alert, or None), `actionsAlert` (actions_alert's last result from the watchdog's ACTIONS_ALERT cache, or
     None), `e2eFull` (the full-E2E record's at, head, result, failed, or None), `uiSweep` (the UI sweep record's at,
     head, result, findings, and `open`: open backlog lines starting `UI sweep`; or None) and `autoOff` (auto_off). board.json comes from cached_board, and each job is a fresh shallow copy, so
@@ -6113,6 +6157,8 @@ def board_with_activity(root, project):
                 job["cpuHeldSecs"] = max(0, int(time.time() - datetime.fromisoformat(job["play_queued"]).timestamp()))
             except ValueError:
                 pass
+        if job.get("stage") == "needs-human" and job.get("lane") == "edit" and (preview := edit_preview(root, job)):
+            job["preview"] = preview  # the stop box's clip and pictures (job 1398)
         if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
             job["waitingOn"] = {**job["waitingOn"], "titles": [title.get(i, "") for i in job["waitingOn"]["ids"]]}
     data["checkoutAlert"] = checkout_alert(root.parent, data.get("jobs", []))
@@ -7708,6 +7754,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, [{"project": k.rsplit("/", 1)[0], "id": k.rsplit("/", 1)[1], "action": r["action"],
                                              "started": r["started"], "log": r["log"], "alive": r["proc"].poll() is None,
                                              "exit": r["proc"].poll()} for k, r in RUNS.items()] + discusses)
+        if m := re.fullmatch(r"/api/p/(.+)/jobs/([^/]+)/preview/([^/]+)", path):
+            return self.send_preview(unquote(m.group(1)), unquote(m.group(2)), m.group(3))
         if m := re.fullmatch(r"/api/p/(.+)/backlog", path):
             root = scrum_dir(unquote(m.group(1)))
             return self.send_json(200, cached_backlog_items(root)) if root else self.send_json(404, {"error": "no such project"})
@@ -7744,6 +7792,55 @@ class Handler(BaseHTTPRequestHandler):
         if m := re.fullmatch(r"/p/([^/]+(?:%2F[^/]+)?)/(.+)", path):
             return self.send_project_file(unquote(m.group(1)), unquote(m.group(2)))
         self.send_json(404, {"error": "not found"})
+
+    def send_preview(self, project, job_id, n):
+        """Entry n of edit_preview for a job on that project's board (job 1398), streamed in PREVIEW_CHUNK writes, never
+        read whole. One `Range: bytes=a-b`, `a-` or `-k` gets a 206 with those bytes (iOS Safari plays a <video> only
+        then), a range starting at or past the end a 416, anything else unknown a 404. No ETag: the file can be GBs."""
+        root = scrum_dir(project)
+        try:
+            job = next((j for j in cached_board(root).get("jobs", []) if j.get("id") == job_id), None) if root else None
+        except (OSError, ValueError):
+            job = None
+        files = preview_files(root, job) if job else []
+        if not n.isdigit() or int(n) >= len(files):
+            return self.send_json(404, {"error": "not found"})
+        path, _, ctype, _ = files[int(n)]
+        try:
+            f = open(path, "rb")
+        except OSError:
+            return self.send_json(404, {"error": "not found"})
+        with f:
+            size = os.fstat(f.fileno()).st_size
+            start, end, code = 0, size - 1, 200
+            if m := re.fullmatch(r"bytes=(\d*)-(\d*)", (self.headers.get("Range") or "").strip()):
+                a, b = m.groups()
+                if a and (not b or int(b) >= int(a)):
+                    start, end, code = int(a), min(int(b), size - 1) if b else size - 1, 206
+                elif not a and b:
+                    start, end, code = max(0, size - int(b)), size - 1, 206 if int(b) else 416
+                if code == 206 and start >= size or code == 416:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    return self.end_headers()
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(end - start + 1))
+            if code == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            f.seek(start)
+            left = end - start + 1
+            try:
+                while left > 0 and (chunk := f.read(min(PREVIEW_CHUNK, left))):
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+                self.close_connection = self.close_connection or left > 0  # the file shrank: never reuse a short body
+            except (BrokenPipeError, ConnectionResetError):  # Safari drops a range request it no longer needs
+                self.close_connection = True
 
     def send_project_file(self, project, rel):
         """Only .json/.md/.log files that really sit inside that project's scrum/ folder."""

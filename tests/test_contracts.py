@@ -4143,6 +4143,13 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "ElevenLabs", "Suno", "only when Trevor asks", "vid-img-editing/motion/video/",
                        "never reuses a version number", "`edit-builder`", "`edit-reviewer`"):
             self.assertIn(phrase, animation, phrase)
+        # Job 1398: before each VIDEO_REVIEW ask the lane lists the files the phone shows in the stop box.
+        for step, end, files in (("3. **Storyboard.**", "\n4. **", "the desktop and phone screenshots"),
+                                 ("6. **Version round.**", "\n7. **", "the master clip, then its contact sheet")):
+            body = self.section(animation, step, end)
+            for phrase in ("`$F/jobs/$ID/preview.md`", "`- <absolute path>`", files, "replacing any older preview.md"):
+                self.assertIn(phrase, body, (step, phrase))
+            self.assertLess(body.index("preview.md"), body.index("B ask $ID"), step)
         for kind, job in (("edit-reel", "1364-edit-project-edit-reel-instagram-print-r"),
                           ("edit-vector", "1365-edit-project-edit-vector-and-edit-photo"),
                           ("edit-photo", "1365-edit-project-edit-vector-and-edit-photo")):

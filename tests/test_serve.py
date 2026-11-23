@@ -15890,6 +15890,125 @@ class AsyncBacklogAddTest(_OwnServer, unittest.TestCase):
         self.assertFalse(self.spool.exists())
 
 
+class EditPreviewTest(_OwnServer, unittest.TestCase):
+    """Job 1398: an edit job's preview.md lists the files the dashboard's stop box shows, and
+    GET /api/p/<project>/jobs/<id>/preview/<n> streams one with HTTP Range support, so the phone can play the clip."""
+
+    CLIP = b"0123456789abcdefghij"  # 20 bytes
+
+    def setUp(self):
+        self.start_server([{"id": "010-cut", "title": "Cut", "stage": "needs-human", "lane": "edit",
+                            "stopTitle": "VIDEO_REVIEW"},
+                           {"id": "011-plain", "title": "Plain", "stage": "needs-human"},
+                           {"id": "012-built", "title": "Built", "stage": "build", "lane": "edit"}])
+        self.serve.BOARD_ACTIVITY_CACHE.clear()
+        self.addCleanup(self.serve.BOARD_ACTIVITY_CACHE.clear)
+        self.work = self.repo / "motion" / "video" / "ad"
+        self.work.mkdir(parents=True)
+        (self.work / "master.MP4").write_bytes(self.CLIP)
+        (self.work / "sheet.jpg").write_bytes(b"JPEGDATA")
+        self.cut = {"id": "010-cut", "stage": "needs-human", "lane": "edit"}
+
+    def preview(self, job_id, lines):
+        d = self.root / "jobs" / job_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "preview.md").write_text("".join(f"{l}\n" for l in lines))
+
+    def get(self, path, headers=None):
+        r = urllib.request.Request(self.base + path, headers=headers or {})
+        try:
+            with urllib.request.urlopen(r, timeout=30) as res:
+                return res.status, dict(res.headers), res.read()
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, dict(e.headers), e.read()
+
+    def test_keeps_video_and_image(self):
+        self.preview("010-cut", ["# Preview", f"- {self.work / 'master.MP4'}", "not a list line", f"- {self.work / 'sheet.jpg'}"])
+        self.assertEqual(self.bare(self.serve.edit_preview(self.root, self.cut)),
+                         [{"n": 0, "name": "master.MP4", "type": "video"}, {"n": 1, "name": "sheet.jpg", "type": "image"}])
+
+    @staticmethod
+    def bare(preview):
+        """The entries without `rev`, which test_rev_changes_with_the_file pins on its own."""
+        return [{k: v for k, v in e.items() if k != "rev"} for e in preview]
+
+    def test_rev_changes_with_the_file(self):
+        """Round 1: a new cut under the same name gets a new `rev`, so the dashboard never keeps the old media."""
+        self.preview("010-cut", [f"- {self.work / 'master.MP4'}"])
+        first = self.serve.edit_preview(self.root, self.cut)[0]["rev"]
+        self.assertIsInstance(first, str)
+        self.assertEqual(self.serve.edit_preview(self.root, self.cut)[0]["rev"], first, "unchanged file, same rev")
+        (self.work / "master.MP4").write_bytes(b"a longer new cut of the ad")
+        self.assertNotEqual(self.serve.edit_preview(self.root, self.cut)[0]["rev"], first)
+
+    def test_tilde_path_expands(self):
+        with mock.patch.dict(os.environ, HOME=str(self.repo)):
+            self.preview("010-cut", ["- ~/motion/video/ad/sheet.jpg"])
+            self.assertEqual(self.bare(self.serve.edit_preview(self.root, self.cut)), [{"n": 0, "name": "sheet.jpg", "type": "image"}])
+
+    def test_refused_lists_are_empty(self):
+        outside = Path(self.tmp.name) / "outside.mp4"
+        outside.write_bytes(b"x")
+        (self.work / "link.mp4").symlink_to(outside)
+        (self.work / "page.html").write_text("<p>")
+        (self.work / "run.sh").write_text("echo")
+        for lines in ([f"- {outside}"],  # outside the project folder
+                      [f"- {self.work}/../../../../outside.mp4"],  # a .. escape
+                      [f"- {self.work / 'link.mp4'}"],  # a symlink pointing outside
+                      [f"- {self.work / 'gone.mp4'}"],  # moved to the Trash
+                      [f"- {self.work / 'page.html'}"], [f"- {self.work / 'run.sh'}"],
+                      [f"- {self.work / 'master.MP4'}", f"- {self.work / 'run.sh'}"]):  # one bad line refuses the list
+            self.preview("010-cut", lines)
+            self.assertEqual(self.serve.edit_preview(self.root, self.cut), [], lines)
+        self.preview("010-cut", [f"- {self.work / 'master.MP4'}"])
+        self.assertEqual(self.serve.edit_preview(self.root, {**self.cut, "lane": "fast"}), [], "not an edit job")
+        self.assertEqual(self.serve.edit_preview(self.root, {**self.cut, "id": "099-none"}), [], "no preview.md")
+        (self.root / "jobs" / "010-cut" / "preview.md").write_bytes(b"- \xff\xfe\n")
+        self.assertEqual(self.serve.edit_preview(self.root, self.cut), [], "unreadable")
+
+    def test_board_with_activity_preview(self):
+        for job_id in ("010-cut", "011-plain", "012-built"):
+            self.preview(job_id, [f"- {self.work / 'master.MP4'}"])
+        jobs = {j["id"]: j for j in self.serve.board_with_activity(self.root, "repo")["jobs"]}
+        self.assertEqual(self.bare(jobs["010-cut"]["preview"]), [{"n": 0, "name": "master.MP4", "type": "video"}])
+        self.assertNotIn("preview", jobs["011-plain"], "not an edit job")
+        self.assertNotIn("preview", jobs["012-built"], "not needs-human")
+        self.preview("010-cut", [f"- {self.work / 'gone.mp4'}"])
+        self.serve.BOARD_ACTIVITY_CACHE.clear()
+        jobs = {j["id"]: j for j in self.serve.board_with_activity(self.root, "repo")["jobs"]}
+        self.assertNotIn("preview", jobs["010-cut"], "an empty list adds no key")
+
+    def test_preview_route_serves_ranges(self):
+        self.preview("010-cut", [f"- {self.work / 'master.MP4'}", f"- {self.work / 'sheet.jpg'}"])
+        url = "/api/p/repo/jobs/010-cut/preview/"
+        code, h, body = self.get(url + "0")
+        self.assertEqual((code, body), (200, self.CLIP))
+        self.assertEqual((h["Accept-Ranges"], h["Content-Type"], h["Content-Length"]), ("bytes", "video/mp4", "20"))
+        self.assertNotIn("ETag", h)
+        code, h, body = self.get(url + "1")
+        self.assertEqual((code, body, h["Content-Type"]), (200, b"JPEGDATA", "image/jpeg"))
+        for rng, want, span in (("bytes=0-1", b"01", "0-1"), ("bytes=5-", self.CLIP[5:], "5-19"),
+                                ("bytes=-3", b"hij", "17-19"), ("bytes=18-99", b"ij", "18-19")):
+            code, h, body = self.get(url + "0", {"Range": rng})
+            self.assertEqual((code, body, h["Content-Range"], h["Content-Length"]),
+                             (206, want, f"bytes {span}/20", str(len(want))), rng)
+        for rng in ("bytes=20-", "bytes=99-100"):
+            code, h, _ = self.get(url + "0", {"Range": rng})
+            self.assertEqual((code, h["Content-Range"]), (416, "bytes */20"), rng)
+        for bad in (url + "2", url + "x", "/api/p/nope/jobs/010-cut/preview/0", "/api/p/repo/jobs/099-none/preview/0",
+                    "/api/p/repo/jobs/011-plain/preview/0"):
+            self.assertEqual(self.get(bad)[0], 404, bad)
+        self.assertEqual(self.get(url + "0", {"Host": "evil.example"})[0], 403)
+
+    def test_preview_route_streams_in_chunks(self):
+        self.preview("010-cut", [f"- {self.work / 'master.MP4'}"])
+        with mock.patch.object(self.serve, "PREVIEW_CHUNK", 3):
+            code, h, body = self.get("/api/p/repo/jobs/010-cut/preview/0", {"Range": "bytes=2-12"})
+        self.assertEqual((code, body), (206, self.CLIP[2:13]))
+        self.assertNotIn("read_bytes", inspect.getsource(self.serve.Handler.send_preview))
+
+
 class AgentLinksTest(unittest.TestCase):
     """Job 1290: agent_links_tick re-runs install.sh when a ~/.claude/agents/scrum-*.md link is dangling, points outside the checkout or is missing.
     Job 1362: edit-*.md links (the edit project's agents) are checked the same way."""
