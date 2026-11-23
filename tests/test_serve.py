@@ -8588,6 +8588,23 @@ class AutoResumeTest(unittest.TestCase):
             self.assertEqual(self.sweep(), [])
         self.assertNotIn("p/s1", s.AUTO_RESUME)
 
+    def test_brought_home_shop_job_resumes_as_spec_stall(self):
+        """Job 1414: a shop job cloud-sync brought home (board._cloud_home), standalone or a BigBoy child, meets the
+        spec-stall rule above with no resume code of its own."""
+        s = self.serve
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "101-home", "stage": "cloud", "shop": "4242", "branch": "scrum/101-home", "reason": None},
+            {"id": "100-big", "stage": "running", "lane": "bigboy", "children": ["102-kid"]},
+            {"id": "102-kid", "stage": "cloud", "parent": "100-big", "shop": "4343", "branch": "scrum/102-kid", "reason": None}]}))
+        for job_id in ("101-home", "102-kid"):
+            s.board._cloud_home(self.root, job_id, None, None, f"/wt/{job_id}", f"scrum/{job_id}",
+                                f"stalled: shop session ended leaving branch scrum/{job_id} pushed with no PR; it is home "
+                                "for the local pipeline")
+        self.jobs = s.board.read_board(self.root)["jobs"]
+        with mock.patch.object(s.board, "ram_room", side_effect=lambda floor=1, light=False: 1):
+            self.assertEqual(self.sweep(), ["101-home", "102-kid"])
+        self.assertEqual((s.AUTO_RESUME["p/101-home"][0], s.AUTO_RESUME["p/102-kid"][0]), (1, 1))
+
     def test_spec_stall_with_spec_md_unchanged(self):
         s = self.serve
         self.spec_stall(spec_md=True)
