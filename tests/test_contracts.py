@@ -4392,6 +4392,17 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         mapping = self.section(body, "## 2. Map changed files", "## 3. Replay")
         self.assertIn("board.py\" e2e-specs --worktree . --base <BASE> --project", mapping)
 
+    def test_e2e_stops_dev_server_by_port(self):  # job 1377, same rule as the builder's (job 691)
+        body = (ROOT / "skills" / "trevskills-e2e" / "SKILL.md").read_text().split("\n---\n", 1)[1]
+        cover = self.section(body, "## 4. Cover changed UI", "## 5. On failure")
+        agent = (ROOT / "agents" / "scrum-review-e2e.md").read_text()
+        rule = next(l for l in agent.splitlines() if "Stop every server you started" in l)
+        for name, text in (("skill", cover), ("agent", rule)):
+            for phrase in ("kill only the process listening on its own port (`kill $(lsof -ti tcp:<port> -sTCP:LISTEN)`)",
+                           "check that `lsof -ti tcp:<port> -sTCP:LISTEN` prints nothing",
+                           "never `pkill -f next dev` or any name-based kill"):
+                self.assertIn(phrase, text, f"{name}: {phrase}")
+
     def test_approver_render_same_head(self):
         approver = (ROOT / "agents" / "scrum-approver.md").read_text()
         rule = next(l for l in approver.splitlines() if l.startswith("**UI must be rendered.**"))
