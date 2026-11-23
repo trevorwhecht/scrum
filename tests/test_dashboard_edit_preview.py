@@ -58,6 +58,31 @@ class EditPreview(unittest.TestCase):
         self.assertRegex(css, r"\.stop\.approve b\{color:var\(--pass\)\}")
         self.assertRegex(css, r"\.card\.human\.approve\{[^}]*border-color:var\(--pass\)[^}]*var\(--pass\) 15%")
         self.assertRegex(css, r"\.stop \.preview video,\.stop \.preview img\{[^}]*max-width:100%")
+        self.assertRegex(css, r"\.stop \.preview img\{[^}]*max-height:", "round 1: a tall picture never pushes Approve off a 1440 px screen")
+
+    def test_sig_names_job_urls_and_rev(self):
+        """Round 1: two jobs listing the same basenames, or a new cut under the same name, never share a signature, so
+        keepPreview never puts one job's (or an old cut's) media into another stop box."""
+        same = [{**e, "rev": "1-20"} for e in PREVIEW]
+        other = {**ASK, "key": "edit/012-two", "id": "012-two", "preview": same}
+        sigs = run(f"""
+            const sig = j => stopBox(j).match(/class="preview" data-sig="([^"]*)"/)[1];
+            const a = {json.dumps({**ASK, 'preview': same})}, b = {json.dumps(other)};
+            const c = {json.dumps({**other, 'project': 'edit2', 'key': 'edit2/012-two'})};
+            const d = {json.dumps({**other, 'preview': [{**e, 'rev': '2-31'} for e in PREVIEW]})};
+            out([sig(a), sig(b), sig(c), sig(d), sig({{...a, question: "poll"}})]);""")[0]
+        a, b, c, d, a_again = sigs
+        self.assertEqual(len({a, b, c, d}), 4, sigs)
+        self.assertEqual(a, a_again, "the same files on the same job keep their media")
+        for part in ("010-cut", "api/p/edit/jobs/010-cut/preview/0", "api/p/edit/jobs/010-cut/preview/1", "1-20"):
+            self.assertIn(part, a)
+        self.assertIn("2-31", d)
+        swapped = run(f"""
+            const sig = j => stopBox(j).match(/class="preview" data-sig="([^"]*)"/)[1].replace(/&quot;/g, '"');
+            const node = s => ({{dataset: {{sig: s}}, swapped: null, replaceWith(x) {{ this.swapped = x; }}}});
+            const from = node(sig({json.dumps({**ASK, 'preview': same})})), to = node(sig({json.dumps(other)}));
+            keepPreview(from, {{querySelector: () => to}}); out(to.swapped);""")[0]
+        self.assertIsNone(swapped, "job B never gets job A's media")
 
     def test_rerender_keeps_playing_media(self):
         same, changed = run("""

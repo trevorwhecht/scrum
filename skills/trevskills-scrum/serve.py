@@ -6057,10 +6057,11 @@ PREVIEW_CHUNK = 1 << 20  # bytes per write when send_preview streams a preview f
 
 
 def preview_files(root, job):
-    """[(realpath, kind, MIME type)] for an edit job's jobs/<id>/preview.md (job 1398): one `- <absolute path>` line per
+    """[(realpath, kind, MIME type, rev)] for an edit job's jobs/<id>/preview.md (job 1398): one `- <absolute path>` line per
     file the dashboard's stop box shows, `~` expanded. Any line that is relative, not a file, outside the project folder
     (root.parent, realpath; a `..` or a symlink out counts) or of a suffix not in PREVIEW_TYPES refuses the whole list,
-    so a half-moved cut never shows; so do a job not in lane `edit` and a missing or unreadable preview.md: []."""
+    so a half-moved cut never shows; so do a job not in lane `edit` and a missing or unreadable preview.md: []. rev is
+    "<mtime_ns>-<size>", so a new cut written under the same name reads as a new file."""
     if job.get("lane") != "edit":
         return []
     try:
@@ -6077,14 +6078,20 @@ def preview_files(root, job):
         kind = PREVIEW_TYPES.get(Path(real).suffix.lower())
         if not os.path.isabs(path) or not real.startswith(base) or not kind or not os.path.isfile(real):
             return []
-        out.append((real, *kind))
+        try:
+            st = os.stat(real)
+        except OSError:
+            return []
+        out.append((real, *kind, f"{st.st_mtime_ns}-{st.st_size}"))
     return out
 
 
 def edit_preview(root, job):
-    """[{"n", "name", "type": "video"|"image"}] for the files preview_files keeps, in list order: what the dashboard's
-    stop box renders, each fetched from GET /api/p/<project>/jobs/<id>/preview/<n>."""
-    return [{"n": i, "name": os.path.basename(path), "type": kind} for i, (path, kind, _) in enumerate(preview_files(root, job))]
+    """[{"n", "name", "type": "video"|"image", "rev"}] for the files preview_files keeps, in list order: what the
+    dashboard's stop box renders, each fetched from GET /api/p/<project>/jobs/<id>/preview/<n>. rev (mtime and size)
+    tells the dashboard a new cut from the one it is playing."""
+    return [{"n": i, "name": os.path.basename(path), "type": kind, "rev": rev}
+            for i, (path, kind, _, rev) in enumerate(preview_files(root, job))]
 
 
 def board_with_activity(root, project):
@@ -7798,7 +7805,7 @@ class Handler(BaseHTTPRequestHandler):
         files = preview_files(root, job) if job else []
         if not n.isdigit() or int(n) >= len(files):
             return self.send_json(404, {"error": "not found"})
-        path, _, ctype = files[int(n)]
+        path, _, ctype, _ = files[int(n)]
         try:
             f = open(path, "rb")
         except OSError:

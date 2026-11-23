@@ -15925,13 +15925,27 @@ class EditPreviewTest(_OwnServer, unittest.TestCase):
 
     def test_keeps_video_and_image(self):
         self.preview("010-cut", ["# Preview", f"- {self.work / 'master.MP4'}", "not a list line", f"- {self.work / 'sheet.jpg'}"])
-        self.assertEqual(self.serve.edit_preview(self.root, self.cut),
+        self.assertEqual(self.bare(self.serve.edit_preview(self.root, self.cut)),
                          [{"n": 0, "name": "master.MP4", "type": "video"}, {"n": 1, "name": "sheet.jpg", "type": "image"}])
+
+    @staticmethod
+    def bare(preview):
+        """The entries without `rev`, which test_rev_changes_with_the_file pins on its own."""
+        return [{k: v for k, v in e.items() if k != "rev"} for e in preview]
+
+    def test_rev_changes_with_the_file(self):
+        """Round 1: a new cut under the same name gets a new `rev`, so the dashboard never keeps the old media."""
+        self.preview("010-cut", [f"- {self.work / 'master.MP4'}"])
+        first = self.serve.edit_preview(self.root, self.cut)[0]["rev"]
+        self.assertIsInstance(first, str)
+        self.assertEqual(self.serve.edit_preview(self.root, self.cut)[0]["rev"], first, "unchanged file, same rev")
+        (self.work / "master.MP4").write_bytes(b"a longer new cut of the ad")
+        self.assertNotEqual(self.serve.edit_preview(self.root, self.cut)[0]["rev"], first)
 
     def test_tilde_path_expands(self):
         with mock.patch.dict(os.environ, HOME=str(self.repo)):
             self.preview("010-cut", ["- ~/motion/video/ad/sheet.jpg"])
-            self.assertEqual(self.serve.edit_preview(self.root, self.cut), [{"n": 0, "name": "sheet.jpg", "type": "image"}])
+            self.assertEqual(self.bare(self.serve.edit_preview(self.root, self.cut)), [{"n": 0, "name": "sheet.jpg", "type": "image"}])
 
     def test_refused_lists_are_empty(self):
         outside = Path(self.tmp.name) / "outside.mp4"
@@ -15957,7 +15971,7 @@ class EditPreviewTest(_OwnServer, unittest.TestCase):
         for job_id in ("010-cut", "011-plain", "012-built"):
             self.preview(job_id, [f"- {self.work / 'master.MP4'}"])
         jobs = {j["id"]: j for j in self.serve.board_with_activity(self.root, "repo")["jobs"]}
-        self.assertEqual(jobs["010-cut"]["preview"], [{"n": 0, "name": "master.MP4", "type": "video"}])
+        self.assertEqual(self.bare(jobs["010-cut"]["preview"]), [{"n": 0, "name": "master.MP4", "type": "video"}])
         self.assertNotIn("preview", jobs["011-plain"], "not an edit job")
         self.assertNotIn("preview", jobs["012-built"], "not needs-human")
         self.preview("010-cut", [f"- {self.work / 'gone.mp4'}"])

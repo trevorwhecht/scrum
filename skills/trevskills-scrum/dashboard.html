@@ -133,7 +133,7 @@ header{flex-wrap:wrap}header .btn,#filter,#laneFilter{min-height:44px}  /* every
 .stop b{color:var(--human)}.stop p{margin:4px 0 0;overflow-wrap:anywhere}
 /* VIDEO_REVIEW asks for an approval, not a fix: green, never red (job 1398) */
 .stop.approve{border-color:var(--pass);background:color-mix(in srgb,var(--pass) 8%,var(--card))}.stop.approve b{color:var(--pass)}
-.stop .preview{display:grid;gap:8px;margin-top:8px}.stop .preview video,.stop .preview img{display:block;width:auto;max-width:100%;height:auto;border-radius:6px}.stop .preview video{width:100%}
+.stop .preview{display:grid;gap:8px;margin-top:8px}.stop .preview video,.stop .preview img{display:block;width:auto;max-width:100%;height:auto;border-radius:6px}.stop .preview video{width:100%}.stop .preview video,.stop .preview img{max-height:30vh;object-fit:contain}  /* clip, sheet and Approve fit one 1440x900 screen */
 .stop .acts{display:grid;gap:8px;margin-top:8px}.stop .acts .btn{width:100%;font-size:15px;text-align:left;overflow-wrap:anywhere}
 .stop .acts .badge{margin:0 0 0 2px;vertical-align:middle}.stop .acts .note{margin:-4px 0 0}
 .stop .sendback{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
@@ -1274,11 +1274,15 @@ const stopOptions = job => [...(job.options || [])].sort((a, b) =>
   (b.key === job.recommend?.key) - (a.key === job.recommend?.key) || String(a.key).localeCompare(String(b.key)));
 // A VIDEO_REVIEW stop asks Trevor to approve work, not to fix a failure: its box and card are green (job 1398).
 const approveStop = job => job.stopTitle === "VIDEO_REVIEW";
-// An edit job's clip and pictures (serve.py edit_preview), above the option buttons; data-sig names the files shown.
-const previewHtml = job => !job.preview?.length ? "" : `<div class="preview" data-sig="${esc(JSON.stringify(job.preview))}">${job.preview.map(p => {
-  const src = `api/p/${enc(job.project)}/jobs/${enc(job.id)}/preview/${enc(p.n)}`;
-  return p.type === "video" ? `<video controls playsinline preload="metadata" src="${esc(src)}"></video>` : `<img alt="${esc(p.name)}" src="${esc(src)}">`;
-}).join("")}</div>`;
+// An edit job's clip and pictures (serve.py edit_preview), above the option buttons. data-sig names the project, the job,
+// each file's URL and its rev (mtime and size), so keepPreview never keeps another job's media or an older cut.
+function previewHtml(job) {
+  if (!job.preview?.length) return "";
+  const src = p => `api/p/${enc(job.project)}/jobs/${enc(job.id)}/preview/${enc(p.n)}`;
+  const sig = JSON.stringify([job.project, job.id, job.preview.map(p => [src(p), p.type, p.rev ?? null])]);
+  return `<div class="preview" data-sig="${esc(sig)}">${job.preview.map(p => p.type === "video"
+    ? `<video controls playsinline preload="metadata" src="${esc(src(p))}"></video>` : `<img alt="${esc(p.name)}" src="${esc(src(p))}">`).join("")}</div>`;
+}
 // A re-render of the stop box puts the old preview node back when it shows the same files, so a playing clip keeps playing.
 function keepPreview(old, box) {
   const now = box?.querySelector?.(".stop .preview");
