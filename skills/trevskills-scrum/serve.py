@@ -1278,7 +1278,8 @@ def e2e_full_tick(project, repo, root) -> None:
     cool down, once no job on this project blocks a restart, any new HEAD is due: the merges bundled into one run.
     With no run in flight here, every project's `running` record is an orphan (a serve reload killed its thread; one
     serve.py per Mac) and is rewritten as `error` first, keeping its head and lastGreen, unless e2e_full_stop_orphan
-    finds its buildlock child still running and stops it (`loaded`, job 1397); then every `error`/exit-null record goes through e2e_full_from_log, so an orphan that finished later is filed. A `running` sweep older than
+    finds its buildlock child still running and stops it (`loaded`, job 1397); then every `error`/exit-null record
+    goes through e2e_full_from_log, so an orphan that finished later is filed. A `running` sweep older than
     E2E_FULL_STALE still holds the run while a claude process names its dir. A `busy` record on this HEAD is retried
     once (retried=True). A no-git project (board.no_git, job 1362) never starts one."""
     cmd = e2e_command(root)
