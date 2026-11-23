@@ -173,7 +173,8 @@ GATED = ("start", "resume", "approve", "rework")  # the job launches spawn's gat
 def note_queue_gate(root, job_id, gate, name="queue-gates.txt"):
     """Add `gate` (board.ram_room_reason's ram_room(<readings>), ram_room:<live id> or cpu_load(<pct>%)) to
     jobs/<id>/<name> (queue-gates.txt) once per name (the text before `(`), so a job held twice keeps its first readings, for
-    timing.md's Queue gate column. It outlives the launch, unlike play_queued. Called under LAUNCH_LOCK; a write error
+    timing.md's Queue gate column. It outlives the launch, unlike play_queued. For queue-gates.txt it also stamps the head
+    in current-gates.json (board.note_current_gate), which gate_heads reads. Called under LAUNCH_LOCK; a write error
     never blocks the queue."""
     path = Path(root) / "jobs" / job_id / name
     head = lambda g: g.split("(", 1)[0]
@@ -182,9 +183,11 @@ def note_queue_gate(root, job_id, gate, name="queue-gates.txt"):
             with path.open("a", encoding="utf-8") as f:
                 f.write(gate + "\n")
         else:
-            os.utime(path)  # held again: the file's mtime is when the gate was last hit (gate_heads reads it)
+            os.utime(path)  # held again: the mtime is when a gate was last hit (gate_heads' fallback with no current-gates.json)
     except OSError:
         pass
+    if name == "queue-gates.txt":
+        board.note_current_gate(root, job_id, gate)
 
 
 def note_stall_hold(root, job_id, token):
@@ -271,14 +274,24 @@ def gate_held(root, job, gates):
     return bool(gate_heads(root, job) & gates)
 
 
-GATE_FRESH_SECS = 900  # a queue-gates.txt untouched this long names no current hold (note_queue_gate touches it each time)
+GATE_FRESH_SECS = 900  # a gate last hit this long ago is no current hold (per gate in current-gates.json; else the queue-gates.txt mtime)
 
 
 def gate_heads(root, job):
-    """The gate names (text before `(`) in queue-gates.txt; empty when unreadable or last noted over GATE_FRESH_SECS ago
-    (the file keeps every gate a job ever hit, so an old line is not a current hold: job 1222)."""
+    """The gate names (text before `(`) holding a job now: the heads in jobs/<id>/current-gates.json hit within
+    GATE_FRESH_SECS (job 1408). With no readable record (an object of numbers) it falls back to every head in
+    queue-gates.txt, or none when that is unreadable or last noted over GATE_FRESH_SECS ago (the file keeps every gate
+    a job ever hit, so an old line is not a current hold: job 1222)."""
+    folder = Path(root) / "jobs" / str(job["id"])
     try:
-        path = Path(root) / "jobs" / str(job["id"]) / "queue-gates.txt"
+        seen = json.loads((folder / board.CURRENT_GATES).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        seen = None
+    if isinstance(seen, dict) and all(type(t) in (int, float) for t in seen.values()):
+        now = time.time()
+        return {g for g, t in seen.items() if now - t <= GATE_FRESH_SECS}
+    try:
+        path = folder / "queue-gates.txt"
         if time.time() - path.stat().st_mtime > GATE_FRESH_SECS:
             return set()
         gates = path.read_text(encoding="utf-8").split()

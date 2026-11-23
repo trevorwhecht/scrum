@@ -6805,9 +6805,40 @@ def overlap_gate(holder, mine, theirs):
     return f"overlap:{holder}:{min(shared)}" if shared else f"overlap:{holder}"
 
 
+CURRENT_GATES = "current-gates.json"  # {gate head: epoch seconds last hit}; serve.py gate_heads reads it (job 1408)
+
+
+def note_current_gate(root, job_id: str, gate: str) -> None:
+    """Stamp `gate`'s head (text before `(`) with the time now in jobs/<id>/current-gates.json, so serve.py gate_heads
+    names only gates hit lately while queue-gates.txt stays the cumulative log. Read, set and os.replace run under one
+    flock on jobs/<id>/.current-gates.lock, so a board.py and a serve.py writer never drop each other's entry. A
+    malformed record starts over; a write error never blocks the queue."""
+    folder = Path(root) / "jobs" / job_id
+    path = folder / CURRENT_GATES
+    tmp = folder / f"{CURRENT_GATES}.{os.getpid()}.tmp"
+    try:
+        with open(folder / ".current-gates.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                seen = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                seen = {}
+            if not isinstance(seen, dict):
+                seen = {}
+            seen[gate.split("(", 1)[0]] = time.time()
+            try:
+                tmp.write_text(json.dumps(seen), encoding="utf-8")
+                os.replace(tmp, path)
+            finally:
+                tmp.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
+
+
 def note_queue_gate(root, job_id, gate):
     """Add `gate` to jobs/<id>/queue-gates.txt once, for timing.md's Queue gate column (serve.py's note_queue_gate
-    writes ram_room and cpu_load the same way). A write error never blocks the queue."""
+    writes ram_room and cpu_load the same way), and stamp it in current-gates.json (note_current_gate). A write error
+    never blocks the queue."""
     path = Path(root) / "jobs" / job_id / "queue-gates.txt"
     try:
         if gate not in (path.read_text(encoding="utf-8").split() if path.exists() else []):
@@ -6815,6 +6846,7 @@ def note_queue_gate(root, job_id, gate):
                 f.write(gate + "\n")
     except OSError:
         pass
+    note_current_gate(root, job_id, gate)
 
 
 def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, shop: str | None = None,
