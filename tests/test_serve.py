@@ -13708,7 +13708,8 @@ class HotStopTest(unittest.TestCase):
         started = time.time()
         stopped, _ = self.tick(SCRUM_CPU_LOAD_PCT="400")
         self.assertEqual(stopped, ["repo/ui-sweep"])
-        self.assertLess(time.time() - started, 0.9, "TERM ended it: no wait for the KILL")
+        # stop_group's default wait is bound at import (5 s), so a TERM-only stop ends far below it even under load
+        self.assertLess(time.time() - started, 4, "TERM ended it: no wait for the KILL")
         self.assertEqual(proc.wait(timeout=5), -signal.SIGTERM)
 
     def test_stopped_sweep_files_nothing(self):

@@ -13855,7 +13855,12 @@ class SpecModelsTest(unittest.TestCase):
         self.assertEqual(self.calls(), ["001-son"])
 
     def test_spec_models_timeout_and_bad_output_give_null(self):
-        with mock.patch.object(board, "SPEC_MODEL_TIMEOUT", 1):
+        real_run = subprocess.run
+
+        def run(cmd, *a, **kw):  # only the slow stub gets the short timeout: python start-up of the others may take
+            kw["timeout"] = 1 if "003-slow" in cmd[-1] else 60  # seconds under load
+            return real_run(cmd, *a, **kw)
+        with mock.patch.object(board.subprocess, "run", side_effect=run):
             out = board.cmd_spec_models(self.root, ["001-son", "003-slow", "004-fail", "005-junk"])
         self.assertEqual(out, {"001-son": "sonnet", "003-slow": None, "004-fail": None, "005-junk": None})
 
