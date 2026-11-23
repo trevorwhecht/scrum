@@ -4239,6 +4239,12 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, edits, phrase)
         self.assertLess(edits.index("to stop.md"), edits.index("B ask $ID"))
         self.assertLess(edits.index("B ask $ID"), edits.index("--mcp-config"))
+        # Criterion 8: a rerun or resume never redoes finished work.
+        resume = self.section(preamble, "**Resume:**", "\n")
+        for phrase in ("the shared **Resume** rule holds", "reads `reel.md` and continues at its last unfinished step",
+                       "`reel.py log` caches each clip's trace", "never reuses a review number",
+                       "recorded as exported", "never rebuilds an Edits project"):
+            self.assertIn(phrase, resume, phrase)
         for kind, job in (("edit-vector", "1365-edit-project-edit-vector-and-edit-photo"),
                           ("edit-photo", "1365-edit-project-edit-vector-and-edit-photo")):
             body = [l for l in kind_files[kind].splitlines()[1:] if l.strip()]
