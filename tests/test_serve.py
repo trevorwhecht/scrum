@@ -15209,6 +15209,16 @@ class StuckAlertTest(unittest.TestCase):
         self.pulse(150, SCRUM_VM_PRESSURE="2")
         self.assertEqual(self.sent, [[str(self.script), "alert-handle", self.LEFTOVER]])
 
+    def test_pulse_line_and_stuck_alert_get_the_same_sessions_and_reason(self):
+        got = []
+        (self.base / "ps.txt").write_text("   00:10 claude -p /trevskills-scrum start 1-a\n")
+        with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2", SCRUM_PS=str(self.base / "ps.txt")), \
+                mock.patch.object(self.serve, "stuck_alert", lambda now, why, sessions: got.append((now, why, sessions))):
+            self.serve.pulse_tick({}, now=self.NOW)
+        line = json.loads((self.base / "pulse.log").read_text())
+        self.assertEqual(got, [(self.NOW, self.MEM, 1)])
+        self.assertEqual((line["sessions"], line["guard"]), (1, self.MEM))
+
     def test_a_raising_stuck_alert_never_breaks_pulse_tick(self):
         def boom(now, why, sessions):
             raise RuntimeError("stuck-alert.json: disk full")
