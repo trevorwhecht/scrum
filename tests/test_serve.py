@@ -15231,6 +15231,99 @@ class StuckAlertTest(unittest.TestCase):
             self.assertIsNone(self.alert(t, sessions=2))
         self.assertEqual((self.sent, self.ps_calls), ([], []))
 
+    def test_protected_biggest_process_is_named_without_kill(self):
+        me, uid = os.getpid(), os.getuid()
+        other = 601 if uid == 600 else 600
+        small = f"   10     1 {uid}     1024   0.0 /bin/zsh -l\n"
+        for row, clause in (
+                (f"  900   850 {uid}  4194304  12.0 /Users/x/.local/bin/claude --dangerously-skip-permissions -p x",
+                 "claude --dangerously-skip-permissions, pid 900, 4.0 GB, a claude session."),
+                (f" {me}     1 {uid}  4194304   1.0 /usr/bin/python3 /Users/x/skills/trevskills-scrum/serve.py --port 9",
+                 f"python3 serve.py, pid {me}, 4.0 GB, the scrum server."),
+                ("  700     1    88  4194304   9.0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer -daemon",
+                 "WindowServer -daemon, pid 700, 4.0 GB, a system process."),
+                (f"  710     1 {uid}  4194304   1.0 /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder",
+                 "Finder, pid 710, 4.0 GB, a system process."),
+                (f"  800     1 {other}  4194304   2.0 /opt/other/bin/node /srv/other/next dev",
+                 "leftover dev server node next, pid 800, 4.0 GB, another user's process.")):
+            (self.base / "stuck-alert.json").unlink(missing_ok=True)
+            self.ps_rows = small + row + "\n"
+            self.alert(0)
+            text = self.alert(150)
+            self.assertEqual(text, self.HEAD + self.MEM + ". Biggest by memory: " + clause)
+            self.assertNotIn("kill", text)
+
+    def test_cpu_reason_names_the_busiest_process(self):
+        why = "CPU load 450% of 8 cores (> 300%)"
+        self.alert(0, why=why)
+        self.assertEqual(self.alert(150, why=why), self.HEAD + why + ". Biggest by CPU: node vitest, pid 4403, 145% CPU, "
+                                                                   "1.0 GB. Fix: kill 4403")
+
+    def test_disk_reason_names_no_process(self):
+        why = "free disk 3.2 GB (< 10 GB)"
+        self.alert(0, why=why)
+        self.assertEqual(self.alert(150, why=why), self.HEAD + "free disk 3.2 GB (< 10 GB).")
+        self.assertEqual(self.ps_calls, [])
+
+    def test_no_handle_or_sender_sends_nothing(self):
+        to = self.base / "alert-to.txt"
+        for undo, missing in ((to.unlink, "alert-to.txt"), (lambda: to.write_text("  \n"), "alert-to.txt"),
+                              (lambda: (to.write_text("alert-handle\n"), self.script.unlink()), "imsg-send.sh")):
+            undo()
+            (self.base / "stuck-alert.json").unlink(missing_ok=True)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertIsNone(self.alert(0))
+                self.assertIsNone(self.alert(150))
+                self.assertIsNone(self.alert(300))
+            self.assertEqual(self.sent, [])
+            self.assertEqual(len(err.getvalue().splitlines()), 1, err.getvalue())
+            self.assertIn(missing, err.getvalue())
+        self.assertEqual(self.ps_calls, [], "nothing to send: no ps either")
+        self.assertEqual(self.logged(), [{"process": "Stuck alert", "result": "unsent", "reason": self.MEM,
+                                          "missing": m} for m in ("alert-to.txt", "alert-to.txt", "imsg-send.sh")])
+
+    def logged(self):
+        log = self.base / "processes.log"
+        return [{k: v for k, v in json.loads(l).items() if k != "t"} for l in log.read_text().splitlines()] \
+            if log.exists() else []
+
+    def test_logs_each_text_and_survives_a_failed_send(self):
+        self.alert(0)
+        self.alert(150)
+        self.assertEqual(self.logged(), [{"process": "Stuck alert", "result": "sent", "reason": self.MEM}])
+
+        def broken(argv):
+            raise OSError("imsg-send.sh: exec format error")
+        self.alert(300, sessions=1)
+        self.serve.stuck_alert(self.NOW + 450, self.MEM, 0, send=broken)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(self.serve.stuck_alert(self.NOW + 600, self.MEM, 0, send=broken))
+        self.assertEqual(err.getvalue(), "watchdog: stuck alert: imsg-send.sh: exec format error\n")
+        self.assertEqual(self.logged()[1:], [{"process": "Stuck alert", "result": "failed", "reason": self.MEM,
+                                              "error": "imsg-send.sh: exec format error"}])
+        self.assertIsNone(self.alert(750), "a failed send still ends the episode's text")
+
+    def test_never_sends_under_unittest_without_a_sender(self):
+        for t in (0, 150, 300):
+            self.assertIsNone(self.serve.stuck_alert(self.NOW + t, self.MEM, 0))
+        self.assertFalse(self.ran.exists(), "the fake imsg-send.sh ran")
+        self.assertEqual(self.ps_calls, [])
+
+    def test_state_file_survives_a_reload(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("serve_reloaded", self.serve.__file__)
+        fresh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fresh)
+        self.alert(0)
+        self.assertEqual(fresh.stuck_alert(self.NOW + 150, self.MEM, 0, send=self.sent.append), self.LEFTOVER,
+                         "a reload never forgets the first held pulse")
+        self.assertIsNone(fresh.stuck_alert(self.NOW + 300, self.MEM, 0, send=self.sent.append))
+        self.assertIsNone(self.alert(450))
+        self.assertEqual(len(self.sent), 1, "a reload never repeats the text")
+        (self.base / "stuck-alert.json").write_text("{not json")
+        self.assertIsNone(self.alert(600), "an unreadable file is no state: one held pulse")
+        self.assertEqual(self.alert(750), self.LEFTOVER)
+
 
 class ProdErrorsTest(unittest.TestCase):
     """Job 769: prod_errors_tick sweeps an opted-in project's Vercel production errors into its backlog once a day."""

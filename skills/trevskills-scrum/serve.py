@@ -4623,16 +4623,22 @@ STUCK_ALERT_PULSES = 2  # stuck_alert: held pulses in a row with 0 sessions befo
 STUCK_ALERT_CLEAR = 6  # stuck_alert: clear pulses in a row that end an episode (a one-pulse dip never texts twice)
 STUCK_ALERT_REPEAT_S = 3 * 3600  # stuck_alert: still held this long after the last text: text once more
 DEV_SERVER_RE = re.compile(r"\bnext(-server\b| dev\b)|\bvite\b|\b(npm|pnpm|yarn|bun) (run )?dev\b|webpack-dev-server")
+SYSTEM_PATHS = ("/System/", "/usr/libexec/", "/usr/sbin/", "/sbin/", "/Library/Apple/")  # stuck_process: never kill
 
 
 def stuck_process(why: str) -> str:
     """stuck_alert's `Biggest by memory: <name>, pid <pid>, <GB> GB. Fix: kill <pid>` clause for a memory machine_ok
-    reason (PULSE_GATES ram, vm_pressure, swap), else "". The biggest process by resident memory comes from one
-    `ps -axo pid=,ppid=,uid=,rss=,pcpu=,command=` (no shell, 10 s); ps failing gives "". <name> is the program's
-    basename (command_head) and its first argument (a path argument by its basename), never the rest; with ppid 1 and
-    a DEV_SERVER_RE command it reads `leftover dev server <name>`."""
-    if next((t for pre, t in PULSE_GATES if pre in why), None) not in ("ram", "vm_pressure", "swap"):
+    reason (PULSE_GATES ram, vm_pressure, swap), `Biggest by CPU: <name>, pid <pid>, <N>% CPU, <GB> GB. Fix: ...` for a
+    CPU one (cpu_busy, cpu_load), else "". The biggest process by resident memory (CPU for a CPU reason) comes from one
+    `ps -axo pid=,ppid=,uid=,rss=,pcpu=,command=` (no shell, 10 s; uid tells this user's process from another's); ps
+    failing gives "". <name> is the program's basename (command_head) and its first argument (a path argument by its
+    basename), never the rest; with ppid 1 and a DEV_SERVER_RE command it reads `leftover dev server <name>`. Never
+    `kill` for serve.py itself, a claude process (board._is_claude), a system process (uid under 500 or a SYSTEM_PATHS
+    program) or another user's process: the clause ends with which one it is instead."""
+    tok = next((t for pre, t in PULSE_GATES if pre in why), None)
+    if tok not in ("ram", "vm_pressure", "swap", "cpu_busy", "cpu_load"):
         return ""
+    cpu = tok.startswith("cpu")
     try:
         out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,rss=,pcpu=,command="], capture_output=True, text=True,
                              timeout=10)
@@ -4647,12 +4653,18 @@ def stuck_process(why: str) -> str:
             continue
     if not rows:
         return ""
-    pid, ppid, uid, rss, pcpu, cmd = max(rows, key=lambda r: r[3])
+    pid, ppid, uid, rss, pcpu, cmd = max(rows, key=lambda r: r[4] if cpu else r[3])
     prog, rest = command_head(cmd)
     arg = next((w for w in rest if w), "")
     name = " ".join(w for w in (os.path.basename(prog), os.path.basename(arg) if "/" in arg and arg[0] != "-" else arg) if w)
     label = "leftover dev server " if ppid == 1 and DEV_SERVER_RE.search(cmd) else ""
-    return f"Biggest by memory: {label}{name}, pid {pid}, {rss / 1048576:.1f} GB. Fix: kill {pid}"
+    size = f"{pcpu:.0f}% CPU, {rss / 1048576:.1f} GB" if cpu else f"{rss / 1048576:.1f} GB"
+    keep = ("the scrum server" if pid == os.getpid() or os.path.basename(arg) == "serve.py"
+            else "a claude session" if board._is_claude(cmd)
+            else "a system process" if uid < 500 or prog.startswith(SYSTEM_PATHS)
+            else "another user's process" if uid != os.getuid() else None)
+    lead = f"Biggest by {'CPU' if cpu else 'memory'}: {label}{name}, pid {pid}, {size}"
+    return f"{lead}, {keep}." if keep else f"{lead}. Fix: kill {pid}"
 
 
 def stuck_alert(now: float, why: str | None, sessions: int, send=None) -> str | None:
@@ -4688,9 +4700,20 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None) -> str | 
     except (OSError, IndexError):
         handle = ""
     script = Path.home() / ".claude" / "scripts" / "imsg-send.sh"
+    missing = "alert-to.txt" if not handle else "imsg-send.sh" if not script.is_file() else None
+    if missing:
+        print(f"watchdog: stuck alert: no {missing}, not texted: {why}", file=sys.stderr, flush=True)
+        board.log_process("Stuck alert", "unsent", reason=why, missing=missing)
+        return None
     clause = stuck_process(why)
     text = f"This Mac stopped starting scrum jobs and none are running. Cause: {why}.{' ' + clause if clause else ''}"
-    (send or (lambda argv: subprocess.run(argv, capture_output=True, timeout=30, check=False)))([str(script), handle, text])
+    try:
+        (send or (lambda argv: subprocess.run(argv, capture_output=True, timeout=30, check=False)))([str(script), handle, text])
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"watchdog: stuck alert: {e}", file=sys.stderr, flush=True)
+        board.log_process("Stuck alert", "failed", reason=why, error=str(e))
+        return None
+    board.log_process("Stuck alert", "sent", reason=why)
     return text
 
 
