@@ -2817,6 +2817,39 @@ def set_colour(root: Path, value) -> tuple[int, dict]:
     return 200, {"colour": colour}
 
 
+PROJECT_NOTES_SEEN: set[str] = set()  # "<project>/<id>" done jobs whose spec.md project_notes_tick has read
+
+
+def project_notes_tick(project, root, jobs) -> None:
+    """Job 1369: for each `done` job not in PROJECT_NOTES_SEEN, read jobs/<id>/spec.md and call board.cmd_project_note
+    under PROJECT_MD_LOCK once per `Project note: <line>` line (an optional leading `- `) in its `## Scope` section.
+    A spec.md that does not exist yet (a shop job before Artifacts home) is retried next tick; once read, the job is
+    never read again in this process, and cmd_project_note skips a line already in project.md, so a restart adds no
+    second copy. A SystemExit or OSError prints one `project-notes: <project>: <id>: <error>` line and goes on."""
+    for job in jobs:
+        key = f"{project}/{job.get('id')}"
+        if job.get("stage") != "done" or key in PROJECT_NOTES_SEEN:
+            continue
+        try:
+            text = (Path(root) / "jobs" / board.check_id(job["id"]) / "spec.md").read_text()
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, SystemExit) as e:  # unreadable, not UTF-8, or a bad id: never retried
+            PROJECT_NOTES_SEEN.add(key)
+            print(f"project-notes: {project}: {job.get('id')}: {e}", file=sys.stderr, flush=True)
+            continue
+        PROJECT_NOTES_SEEN.add(key)
+        for raw in (board.md_section(text, "Scope") or "").splitlines():
+            line = raw.strip().removeprefix("- ")
+            if not line.startswith("Project note:") or not (note := line[len("Project note:"):].strip()):
+                continue
+            try:
+                with PROJECT_MD_LOCK:
+                    board.cmd_project_note(root, note)
+            except (SystemExit, OSError) as e:
+                print(f"project-notes: {project}: {job['id']}: {e}", file=sys.stderr, flush=True)
+
+
 def claimable_count(root: Path) -> int:
     """Backlog lines `next` could claim: open, no Human setup, no open prerequisite, no open origin job."""
     state = board.read_board(root)
@@ -4146,6 +4179,10 @@ def watchdog_tick():
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
             cloud_tick(project, root, jobs)
+            try:  # its own guard: a project note failure must not skip shop_tick
+                project_notes_tick(project, root, jobs)
+            except (Exception, SystemExit) as e:
+                print(f"watchdog: {project}: project notes: {e}", file=sys.stderr, flush=True)
             try:  # its own guard: a shop failure must not skip prune_worktrees or the next project
                 if shop_tick(project, repo, root):
                     write_shop_room()  # a slot was just taken
