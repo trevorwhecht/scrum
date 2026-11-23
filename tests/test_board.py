@@ -12554,6 +12554,24 @@ class ProcessHealthTest(unittest.TestCase):
             card(1795309200, "main", 10), card(1795309200 + 20 * H, "owa", 5)]))  # main held to reset; owa held later
         self.assertEqual(self.run_health("001")["metrics"]["overburned_windows"]["jobs"], [])
 
+    def test_overburned_multi_account_reads_configured_accounts(self):
+        self.board()
+        self.digest("001")
+        H = 3600
+        accs = Path(self.tmp.name) / "accs"
+        (accs / "owa").mkdir(parents=True)
+        env = {"SCRUM_ACCOUNTS": json.dumps([["main", str(accs / "main"), None], ["owa", str(accs / "owa"), None]])}
+        drained = {"window": "seven_day", "resets_at": 1795309200, "budget": {
+            "left_at_reset_pct": 0, "cap_idle_secs": 58 * H, "hit_90_at": 1795309200 - 70 * H}}
+        # staggered resets: this digest holds only main's card; owa has none, so it never held and main is not flagged
+        self.put("digests/001/windows.json", json.dumps([{**drained, "account": "main"}]))
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(self.run_health("001")["metrics"]["overburned_windows"]["jobs"], [])
+        # an older digest whose cards name no account keeps the single-account rule
+        self.put("digests/001/windows.json", json.dumps([drained]))
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(self.run_health("001")["metrics"]["overburned_windows"]["jobs"], ["seven_day-1795309200"])
+
     def unused_with_pulse(self, cards, rows):
         """unused_windows' jobs for windows.json `cards` with pulse.log rows (t, {project: auto})."""
         self.board()
