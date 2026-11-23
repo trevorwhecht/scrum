@@ -4165,8 +4165,23 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             for phrase in ("`$F/jobs/$ID/preview.md`", "`- <absolute path>`", files, "replacing any older preview.md"):
                 self.assertIn(phrase, body, (step, phrase))
             self.assertLess(body.index("preview.md"), body.index("B ask $ID"), step)
-        for kind, job in (("edit-reel", "1364-edit-project-edit-reel-instagram-print-r"),
-                          ("edit-vector", "1365-edit-project-edit-vector-and-edit-photo"),
+        # Job 1364: edit-reel runs the 8 steps of pipeline-handoff.md "Reel flow", after a Folder and Ledger preamble.
+        reel = kind_files["edit-reel"]
+        self.assertNotIn("not built yet", reel)
+        names = ("Clips", "Log", "Cut", "Check", "Review", "Edits build", "Final approval", "His notes")
+        self.assertEqual(re.findall(r"^(\d+)\. \*\*([^*]+?)\.\*\*", reel, re.M),
+                         [(str(n), name) for n, name in enumerate(names, 1)])
+        preamble = reel[:reel.index("\n1. **Clips.**")]
+        for phrase in ("**Folder.**", "**Ledger.**", "Reel project: ", "`$F/jobs/$ID/reel.md`",
+                       "`~/Developer/vid-img-editing/motion/video/instaReels/<name>`",
+                       "`~/Developer/vid-img-editing/motion/notes/print-reels.md`",
+                       "`~/Developer/vid-img-editing/motion/.venv/bin/python <instaReels>/reel.py ...`"):
+            self.assertIn(phrase, preamble, phrase)
+        bad = self.section(preamble, "**Bad folder:**", "\n")
+        for phrase in ("`/` or `..`", "starts nothing", "stop.md", "--a \"Send back with a note=rework $ID \\\"Reel project: <name>\\\"\"",
+                       "--b \"Remove this job=abort $ID --cascade\" --title BUILDER_BLOCKED"):
+            self.assertIn(phrase, bad, phrase)
+        for kind, job in (("edit-vector", "1365-edit-project-edit-vector-and-edit-photo"),
                           ("edit-photo", "1365-edit-project-edit-vector-and-edit-photo")):
             body = [l for l in kind_files[kind].splitlines()[1:] if l.strip()]
             self.assertEqual(len(body), 1, (kind, body))  # a one-line stub until its job lands
