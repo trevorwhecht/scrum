@@ -47,7 +47,7 @@ def fn_body(text, name):
 def meter_globals(text):
     """renderMachine's globals: nothing focused, and no shop Mac's Cool down POST in flight (job 1185)."""
     line = lambda s: text[text.index(s):text.index("\n", text.index(s))]
-    return "const document = {activeElement: null};\n" + line("const shopCoolPending = ") + "\n" + line("let machineLast = ") + "\n"
+    return "const document = {activeElement: null};\n" + line("const shopCoolPending = ") + "\n" + line("let machineLast = ") + "\n" + line("const shopNoteOpen = ") + "\n"
 
 
 def cool(worker="shopmac"):
@@ -365,8 +365,8 @@ class MachineMeter(unittest.TestCase):
         shown = "Shop shopmac: onewitharts: 1882-x: clone failed on shopmac: error: Your local changes &lt;b&gt; &amp; more"
         note2 = "Shop mac2: mm: 043-a: set aside a.ts on mac2 (git stash)"
         self.assertEqual(out, [
-            self.METER + ring("shopmac") + ring("mac2") + f'<span class="shopnote danger" title="{shown}">{shown}</span>'
-            + f'<span class="shopnote ok" title="{note2}">{note2}</span>' + hog,
+            self.METER + ring("shopmac") + ring("mac2") + f'<span class="shopnote danger" data-shop="shopmac" tabindex="0" role="button" aria-expanded="false" title="{shown}">{shown}</span>'
+            + f'<span class="shopnote ok" data-shop="mac2" tabindex="0" role="button" aria-expanded="false" title="{note2}">{note2}</span>' + hog,
             self.METER + ring("shopmac") + hog])
         text = DASHBOARD.read_text()
         rule = re.search(r"#meters \.shopnote\{[^}]*\}", text)
@@ -376,6 +376,39 @@ class MachineMeter(unittest.TestCase):
         meter = re.search(r'<span id="machine"[^>]*>', text).group(0)
         self.assertIn("each shop Mac's last failed dispatch step (red, with git's error for a clone) or the files it set "
                       "aside with git stash", meter)
+
+    def test_machine_meter_shop_note_toggle(self):
+        """Job 1421: a tap, Enter or Space on a cut shop note opens it (class open, aria-expanded true) and again cuts it back;
+        the choice survives the next render of the same note, and a changed note text renders cut again."""
+        text = DASHBOARD.read_text()
+        rule = re.search(r"#meters \.shopnote\.open\{[^}]*\}", text)
+        self.assertIsNotNone(rule)
+        for want in ("white-space:normal", "overflow-wrap:anywhere"):
+            self.assertIn(want, rule.group(0))
+        handler = fn_body(text, "shopNoteToggle")
+        at = NOW - 40
+        mk = lambda t: {"name": "shopmac", "free_ram_pct": None, "cpu_load_pct": None, "cpu_cores": None, "at": at,
+                        "note": {"text": t, "kind": "failed", "at": at}}
+        body = (handler + "\n"
+                "const note = () => (el.innerHTML.match(/<span class=\"shopnote[^>]*>/) || [''])[0];\n"
+                "const ev = (type, key) => ({type, key, preventDefault() {}, target: {closest: sel => sel === '.shopnote' ? {dataset: {shop: 'shopmac'}} : null}});\n"
+                "const draw = t => renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, verdict: null, shop: [" + json.dumps(mk("a")) + "].map(x => ({...x, note: {...x.note, text: t}}))});\n"
+                "const out = [];\n"
+                "draw('long A'); out.push(note());\n"
+                "shopNoteToggle(ev('click')); out.push(note());\n"
+                "draw('long A'); out.push(note());\n"
+                "draw('other B'); out.push(note());\n"
+                "draw('long A'); out.push(note());\n"
+                "shopNoteToggle(ev('click')); draw('long A'); out.push(note());\n"
+                "shopNoteToggle(ev('keydown', 'Enter')); out.push(note());\n"
+                "shopNoteToggle(ev('keydown', ' ')); out.push(note());\n"
+                "shopNoteToggle(ev('keydown', 'a')); out.push(note());\n"
+                "console.log(JSON.stringify(out));")
+        out = self.node_meter(body)
+        cut = lambda: '<span class="shopnote danger" data-shop="shopmac" tabindex="0" role="button" aria-expanded="false" title='
+        opened = '<span class="shopnote danger open" data-shop="shopmac" tabindex="0" role="button" aria-expanded="true" title='
+        starts = [o[:len(opened)] if "open" in o else o[:len(cut())] for o in out]
+        self.assertEqual(starts, [cut(), opened, opened, cut(), opened, cut(), opened, cut(), cut()])
 
     def test_machine_meter_group_titles(self):
         """Row 1's groups each start with a plain title: This Mac, then Shop and the worker's name (escaped), even with
