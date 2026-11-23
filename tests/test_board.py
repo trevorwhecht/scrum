@@ -4334,6 +4334,27 @@ class BoardTest(unittest.TestCase):
         items = board.backlog_items(self.root)
         self.assertEqual((items[-1]["done"], items[-1]["text"]), (False, "Short title with the full details on line two"))
 
+    def test_requeue_reason_naming_unmerged_jobs_adds_after_markers(self):
+        repo = self.root.parent.name
+        ids = {n: board.cmd_new(self.root, f"dep {n}") for n in (1, 2, 3)}
+        board.cmd_set(self.root, ids[3], ["stage=done"])
+        nums = [int(i.split("-")[0]) for i in ids.values()]
+        job_id = board.cmd_new(self.root, "Needs deps")
+        (self.root / "jobs" / job_id / "feature.md").write_text("Needs deps\n")
+        reason = f"requeue: depends on jobs {nums[0]}-{nums[2]}, not merged"
+        board.cmd_abort(self.root, job_id, requeue=True, reason=reason)
+        item = board.backlog_items(self.root)[-1]
+        self.assertEqual(item["after"], [f"{repo}:{ids[1]}", f"{repo}:{ids[2]}"])  # the done job and the job itself are left out
+        self.assertEqual((item["text"], item["done"]), ("Needs deps", False))
+
+    def test_requeue_reason_without_jobs_or_other_reason_adds_no_marker(self):
+        dep = board.cmd_new(self.root, "dep")
+        for reason in ("requeue: spec writer produced nothing", f"obsolete: depends on {dep.split('-')[0]}"):
+            job_id = board.cmd_new(self.root, "plain")
+            (self.root / "jobs" / job_id / "feature.md").write_text("plain\n")
+            board.cmd_abort(self.root, job_id, requeue=True, reason=reason)
+            self.assertEqual(board.backlog_items(self.root)[-1]["after"], [])
+
     def test_abort_refuses_done_or_already_aborted_jobs(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["stage=done"])
@@ -8367,6 +8388,12 @@ class CloudSyncTest(unittest.TestCase):
                          ("aborted", self.URL, "requeue: spec writer produced nothing"))
         self.assertEqual(self.backlog_texts(), ["Cloud thing"])
         self.assertEqual(self.open_manual(), [])
+
+    def test_requeue_comment_naming_unmerged_job_adds_after_marker(self):
+        dep = board.cmd_new(self.root, "Prereq")
+        num = dep.split("-")[0]
+        self.self_abort(f"requeue: depends on jobs {num}, not merged")
+        self.assertEqual(board.read_backlog(self.root)[1][-1]["after"], [f"{self.root.parent.name}:{dep}"])
 
     def test_obsolete_and_already_fixed_comments_abort_without_requeue(self):
         for line in ("obsolete: nothing to change", "looks already fixed: see main",
