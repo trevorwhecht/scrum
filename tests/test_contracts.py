@@ -4233,6 +4233,12 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                            "--b \"Send back with a note=rework $ID", "--c \"Remove this job=abort $ID --cascade\"",
                            "With no new export, ask the same question again: never a silent stop"):
                 self.assertIn(phrase, edits, phrase)
+        # Criterion 4: the Edits step never takes Trevor's cursor unasked.
+        for phrase in ("stepped away", "--a \"I have stepped away, go=resume $ID\"", "computer-use.lock",
+                       "Never remove the lock", "HIDIdleTime", "Never an idle timer"):
+            self.assertIn(phrase, edits, phrase)
+        self.assertLess(edits.index("to stop.md"), edits.index("B ask $ID"))
+        self.assertLess(edits.index("B ask $ID"), edits.index("--mcp-config"))
         for kind, job in (("edit-vector", "1365-edit-project-edit-vector-and-edit-photo"),
                           ("edit-photo", "1365-edit-project-edit-vector-and-edit-photo")):
             body = [l for l in kind_files[kind].splitlines()[1:] if l.strip()]
