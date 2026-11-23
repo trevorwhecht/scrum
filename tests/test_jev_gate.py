@@ -231,11 +231,28 @@ class JevGateTest(unittest.TestCase):
         self.assertEqual((out, f[4]), ("opus", "opus"))
         self.assertEqual(len(self.sent), 1)
 
-    def test_spec_model_ignores_complex_header(self):
+    def test_spec_model_complex_no_in_feature_skips_jev(self):
         (self.job / "feature.md").write_text("# Feature\nComplex: no\n\n## Body\nAdd a button")
+        out, f = self.gate("spec-model")
+        self.assertEqual((out, f[1], f[2], f[3], f[4]), ("sonnet", "spec-model", "-", "Complex: no (feature.md)", "sonnet"))
+        self.assertEqual(self.sent, [])
+
+    def test_spec_model_still_asks_jev(self):
+        ask = lambda s, q, *a: {"q": {"type": "score", "score": 2.3}}
+        for name, text in (("yes", "# Feature\nComplex: yes\n\n## Body\nAdd a button"),
+                           ("below heading", "# Feature\n\n## Body\nComplex: no\nAdd a button")):
+            with self.subTest(name):
+                self.sent.clear()
+                (self.job / "feature.md").write_text(text)
+                out, f = self.gate("spec-model", ask=ask)
+                self.assertEqual((out, f[4]), ("opus", "opus"))
+                self.assertEqual(len(self.sent), 1)
+
+    def test_spec_model_ignores_spec_md_complex(self):
+        (self.job / "feature.md").write_text("# Feature\n\n## Body\nAdd a button")
         (self.job / "spec.md").write_text("# Spec\nComplex: no\n")
         out, f = self.gate("spec-model", ask=lambda s, q, *a: {"q": {"type": "score", "score": 2.3}})
-        self.assertEqual((out, f[1], f[4]), ("opus", "spec-model", "opus"))
+        self.assertEqual(out, "opus")
         self.assertEqual(len(self.sent), 1)
 
     def test_promote_logs_reason(self):
