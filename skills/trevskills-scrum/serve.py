@@ -1658,7 +1658,8 @@ E2E_FULL_LOCKFILES = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.l
 def e2e_full_worktree(repo, root, head) -> Path:
     """The detached worktree <repo>/.claude/worktrees/e2e-full at head, where e2e_full_run runs, so a dev server in the
     main checkout never holds its Next dev lock. Created once with `git worktree add --detach`, later moved with
-    `git checkout --detach` run inside it. <repo>/.env.local, when present, is copied in on every call. PROJECT's
+    `git checkout --detach` run inside it. Every top-level <repo>/.env* regular file git does not track
+    (`git ls-files --error-unmatch`, as lanes/newjob.md links them) is copied in on every call. PROJECT's
     Install command runs in it when it was just created or a lockfile differs between its old HEAD and head
     (`git diff --name-only`); an empty or `none` Install runs nothing. A failed git call or a failed install
     (the worktree is removed first, so the next call reinstalls) raises (ValueError, OSError or RuntimeError)."""
@@ -1674,9 +1675,14 @@ def e2e_full_worktree(repo, root, head) -> Path:
         wt.parent.mkdir(parents=True, exist_ok=True)
         board._git(repo, "worktree", "prune")
         board._git(repo, "worktree", "add", "--detach", "--force", str(wt), head)
-    env_local = Path(repo) / ".env.local"
-    if env_local.is_file():
-        shutil.copyfile(env_local, wt / ".env.local")
+    for env in sorted(Path(repo).glob(".env*")):  # lanes/newjob.md's set: top-level, untracked, regular files
+        if not env.is_file():
+            continue
+        try:
+            board._git(repo, "ls-files", "--error-unmatch", "--", env.name)
+            continue  # tracked: the worktree's checkout already holds the committed copy
+        except ValueError:
+            shutil.copyfile(env, wt / env.name)
     install = e2e_command(root, "Install")
     if install and install.lower() != "none":
         changed = old is None or any(Path(n).name in E2E_FULL_LOCKFILES
