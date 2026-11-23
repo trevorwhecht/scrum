@@ -2496,6 +2496,9 @@ def cloud_tick(project, root, jobs, now=None):
 SHOP_RETRY_EVERY = 600  # seconds shop_tick calls a worker no shop function after a failed dispatch step there
 # ponytail: per-worker backoff; make it per-step or per-project if one project's clone failure stalls the others
 SHOP_RETRY_AT = {}  # worker alias -> time.time() before which shop_tick sends that worker nothing
+# worker alias -> its last shop_tick note {"text", "kind": "failed" | "stashed", "at"}; machine_status sends it. Memory only:
+# watchdog_loop runs shop_tick in this process, and a restart clears it.
+SHOP_NOTES = {}
 SHOP_ENDED = "requeue: shop session ended without a PR"
 
 
@@ -2566,7 +2569,11 @@ def shop_tick(project, repo, root) -> bool:
     with one on it, heavy jobs in the pool are skipped, the first light one is sent, and new work claims only a light line.
     A job tagged Runs on main (board.tag_runs_on; Jev is asked, if at all, only here, with a worker free) is never sent: it is skipped and the next one is tried (job 1155). A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
     profile_copy and start run on that worker; a failed step puts a claimed child back to waiting, prints one
-    `shop: <project>: <id>: <step> failed on <alias>` line and holds that worker for SHOP_RETRY_EVERY. With nothing in
+    `shop: <project>: <id>: <step> failed on <alias>` line (clone adds `: <git's error>`) and holds that worker for
+    SHOP_RETRY_EVERY. A failed clone on a worker with no shop job (board.shop_jobs_by_worker) first has shop.stash_dirty
+    set the clone's modified tracked files aside, prints a `set aside <paths> on <alias> (git stash)` line and retries
+    the clone once. Each failure or stash is that worker's SHOP_NOTES note; a dispatch that worked clears it unless the
+    same tick stashed. With nothing in
     that pool but main jobs (job 1141), new work goes instead, by auto_continue_tick's rules: a project with an `- Auto continue:`
     line, its run-all not running, a claimable backlog line (finish_first never holds it: this Mac's queue waits are not the shop's, and shop work runs on its own CPU and e2e.lock); board.cmd_next(shop=) claims the
     top item under the board lock (cool-down never refuses it) that is not lilguy (`Lane: lilguy` in its text or its
@@ -2646,7 +2653,11 @@ def shop_tick(project, repo, root) -> bool:
             return False
     job_id, claimed = job["id"], "spec" if child else job["stage"]
 
-    def fail(step):
+    def note(text, kind):
+        print(f"shop: {text}", file=sys.stderr, flush=True)
+        SHOP_NOTES[alias] = {"text": text, "kind": kind, "at": time.time()}
+
+    def fail(step, why=""):
         if child:
             try:
                 board.cmd_set(root, job_id, ["stage=waiting"], expect="spec")
@@ -2655,7 +2666,7 @@ def shop_tick(project, repo, root) -> bool:
                 pass  # moved meanwhile: its new owner keeps it
         elif new:
             hold_start(root, job_id)
-        print(f"shop: {project}: {job_id}: {step} failed on {alias}", file=sys.stderr, flush=True)
+        note(f"{project}: {job_id}: {step} failed on {alias}" + (f": {why}" if why else ""), "failed")
         SHOP_RETRY_AT[alias] = time.time() + SHOP_RETRY_EVERY
         return False
 
@@ -2669,8 +2680,19 @@ def shop_tick(project, repo, root) -> bool:
         url = board._git(repo, "remote", "get-url", "origin").decode().strip()
     except (ValueError, OSError, subprocess.SubprocessError):
         url = ""
-    if not shop.clone(repo.name, url, alias=alias):
-        return fail("clone")
+    ok, why = shop.clone(repo.name, url, alias=alias)
+    stashed = False
+    try:
+        idle = not ok and board.shop_jobs_by_worker()[alias] == 0  # no shop session there: its clone's edits are no one's work
+    except SystemExit:  # a bad board.json hides its shop jobs: never stash then
+        idle = False
+    if idle:
+        if paths := shop.stash_dirty(repo.name, job_id, alias=alias):
+            note(f"{project}: {job_id}: set aside {', '.join(paths)} on {alias} (git stash)", "stashed")
+            stashed = True
+            ok, why = shop.clone(repo.name, url, alias=alias)  # once: a second failure is final
+    if not ok:
+        return fail("clone", why)
     if shop.env_copy(repo.name, str(repo), alias=alias) == "failed":
         return fail("env copy")
     if shop.profile_copy(repo.name, str(repo), alias=alias) == "failed":
@@ -2699,6 +2721,8 @@ def shop_tick(project, repo, root) -> bool:
         pass
     if not child:
         unqueue(root, job)
+    if not stashed:
+        SHOP_NOTES.pop(alias, None)
     print(f"shop: {project}: {job_id}: started on {alias} (pid {pid}, account {account})", flush=True)
     return True
 
@@ -3979,14 +4003,19 @@ HOG_READINGS: dict[tuple[int, str], dict] = {}  # (pid, command) -> {"readings":
 HOGS: list[dict] = []  # report_hogs' last list, replaced whole (never edited in place) so machine_status can read it
 
 
-def hog_name(cmd: str) -> str:
-    """The basename of the longest leading run of cmd's space-separated words that is a file (a Mac app binary's path
-    holds spaces, so Chrome's helper reads Google Chrome Helper, not Google), else of its first word ("" for "")."""
+def command_head(cmd: str) -> tuple[str, list[str]]:
+    """(cmd's program: the longest leading run of its space-separated words that is a file (a Mac app binary's path
+    holds spaces), else its first word; the words after it)."""
     words = cmd.split(" ")
     for n in range(len(words), 0, -1):
         if os.path.isfile(" ".join(words[:n])):
-            return os.path.basename(" ".join(words[:n]))
-    return os.path.basename(words[0])
+            return " ".join(words[:n]), words[n:]
+    return words[0], words[1:]
+
+
+def hog_name(cmd: str) -> str:
+    """The basename of cmd's program (command_head: Chrome's helper reads Google Chrome Helper, not Google; "" for "")."""
+    return os.path.basename(command_head(cmd)[0])
 
 
 def report_hogs(procs: list[tuple[int, int, float, str]] | None = None, now: float | None = None) -> list[dict]:
@@ -4262,7 +4291,8 @@ def watchdog_tick():
     Then report_hogs lists, never stops, each process outside the scrum over one core for 10+ minutes, for the meter.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
-    6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard.
+    6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard,
+       and its stuck_alert texts Trevor when machine_ok holds every start with nothing running.
     Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard, then runs e2e_lock_reap,
     then write_shop_room (shop-room.json, which cmd_ready reads), written again after a shop_tick that dispatched,
     then agent_links_tick (re-runs install.sh when a scrum agent link is bad, in its own guard), then hot_stop_tick once,
@@ -4538,6 +4568,8 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     run-all, SWEEP_HELD, a machine or usage hold; play_queue_tick's queued_launch:<id> for a launch spawn still holds) in the last PULSE_HOLD_TTL_S adds `held:<token>` to that project's gates, which
     board.write_pulse counts as gated even beside claimable work. guard: the first project's machine_ok(claim=False) refusal, else the allowance reason when
     board.pick_account has no account or the live count reaches its allowance (the 5h pace included), else null.
+    stuck_alert gets the machine_ok refusal alone (never the allowance reason) and the same sessions count, in its own
+    guard.
     started: spawn's PULSE_STARTS since the last tick (copied and cleared in one step under PULSE_STARTS_LOCK; [] when
     serve.py started nothing). A project whose board.json is unreadable is left out. Unknown readings are null. When the first line is
     older than board.PULSE_KEEP_SECS plus a day (or unreadable), the file is first rewritten (tmp + os.replace)
@@ -4580,8 +4612,9 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     except (Exception, SystemExit) as e:
         print(f"watchdog: pulse: gates: {e}", file=sys.stderr, flush=True)
         gates = None
+    why = None  # machine_ok's refusal alone: stuck_alert never texts on a usage hold
     try:
-        guard = board.machine_ok(next(iter(names.values())) / "scrum", claim=False) if names else None
+        why = guard = board.machine_ok(next(iter(names.values())) / "scrum", claim=False) if names else None
         if not guard:
             live = board.live_sessions()
             acc, allow = board.pick_account(now, live)
@@ -4589,7 +4622,12 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     except (Exception, SystemExit) as e:
         print(f"watchdog: pulse: guard: {e}", file=sys.stderr, flush=True)
         guard = None
-    line = {"t": int(now), "sessions": board.live_sessions(), "cpu_load": board.cpu_load_pct(),
+    sessions = board.live_sessions()
+    try:
+        stuck_alert(now, why, sessions)
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: pulse: stuck alert: {e}", file=sys.stderr, flush=True)
+    line = {"t": int(now), "sessions": sessions, "cpu_load": board.cpu_load_pct(),
             "free_ram": board.free_ram_pct(), "swap": board.swap_used_pct(), "cooldown": board.cooling_down(),
             "u5h": usage["5h"], "u7d": usage["weekly"], "focus": next(iter(names), None), "projects": projects,
             "gates": gates, "guard": guard}
@@ -4612,6 +4650,112 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
         os.replace(tmp, path)
     with open(path, "a") as f:
         f.write(json.dumps(line) + "\n")
+
+
+STUCK_ALERT_PULSES = 2  # stuck_alert: held pulses in a row with 0 sessions before it texts (about 5 minutes)
+STUCK_ALERT_CLEAR = 6  # stuck_alert: clear pulses in a row that end an episode (a one-pulse dip never texts twice)
+STUCK_ALERT_REPEAT_S = 3 * 3600  # stuck_alert: still held this long after the last text: text once more
+DEV_SERVER_RE = re.compile(r"\bnext(-server\b| dev\b)|\bvite\b|\b(npm|pnpm|yarn|bun) (run )?dev\b|webpack-dev-server")
+SYSTEM_PATHS = ("/System/", "/usr/libexec/", "/usr/sbin/", "/sbin/", "/Library/Apple/")  # stuck_process: never kill
+
+
+def stuck_process(why: str) -> str:
+    """stuck_alert's `Biggest by memory: <name>, pid <pid>, <GB> GB. Fix: kill <pid>` clause for a memory machine_ok
+    reason (PULSE_GATES ram, vm_pressure, swap), `Biggest by CPU: <name>, pid <pid>, <N>% CPU, <GB> GB. Fix: ...` for a
+    CPU one (cpu_busy, cpu_load), else "". The biggest process by resident memory (CPU for a CPU reason) comes from one
+    `ps -axo pid=,ppid=,uid=,rss=,pcpu=,command=` (no shell, 10 s; uid tells this user's process from another's); ps
+    failing gives "". <name> is the program's basename (command_head) and its first argument (a path argument by its
+    basename), never the rest; with ppid 1 and a DEV_SERVER_RE command it reads `leftover dev server <name>`. Never
+    `kill` for serve.py itself, a claude process (board._is_claude), a system process (uid under 500 or a SYSTEM_PATHS
+    program) or another user's process: the clause ends with which one it is instead."""
+    tok = next((t for pre, t in PULSE_GATES if pre in why), None)
+    if tok not in ("ram", "vm_pressure", "swap", "cpu_busy", "cpu_load"):
+        return ""
+    cpu = tok.startswith("cpu")
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,rss=,pcpu=,command="], capture_output=True, text=True,
+                             timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    rows = []
+    for line in out.stdout.splitlines() if out.returncode == 0 else []:
+        p = line.split(None, 5)
+        try:
+            rows.append((int(p[0]), int(p[1]), int(p[2]), int(p[3]), float(p[4].replace(",", ".")), p[5]))
+        except (ValueError, IndexError):
+            continue
+    if not rows:
+        return ""
+    pid, ppid, uid, rss, pcpu, cmd = max(rows, key=lambda r: r[4] if cpu else r[3])
+    prog, rest = command_head(cmd)
+    arg = next((w for w in rest if w), "")
+    arg = os.path.basename(arg) if "/" in arg and arg[0] != "-" else arg  # a path argument by its basename
+    name = " ".join(w for w in (os.path.basename(prog), arg) if w)
+    label = "leftover dev server " if ppid == 1 and DEV_SERVER_RE.search(cmd) else ""
+    size = f"{pcpu:.0f}% CPU, {rss / 1048576:.1f} GB" if cpu else f"{rss / 1048576:.1f} GB"
+    keep = ("the scrum server" if pid == os.getpid() or arg == "serve.py"
+            else "a claude session" if board._is_claude(cmd)
+            else "a system process" if uid < 500 or prog.startswith(SYSTEM_PATHS)
+            else "another user's process" if uid != os.getuid() else None)
+    lead = f"Biggest by {'CPU' if cpu else 'memory'}: {label}{name}, pid {pid}, {size}"
+    return f"{lead}, {keep}." if keep else f"{lead}. Fix: kill {pid}"
+
+
+def stuck_alert(now: float, why: str | None, sessions: int, send=None) -> str | None:
+    """Text Trevor when this Mac holds every start with nothing running (job 1413). why is the first project's
+    board.machine_ok(claim=False) refusal (pulse_tick; never COOLING, never a usage hold). It fires when why is set
+    and sessions is 0 on STUCK_ALERT_PULSES pulses in a row, once an episode: a pulse with sessions > 0, or
+    STUCK_ALERT_CLEAR clear pulses in a row, ends it, and a hold still on STUCK_ALERT_REPEAT_S after the last text texts
+    once more. The state {"held", "clear", "sent"} (pulse counts in a row, capped at STUCK_ALERT_PULSES and
+    STUCK_ALERT_CLEAR; the last text's time) lives in stuck-alert.json beside pulse.log, so a reload neither repeats
+    nor forgets; an unreadable file is no state. It is written (tmp + os.replace) only when it changed (so a long hold
+    or a quiet day writes nothing), before any send. The one-line text starts `This Mac stopped
+    starting scrum jobs` (no `<word>:` before it: messageManager reads `<project>: <text>` self-texts as commands),
+    names why, then stuck_process's clause (its one ps runs only on the pulse that fires), and goes to the first line
+    of alert-to.txt (beside pulse.log) through ~/.claude/scripts/imsg-send.sh by argv, 30 s timeout, check=False. A
+    missing or empty alert-to.txt, or a missing script, sends nothing and prints one `watchdog: stuck alert:` line, as
+    a send that raises does. Each fire logs board.log_process("Stuck alert", sent / unsent / failed, reason=why). send
+    (tests) replaces the run; under unittest nothing is sent or run without it. Returns the text it sent, else None."""
+    path = board.pulse_path().parent / "stuck-alert.json"
+    try:
+        old = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = {}  # unreadable: no state
+    old = old if isinstance(old, dict) else {}
+    num = lambda k: old[k] if board.is_num(old.get(k)) else None
+    held = min((num("held") or 0) + 1, STUCK_ALERT_PULSES) if why and why != board.COOLING and sessions == 0 else 0
+    clear = 0 if held else min((num("clear") or 0) + 1, STUCK_ALERT_CLEAR)
+    sent = None if sessions > 0 or clear >= STUCK_ALERT_CLEAR else num("sent")  # the episode ended
+    fire = held >= STUCK_ALERT_PULSES and (sent is None or now - sent >= STUCK_ALERT_REPEAT_S)
+    state = {"held": held, "clear": clear, "sent": now if fire else sent}
+    if state != old:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name("stuck-alert.json.tmp")
+        tmp.write_text(json.dumps(state))
+        os.replace(tmp, path)
+    if not fire or send is None and "unittest" in sys.modules:
+        return None
+    try:
+        handle = path.with_name("alert-to.txt").read_text(encoding="utf-8").splitlines()[0].strip()
+    except (OSError, IndexError):
+        handle = ""
+    script = Path.home() / ".claude" / "scripts" / "imsg-send.sh"
+    missing = "alert-to.txt" if not handle else "imsg-send.sh" if not script.is_file() else None
+    if missing:
+        print(f"watchdog: stuck alert: no {missing}, not texted: {why}", file=sys.stderr, flush=True)
+        board.log_process("Stuck alert", "unsent", reason=why, missing=missing)
+        return None
+    clause = stuck_process(why)
+    text = f"This Mac stopped starting scrum jobs and none are running. Cause: {why}.{' ' + clause if clause else ''}"
+    try:
+        argv = [str(script), handle, text]
+        send(argv) if send else subprocess.run(argv, capture_output=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"watchdog: stuck alert: {e}", file=sys.stderr, flush=True)
+        board.log_process("Stuck alert", "failed", reason=why, error=str(e))
+        return None
+    board.log_process("Stuck alert", "sent", reason=why)
+    return text
 
 
 COOLDOWN_CHIMED = False  # ponytail: in memory, so a serve.py restart during an idle cool-down may chime once more
@@ -4989,7 +5133,8 @@ def machine_status():
     """The dashboard's machine-health meter: board.machine_ok's readings, thresholds and verdict. Disk is read on this
     file's volume (the dashboard spans every project, and they share one disk). machine_ok re-reads each value (a few
     ms each) so its verdict is exactly the gate's, whatever checks it grows. "history" and each shop entry's are
-    machine_history's sparkline readings, and each shop entry's "cooldown" is that worker's own flag (job 1185).
+    machine_history's sparkline readings, and each shop entry's "cooldown" is that worker's own flag (job 1185); an
+    entry gets "note" (SHOP_NOTES: its last failed or stashed dispatch) only when it has one.
     "hogs" is the list the watchdog's last report_hogs stored (no scan here)."""
     r = lambda v: None if v is None else round(v, 1)
     now, ram, cpu = time.time(), r(board.free_ram_pct()), r(board.cpu_load_pct())
@@ -5003,7 +5148,8 @@ def machine_status():
             "cpu_cores": os.cpu_count(), "max_cpu_load_pct": board.MAX_CPU_LOAD_PCT,
             "restart_waiting": restart_blockers(), "history": machine_history("mac", ram, cpu, now),
             "shop": [{**s, "cooldown": board.cooling_down(s["name"]),
-                      "history": machine_history(("shop", s["name"]), s["free_ram_pct"], s["cpu_load_pct"], now)}
+                      "history": machine_history(("shop", s["name"]), s["free_ram_pct"], s["cpu_load_pct"], now),
+                      **({"note": n} if (n := SHOP_NOTES.get(s["name"])) else {})}
                      for s in shop_stats()], "hogs": HOGS}
 
 

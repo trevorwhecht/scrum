@@ -345,6 +345,38 @@ class MachineMeter(unittest.TestCase):
         self.assertIsNotNone(line)
         self.assertIn("display:block", line.group(0), "each hog on its own line under the groups")
 
+    def test_machine_meter_shop_note(self):
+        """Job 1415: a shop entry's note (serve.py SHOP_NOTES) is one line after the groups and before the hog lines:
+        red for a failed dispatch, plain for a stash, escaped, cut with … by CSS with the full line in its title."""
+        at = NOW - 40
+        down = {"name": "shopmac", "free_ram_pct": None, "cpu_load_pct": None, "cpu_cores": None, "at": at}
+        fail = {"text": "onewitharts: 1882-x: clone failed on shopmac: error: Your local changes <b> & more",
+                "kind": "failed", "at": at}
+        stash = {"text": "mm: 043-a: set aside a.ts on mac2 (git stash)", "kind": "stashed", "at": at}
+        hogs = [{"name": "python3", "pid": 1, "pct": 180, "minutes": 12}]
+        cases = [[{**down, "note": fail}, {**down, "name": "mac2", "note": stash}], [down]]
+        out = self.node_meter(f"console.log(JSON.stringify({json.dumps(cases)}.map(shop => {{\n"
+                              "  renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, verdict: null, "
+                              f"shop, hogs: {json.dumps(hogs)}}}); return el.innerHTML; }})));")
+        ring = lambda name: T(f"Shop {name}", f'<span class="ring none" role="img" style="--pct:0" aria-label="Shop {name} '
+                              f'unreachable · checked 40s ago" title="Shop {name} unreachable · checked 40s ago">—</span>'
+                              + L() + cool(name))
+        hog = '<span class="hog"><span class="hogname" title="python3">python3</span> 180% CPU</span>'
+        shown = "Shop shopmac: onewitharts: 1882-x: clone failed on shopmac: error: Your local changes &lt;b&gt; &amp; more"
+        note2 = "Shop mac2: mm: 043-a: set aside a.ts on mac2 (git stash)"
+        self.assertEqual(out, [
+            self.METER + ring("shopmac") + ring("mac2") + f'<span class="shopnote danger" title="{shown}">{shown}</span>'
+            + f'<span class="shopnote ok" title="{note2}">{note2}</span>' + hog,
+            self.METER + ring("shopmac") + hog])
+        text = DASHBOARD.read_text()
+        rule = re.search(r"#meters \.shopnote\{[^}]*\}", text)
+        self.assertIsNotNone(rule)
+        for want in ("display:block", "width:0;min-width:100%", "overflow:hidden", "text-overflow:ellipsis", "white-space:nowrap"):
+            self.assertIn(want, rule.group(0), "a long note ends in …, its full text in the title, and never widens the row")
+        meter = re.search(r'<span id="machine"[^>]*>', text).group(0)
+        self.assertIn("each shop Mac's last failed dispatch step (red, with git's error for a clone) or the files it set "
+                      "aside with git stash", meter)
+
     def test_machine_meter_group_titles(self):
         """Row 1's groups each start with a plain title: This Mac, then Shop and the worker's name (escaped), even with
         one worker; the title is uppercased by CSS in the muted colour, so the markup keeps the name as configured."""
