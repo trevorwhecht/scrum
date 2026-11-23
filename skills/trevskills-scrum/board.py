@@ -3230,9 +3230,10 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
             claim = float((folder / "claimed-at.txt").read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
             claim = None
-        first = None if start or not spec_at else claim if claim and claim > spec_at else next((r for r in runs if r > spec_at), None)
-        start, queue = (first, first - spec_at) if first else (spec_at, 0 if spec_at else None)
-    pieces = [(spec_at, spec_at + queue)] if queue else []  # each (from, to) the Queue adds up, for `after depends_on`
+        base = spec_at or created  # no spec.md (a lilguy job): feature.md to the first run log is Queue
+        first = None if start or not base else claim if spec_at and claim and claim > spec_at else next((r for r in runs if r > base), None)
+        start, queue = (first, first - base) if first else (spec_at, 0 if spec_at else None)
+    pieces = [(base := spec_at or created, base + queue)] if queue else []  # each (from, to) the Queue adds up, for `after depends_on`
     times, hwaits, heads, prev = [], [], [], start or created
     mtimes = sorted(t for q in folder.rglob("*") if (t := _mtime(q))) if waits else []
     runs = _run_starts(root, job_id)
@@ -3252,6 +3253,14 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
             heads.append("")
     same = [n for n, a, b in zip(rounds[1:], heads, heads[1:]) if a and a == b]
     waits = sum(len(E2E_LOCK_RE.findall(t)) for t in _round_text(folder, "check.md")) + len(queued)
+    try:  # serve.py shop_tick: when the shop run was dispatched; its files come home at the end, so spec.md's mtime is no Spec end
+        shop_at = float((folder / "shop-at.txt").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        shop_at = None
+    if shop_at and (not created or shop_at < created):
+        shop_at = None
+    spec_at = shop_at or spec_at  # Spec ends at the dispatch, the Cloud column runs from it to done
+    cloud = done - shop_at if shop_at and done and done >= shop_at else None
     spec = spec_at - created if spec_at and created else None
     try:  # cmd_ready's claim: a BigBoy child's dependency wait counts as Queue, not Spec
         claim = float((folder / "claimed-at.txt").read_text(encoding="utf-8").strip())
@@ -3293,13 +3302,13 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
         after = min(sum(max(b - max(a, blocked), 0) for a, b in pieces), queue)
         queue_cell += f" ({_mins(after)} after depends_on)"
     cells = [job_id, _mins(wall), _mins(spec), queue_cell, gates, str(len(rounds)), paused + ", ".join(times) or "-",
-             ", ".join(hwaits) or "-", f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0"]
+             ", ".join(hwaits) or "-", f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0", _mins(cloud)]
     try:  # serve.py note_stall_hold: what held its stalls
         held = (folder / "stall-holds.txt").read_text(encoding="utf-8", errors="replace").split()
     except OSError:
         held = []
     if held:
-        cells[-1] += f" (held: {', '.join(held)})"
+        cells[-2] += f" (held: {', '.join(held)})"
     return cells, wall, len(rounds), len(same), waits, resume
 
 
@@ -3338,8 +3347,8 @@ def write_timing(root, digest_id, jobs):
     rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ()), human.get(j, ()), queue.get(j, ()), board)
             for j in jobs]
     lines = [f"# Timing: digest {digest_id}", "",
-             "| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls | Cloud |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     lines += ["| " + " | ".join(r[0]) + " |" for r in rows]
     lines += ["", "## Totals",
               f"Jobs: {len(rows)} · wall {_mins(sum(r[1] for r in rows if r[1]))} · rounds {sum(r[2] for r in rows)}"
