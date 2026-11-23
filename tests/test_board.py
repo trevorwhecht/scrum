@@ -14875,6 +14875,48 @@ class HeavyCapReasonTest(HeavyCapBase):
         self.assertEqual(board.heavy_cap_reason(self.root, {"id": "001-a", "stage": "build", "lane": "standard"}),
                          "heavy_cap(2/2): 2 heavy jobs on this Mac (002-b, 003-c)")
 
+    def test_interactive_alive_heavy_jobs_count(self):
+        """Job 1392: an interactive session (a tty on the job) fills a slot though live_sessions() is 0."""
+        self.live.return_value = 0
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard", "tty": "ttys001"},
+                  {"id": "002-b", "stage": "check", "lane": "standard", "tty": "ttys002"})
+        with mock.patch.object(board, "session_alive_fn", return_value=lambda job: True):
+            self.assertEqual(board.heavy_count(self.root), 2)
+            self.assertEqual(board.heavy_cap_reason(self.root), "heavy_cap(2/2): 2 heavy jobs on this Mac (001-a, 002-b)")
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard", "tty": "ttys001"})
+        with mock.patch.object(board, "session_alive_fn", return_value=lambda job: True):
+            self.assertEqual(board.heavy_count(self.root), 1)
+
+    def test_interactive_dead_or_no_tty_adds_nothing(self):
+        self.live.return_value = 0
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard", "tty": "ttys001"},
+                  {"id": "002-b", "stage": "check", "lane": "standard"})
+        with self.subTest("dead tty"):
+            self.assertEqual(board.heavy_count(self.root), 0)
+        with self.subTest("no tty, alive"), mock.patch.object(board, "session_alive_fn", return_value=lambda job: True):
+            self.assertEqual(board.heavy_count(self.root), 0 + 1)  # only 001-a has a tty
+
+    def test_interactive_not_double_counted(self):
+        self.live.return_value = 1
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard", "tty": "ttys001"},
+                  {"id": "002-b", "stage": "check", "lane": "standard"}, {"id": "003-c", "stage": "spec", "lane": "standard"})
+        with mock.patch.object(board, "session_alive_fn", return_value=lambda job: True):
+            self.assertEqual(board.heavy_count(self.root), 2)
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard", "tty": "ttys001"},
+                  {"id": "002-b", "stage": "check", "lane": "standard", "tty": "ttys002"})
+        self.live.return_value = 5
+        with mock.patch.object(board, "session_alive_fn", return_value=lambda job: True):
+            self.assertEqual(board.heavy_count(self.root), 2)
+
+    def test_interactive_job_leaves_itself_out(self):
+        self.live.return_value = 0
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard", "tty": "ttys001"},
+                  {"id": "002-b", "stage": "check", "lane": "standard", "tty": "ttys002"},
+                  {"id": "003-c", "stage": "spec", "lane": "standard", "tty": "ttys003"})
+        me = {"id": "001-a", "stage": "build", "lane": "standard", "tty": "ttys001"}
+        with mock.patch.object(board, "session_alive_fn", return_value=lambda job: True):
+            self.assertEqual(board.heavy_cap_reason(self.root, me), "heavy_cap(2/2): 2 heavy jobs on this Mac (002-b, 003-c)")
+
     def test_ready_below_cap_when_no_sessions_run(self):
         """Job 1381: cmd_ready's heavy_n is capped too: two heavy jobs on the board but one live session claims a heavy kid."""
         self.jobs({"id": "010-p", "stage": "running", "lane": "runall", "children": ["011-h"]},
