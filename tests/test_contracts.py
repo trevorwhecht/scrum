@@ -4197,7 +4197,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                                          "a `reel.py cut` refusal")),
                               ("Review", ("a fresh `edit-reviewer`", "4 fps", "sheet.py", "<folder>/shots.json",
                                           "footage-log.json", "print-reels.md", "check-r<R>.txt",
-                                          "every earlier <JOB_DIR>/review-*.md", "Write <JOB_DIR>/review-<N>.md"))):
+                                          "every earlier <JOB_DIR>/review-*.md", "Write <JOB_DIR>/review-<N>.md",
+                                          "a blank to blank reveal", "cut to the same spot on the next blank"))):
             for phrase in phrases:
                 self.assertIn(phrase, steps[name], (name, phrase))
         self.assertLess(reel.index("reel.py check"), reel.index("edit-reviewer"))

@@ -63,8 +63,10 @@ A round `r<R>` is one run of step 3, counted from 1, one more than the highest i
    <JOB_DIR>/check-r<R>.txt and every earlier <JOB_DIR>/review-*.md. A check line, and check passing, is a floor: judge
    every shot by eye against every rule, the ones check cannot measure first: a sped moving camera, his hand mid stroke
    in each colour's pull, how long each colour's real pulls run, any shot with ink and nobody printing, the first shot
-   that shows the finished print, a lift after every colour, and the end. Under left out, give for each colour at
-   least one real pull from the log, from more than one angle. Write <JOB_DIR>/review-<N>.md.
+   that shows the finished print, a lift after every colour, and the end: after the dryer, a blank to blank reveal
+   (push in on the print on one blank, cut to the same spot on the next blank, pull out), say so when it is missing.
+   Under left out, give for each colour at least one real pull from the log, from more than one angle.
+   Write <JOB_DIR>/review-<N>.md.
    ```
    Record it in the ledger. A `RECUT` sends its notes back to step 3 (next round). A `PASS` goes to step 6; so does the third `RECUT` in a row, carrying the reviewer's notes to Trevor's card.
 6. **Edits build.** `B set $ID stage=build`. It starts straight after a `PASS` (or the third `RECUT` in a row), with no storyboard and no rough cut approval. Every round is a new Edits project (File, New Project): never empty, reuse or delete an Edits project, never open an older one, and keep every round's export until Trevor approves one. The method is `motion/notes/video-edit.md` "What worked": the song started exactly on `<first beat>`, the numbered selects imported as separate clips (never rough.mov), then export. Edits takes Trevor's only mouse and keyboard, so nothing here clicks or types until he says he has stepped away. Never an idle timer: a quiet Mac is never a go.
