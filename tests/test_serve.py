@@ -15106,6 +15106,132 @@ class PulseTest(unittest.TestCase):
         self.assertFalse((self.base / "pulse.log.tmp").exists())
 
 
+class StuckAlertTest(unittest.TestCase):
+    """Job 1413: stuck_alert texts Trevor once when machine_ok holds every start on this Mac with 0 sessions on two
+    pulses in a row. ps is faked (subprocess.run answers only `ps`), HOME holds a fake imsg-send.sh, and every send
+    goes through an injected sender."""
+    NOW = 1_700_000_000
+    MEM = "memory pressure warn (kernel level 2)"
+    PS = ("    1     0     0    20000   0.5 /sbin/launchd\n"
+          " 4617     1 {uid} 27262976   3.0 next-server (v15.1.0)\n"
+          " 4403  4400 {uid}  1048576 145.0 node /Users/x/app/node_modules/.bin/vitest run --reporter dot\n")
+    HEAD = "This Mac stopped starting scrum jobs and none are running. Cause: "
+    LEFTOVER = (HEAD + "memory pressure warn (kernel level 2). Biggest by memory: leftover dev server next-server "
+                "(v15.1.0), pid 4617, 26.0 GB. Fix: kill 4617")
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.base = Path(os.path.realpath(tempfile.mkdtemp()))
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.script = self.base / "home" / ".claude" / "scripts" / "imsg-send.sh"
+        self.script.parent.mkdir(parents=True)
+        self.ran = self.base / "imsg-ran.txt"  # the fake sender writes this only when it really runs
+        self.script.write_text(f"#!/bin/sh\necho \"$@\" >> '{self.ran}'\n")
+        self.script.chmod(0o755)
+        (self.base / "alert-to.txt").write_text("alert-handle\nsecond line\n")
+        (self.base / "app" / "scrum").mkdir(parents=True)
+        (self.base / "app" / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
+        (self.base / "projects.json").write_text(json.dumps([str(self.base / "app")]))
+        self.ps_rows, self.ps_calls, self.sent = self.PS.format(uid=os.getuid()), [], []
+        real_run = subprocess.run
+
+        def run(argv, *a, **kw):
+            if argv and argv[0] == "ps":
+                self.ps_calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, stdout=self.ps_rows, stderr="")
+            return real_run(argv, *a, **kw)
+        for p in (mock.patch.dict(os.environ, SCRUM_PULSE=str(self.base / "pulse.log"), HOME=str(self.base / "home"),
+                                  SCRUM_REGISTRY=str(self.base / "projects.json")),
+                  mock.patch.object(serve.subprocess, "run", run)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def alert(self, t, why=MEM, sessions=0):
+        return self.serve.stuck_alert(self.NOW + t, why, sessions, send=self.sent.append)
+
+    def test_two_held_pulses_text_once(self):
+        self.assertIsNone(self.alert(0))
+        self.assertEqual((self.sent, self.ps_calls), ([], []), "one held pulse: no text and no ps")
+        self.assertEqual(self.alert(150), self.LEFTOVER)
+        self.assertEqual(self.sent, [[str(self.script), "alert-handle", self.LEFTOVER]])
+        self.assertEqual(self.ps_calls, [["ps", "-axo", "pid=,ppid=,uid=,rss=,pcpu=,command="]])
+        self.assertIsNone(self.alert(300))
+        self.assertEqual(len(self.sent), 1, "a third held pulse: no second text")
+        self.assertEqual(len(self.ps_calls), 1, "ps runs only on the pulse that fires")
+
+    def test_single_clear_pulse_keeps_the_episode(self):
+        """2026-11-22: the hold dropped for one pulse at 05:30 and came back; that never texts twice."""
+        self.alert(0), self.alert(150)
+        self.assertIsNone(self.alert(300, why=None))
+        self.assertIsNone(self.alert(450))
+        self.assertIsNone(self.alert(600))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_six_clear_pulses_end_the_episode(self):
+        self.alert(0), self.alert(150)
+        for i in range(5):
+            self.alert(300 + i * 150, why=None)
+        self.alert(1050), self.alert(1200)
+        self.assertEqual(len(self.sent), 1, "five clear pulses: the same episode")
+        for i in range(6):
+            self.alert(1350 + i * 150, why=None)
+        self.assertIsNone(self.alert(2250))
+        self.assertEqual(self.alert(2400), self.LEFTOVER)
+        self.assertEqual(len(self.sent), 2)
+
+    def test_running_session_ends_the_episode(self):
+        self.alert(0), self.alert(150)
+        self.assertIsNone(self.alert(300, sessions=1))
+        self.assertIsNone(self.alert(450))
+        self.assertEqual(self.alert(600), self.LEFTOVER)
+        self.assertEqual(len(self.sent), 2)
+
+    def test_still_held_three_hours_after_the_last_text(self):
+        self.alert(0), self.alert(150)
+        self.assertIsNone(self.alert(150 + 3 * 3600 - 1))
+        self.assertEqual(self.alert(150 + 3 * 3600), self.LEFTOVER)
+        self.assertIsNone(self.alert(300 + 3 * 3600))
+        self.assertIsNone(self.alert(150 + 6 * 3600 - 1))
+        self.assertEqual(self.alert(150 + 6 * 3600), self.LEFTOVER, "3 hours after the last text, not the first")
+        self.assertEqual(len(self.sent), 3)
+
+    def pulse(self, t, **env):
+        """One pulse_tick at NOW + t with env set, its stuck_alert sending through self.sent."""
+        real = self.serve.stuck_alert
+        with mock.patch.dict(os.environ, env), mock.patch.object(
+                self.serve, "stuck_alert", lambda now, why, sessions: real(now, why, sessions, send=self.sent.append)):
+            self.serve.pulse_tick({}, now=self.NOW + t)
+
+    def test_pulse_tick_texts_on_a_machine_hold(self):
+        self.pulse(0, SCRUM_VM_PRESSURE="2")
+        self.assertEqual(self.sent, [])
+        self.pulse(150, SCRUM_VM_PRESSURE="2")
+        self.assertEqual(self.sent, [[str(self.script), "alert-handle", self.LEFTOVER]])
+
+    def test_cooling_usage_hold_and_running_sessions_never_text(self):
+        usage = {"written_at": self.NOW, "rate_limits": {"five_hour": {"used_percentage": 90,
+                                                                       "resets_at": self.NOW + 5 * 3600 - 92 * 60}}}
+        with mock.patch.object(self.serve.board, "read_usage", lambda *a: usage):
+            for t in (0, 1, 2):  # within the usage reading's freshness
+                self.pulse(t)
+        guards = [json.loads(l)["guard"] for l in (self.base / "pulse.log").read_text().splitlines()]
+        self.assertEqual(len(guards), 3)
+        self.assertTrue(all(g.startswith("no account has room: main pace 5h 90% used") for g in guards), guards)
+        for t in (150, 300, 450):
+            self.assertIsNone(self.alert(t, why=self.serve.board.COOLING))
+        (self.base / "cooldown").write_text("")
+        for t in (600, 750, 900):
+            self.pulse(t, SCRUM_COOLDOWN=str(self.base / "cooldown"))
+        self.assertTrue(json.loads((self.base / "pulse.log").read_text().splitlines()[-1])["cooldown"])
+        (self.base / "ps.txt").write_text("   00:10 claude -p /trevskills-scrum start 1-a\n")
+        for t in (1350, 1500, 1650):
+            self.pulse(t, SCRUM_VM_PRESSURE="2", SCRUM_PS=str(self.base / "ps.txt"))
+        for t in (1800, 1950, 2100):
+            self.assertIsNone(self.alert(t, sessions=2))
+        self.assertEqual((self.sent, self.ps_calls), ([], []))
+
+
 class ProdErrorsTest(unittest.TestCase):
     """Job 769: prod_errors_tick sweeps an opted-in project's Vercel production errors into its backlog once a day."""
 

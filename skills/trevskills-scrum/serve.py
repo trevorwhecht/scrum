@@ -3973,14 +3973,19 @@ HOG_READINGS: dict[tuple[int, str], dict] = {}  # (pid, command) -> {"readings":
 HOGS: list[dict] = []  # report_hogs' last list, replaced whole (never edited in place) so machine_status can read it
 
 
-def hog_name(cmd: str) -> str:
-    """The basename of the longest leading run of cmd's space-separated words that is a file (a Mac app binary's path
-    holds spaces, so Chrome's helper reads Google Chrome Helper, not Google), else of its first word ("" for "")."""
+def command_head(cmd: str) -> tuple[str, list[str]]:
+    """(cmd's program: the longest leading run of its space-separated words that is a file (a Mac app binary's path
+    holds spaces), else its first word; the words after it)."""
     words = cmd.split(" ")
     for n in range(len(words), 0, -1):
         if os.path.isfile(" ".join(words[:n])):
-            return os.path.basename(" ".join(words[:n]))
-    return os.path.basename(words[0])
+            return " ".join(words[:n]), words[n:]
+    return words[0], words[1:]
+
+
+def hog_name(cmd: str) -> str:
+    """The basename of cmd's program (command_head: Chrome's helper reads Google Chrome Helper, not Google; "" for "")."""
+    return os.path.basename(command_head(cmd)[0])
 
 
 def report_hogs(procs: list[tuple[int, int, float, str]] | None = None, now: float | None = None) -> list[dict]:
@@ -4574,8 +4579,9 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     except (Exception, SystemExit) as e:
         print(f"watchdog: pulse: gates: {e}", file=sys.stderr, flush=True)
         gates = None
+    why = None  # machine_ok's refusal alone: stuck_alert never texts on a usage hold
     try:
-        guard = board.machine_ok(next(iter(names.values())) / "scrum", claim=False) if names else None
+        why = guard = board.machine_ok(next(iter(names.values())) / "scrum", claim=False) if names else None
         if not guard:
             live = board.live_sessions()
             acc, allow = board.pick_account(now, live)
@@ -4583,7 +4589,12 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     except (Exception, SystemExit) as e:
         print(f"watchdog: pulse: guard: {e}", file=sys.stderr, flush=True)
         guard = None
-    line = {"t": int(now), "sessions": board.live_sessions(), "cpu_load": board.cpu_load_pct(),
+    sessions = board.live_sessions()
+    try:
+        stuck_alert(now, why, sessions)
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: pulse: stuck alert: {e}", file=sys.stderr, flush=True)
+    line = {"t": int(now), "sessions": sessions, "cpu_load": board.cpu_load_pct(),
             "free_ram": board.free_ram_pct(), "swap": board.swap_used_pct(), "cooldown": board.cooling_down(),
             "u5h": usage["5h"], "u7d": usage["weekly"], "focus": next(iter(names), None), "projects": projects,
             "gates": gates, "guard": guard}
@@ -4606,6 +4617,81 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
         os.replace(tmp, path)
     with open(path, "a") as f:
         f.write(json.dumps(line) + "\n")
+
+
+STUCK_ALERT_PULSES = 2  # stuck_alert: held pulses in a row with 0 sessions before it texts (about 5 minutes)
+STUCK_ALERT_CLEAR = 6  # stuck_alert: clear pulses in a row that end an episode (a one-pulse dip never texts twice)
+STUCK_ALERT_REPEAT_S = 3 * 3600  # stuck_alert: still held this long after the last text: text once more
+DEV_SERVER_RE = re.compile(r"\bnext(-server\b| dev\b)|\bvite\b|\b(npm|pnpm|yarn|bun) (run )?dev\b|webpack-dev-server")
+
+
+def stuck_process(why: str) -> str:
+    """stuck_alert's `Biggest by memory: <name>, pid <pid>, <GB> GB. Fix: kill <pid>` clause for a memory machine_ok
+    reason (PULSE_GATES ram, vm_pressure, swap), else "". The biggest process by resident memory comes from one
+    `ps -axo pid=,ppid=,uid=,rss=,pcpu=,command=` (no shell, 10 s); ps failing gives "". <name> is the program's
+    basename (command_head) and its first argument (a path argument by its basename), never the rest; with ppid 1 and
+    a DEV_SERVER_RE command it reads `leftover dev server <name>`."""
+    if next((t for pre, t in PULSE_GATES if pre in why), None) not in ("ram", "vm_pressure", "swap"):
+        return ""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,rss=,pcpu=,command="], capture_output=True, text=True,
+                             timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    rows = []
+    for line in out.stdout.splitlines() if out.returncode == 0 else []:
+        p = line.split(None, 5)
+        try:
+            rows.append((int(p[0]), int(p[1]), int(p[2]), int(p[3]), float(p[4].replace(",", ".")), p[5]))
+        except (ValueError, IndexError):
+            continue
+    if not rows:
+        return ""
+    pid, ppid, uid, rss, pcpu, cmd = max(rows, key=lambda r: r[3])
+    prog, rest = command_head(cmd)
+    arg = next((w for w in rest if w), "")
+    name = " ".join(w for w in (os.path.basename(prog), os.path.basename(arg) if "/" in arg and arg[0] != "-" else arg) if w)
+    label = "leftover dev server " if ppid == 1 and DEV_SERVER_RE.search(cmd) else ""
+    return f"Biggest by memory: {label}{name}, pid {pid}, {rss / 1048576:.1f} GB. Fix: kill {pid}"
+
+
+def stuck_alert(now: float, why: str | None, sessions: int, send=None) -> str | None:
+    """Text Trevor when this Mac holds every start with nothing running (job 1413). why is the first project's
+    board.machine_ok(claim=False) refusal (pulse_tick). It fires when why is set and sessions is 0 on
+    STUCK_ALERT_PULSES pulses in a row. The state {"held", "sent"} lives in stuck-alert.json beside pulse.log; it is
+    written (tmp + os.replace) only when it changed. The one-line text starts `This Mac stopped starting scrum jobs`
+    (no `<word>:` before it: messageManager reads `<project>: <text>` self-texts as commands), names why, then
+    stuck_process's clause, and goes to the first line of alert-to.txt (beside pulse.log) through
+    ~/.claude/scripts/imsg-send.sh by argv, 30 s timeout, check=False. send (tests) replaces that run; under unittest
+    nothing is sent without it. Returns the text it sent, else None."""
+    path = board.pulse_path().parent / "stuck-alert.json"
+    try:
+        old = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = {}  # unreadable: no state
+    old = old if isinstance(old, dict) else {}
+    num = lambda k: old[k] if board.is_num(old.get(k)) else None
+    held = (num("held") or 0) + 1 if why and why != board.COOLING and sessions == 0 else 0
+    clear = 0 if held else min((num("clear") or 0) + 1, STUCK_ALERT_CLEAR)
+    sent = None if sessions > 0 or clear >= STUCK_ALERT_CLEAR else num("sent")  # the episode ended
+    fire = held >= STUCK_ALERT_PULSES and (sent is None or now - sent >= STUCK_ALERT_REPEAT_S)
+    state = {"held": held, "clear": clear, "sent": now if fire else sent}
+    if state != old:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name("stuck-alert.json.tmp")
+        tmp.write_text(json.dumps(state))
+        os.replace(tmp, path)
+    if not fire or send is None and "unittest" in sys.modules:
+        return None
+    try:
+        handle = path.with_name("alert-to.txt").read_text(encoding="utf-8").splitlines()[0].strip()
+    except (OSError, IndexError):
+        handle = ""
+    script = Path.home() / ".claude" / "scripts" / "imsg-send.sh"
+    clause = stuck_process(why)
+    text = f"This Mac stopped starting scrum jobs and none are running. Cause: {why}.{' ' + clause if clause else ''}"
+    (send or (lambda argv: subprocess.run(argv, capture_output=True, timeout=30, check=False)))([str(script), handle, text])
+    return text
 
 
 COOLDOWN_CHIMED = False  # ponytail: in memory, so a serve.py restart during an idle cool-down may chime once more
