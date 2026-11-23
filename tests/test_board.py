@@ -10597,6 +10597,48 @@ class LilguyFitTest(unittest.TestCase):
         self.assertIs(got["fit"], True)
         self.assertNotIn("read", got)
 
+    def test_pipeline_read_prints_pipeline_parts(self):
+        read = board.pipeline_read()
+        self.assertEqual(read.count("sed -n "), 3)
+        res = subprocess.run(read, shell=True, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0)
+        for want in ("2. **Base:**", "## Fast lane", "## Check gate", "## Approve", "## Visual diff (Check gate)",
+                     "3. **PR.**", "## Resuming the builder"):
+            self.assertIn(want, res.stdout)
+        self.assertNotIn("1c. **Askme**", res.stdout)
+
+    def test_pipeline_read_ranges_start_at_headings(self):
+        want = [("newjob.md", r"2\. \*\*Base:\*\*"), ("review.md", r"# Review"), ("merge.md", r"3\. \*\*PR\.\*\*")]
+        parts = self._parts(board.pipeline_read())
+        self.assertEqual(len(parts), 3)
+        for (name, a, b), (wname, ws) in zip(parts, want):
+            lines = (board.LANE_DIR / name).read_text().splitlines()
+            self.assertEqual(name, wname)
+            self.assertRegex(lines[a - 1], "^" + ws)
+            self.assertEqual(b, len(lines))
+
+    def test_pipeline_read_missing_heading_prints_none(self):
+        tmp = Path(self.tmp.name) / "lanes2"
+        tmp.mkdir()
+        self.assertIsNone(board.pipeline_read(tmp))
+        for n in ("newjob.md", "review.md", "merge.md"):
+            shutil.copy(board.LANE_DIR / n, tmp / n)
+        self.assertIsNotNone(board.pipeline_read(tmp))
+        text = (tmp / "merge.md").read_text()
+        (tmp / "merge.md").write_text(text.replace("3. **PR.**", "3. **Pull request.**"))
+        self.assertIsNone(board.pipeline_read(tmp))
+        out = io.StringIO()
+        with mock.patch.object(board, "LANE_DIR", tmp), redirect_stdout(out):
+            board.main(["--dir", str(self.root), "lane-read"])
+        self.assertEqual(out.getvalue(), "read: none\n")
+
+    def test_lane_read_prints_read_line(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = board.main(["--dir", str(self.root), "lane-read"])
+        self.assertIn(code, (0, None))
+        self.assertEqual(out.getvalue(), "read: " + board.pipeline_read() + "\n")
+
     def test_lilguy_fit_points_1_naming_skill_md_passes(self):
         self.points(1)
         (self.jd / "feature.md").write_text("Reword SKILL.md, agents/scrum-builder.md and lanes/lilguy.md\n")
