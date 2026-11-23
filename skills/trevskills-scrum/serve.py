@@ -629,11 +629,21 @@ def limit_held(job):
 RESUME_ROOM: int | None = None  # watchdog_tick's per-tick resume budget (board.ram_room()), None outside a tick; spawn's
 # gate (LAUNCH_LOCK, ram_room(floor=0)) limits every launch, in a tick or not
 E2E_RESUMED: bool | None = None  # one E2E-queue resume per watchdog_tick across projects; None outside a tick = one per call
+RESUME_ONLY: tuple[str, str] | None = None  # (resolved scrum path, job id) of the queued solo holder (resume_budget):
+# only its own queued launch may spend RESUME_ROOM; None = any job may
 
 
-def take_room() -> bool:
-    """Spend one session of the tick's resume budget. False when it is used up (the job waits on a slot)."""
+def solo_only(root, job_id) -> bool:
+    """True while RESUME_ONLY names a queued solo holder and (root, job_id) is not it: that job waits for the solo run."""
+    return RESUME_ONLY is not None and (str(Path(root).resolve()) if root is not None else None, job_id) != RESUME_ONLY
+
+
+def take_room(root=None, job_id=None) -> bool:
+    """Spend one session of the tick's resume budget. False when it is used up (the job waits on a slot), or while
+    solo_only(root, job_id) holds it beside the solo run (a call with no job is never the holder)."""
     global RESUME_ROOM
+    if solo_only(root, job_id):
+        return False
     if RESUME_ROOM is None:
         return True
     if RESUME_ROOM <= 0:
@@ -652,7 +662,10 @@ def give_room():
 def resume_budget() -> int:
     """watchdog_tick's RESUME_ROOM: 0 while board.solo_hold(waiting=False) names a solo run holder (job 1361: every
     tick resume spends take_room, so none starts beside it), else board.ram_room(). A holder still stalled on its
-    LOAD_SOLO_WAIT reason with a queued_launch does not zero it: that queued launch is the solo run itself."""
+    LOAD_SOLO_WAIT reason with a queued_launch does not zero it: that queued launch is the solo run itself, so
+    RESUME_ONLY names that job and take_room refuses every other spender (job 1375); else RESUME_ONLY is None."""
+    global RESUME_ONLY
+    RESUME_ONLY = None
     holder = board.solo_hold(waiting=False)
     if holder:
         for repo in board.projects().values():
@@ -665,7 +678,10 @@ def resume_budget() -> int:
                 if f"{scrum.parent.name}/{j.get('id')} runs alone" == holder:
                     queued = j.get("queued_launch") and board.stalled(j) \
                         and str(j.get("reason") or "").startswith(board.STALL + board.LOAD_SOLO_WAIT)
-                    return board.ram_room() if queued else 0
+                    if not queued:
+                        return 0
+                    RESUME_ONLY = (str(scrum), j["id"])
+                    return board.ram_room()
         return 0
     return board.ram_room()
 
@@ -701,10 +717,13 @@ def play_queue_tick(project, root, jobs) -> bool:
     queued_launch:<id> (note_hold) for pulse_tick. One held past RAM_HOLD_SECS (held_over) re-runs with idle=True, as
     idle_claim's does, while board.machine_ok(root, claim=True) passes; spawn's other gates still apply (job 1356). A click Trevor made (play_queued_manual) is gated as his click: no CPU gate. A queued `start`
     of a job tagged Runs on shop (board.stored_runs_on) is skipped and stays queued for shop_tick. True when it
-    started one or one waits on a slot."""
+    started one or one waits on a slot. While RESUME_ONLY names a queued solo holder, every other job is skipped and
+    stays queued (solo_only, job 1375)."""
     started = False
     # cpu_held first, so the order agrees with cpu_first(): spawn holds every other start while it waits
     for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: (not cpu_held(root, j), *held_order(root, j))):
+        if solo_only(root, job["id"]):
+            continue  # job 1375: beside a queued solo holder only its launch starts; this one stays queued
         manual = bool(job.get("play_queued_manual"))
         if launch := job.get("queued_launch"):
             if running(project, job["id"]) or job["stage"] != launch["stage"]:
@@ -712,7 +731,7 @@ def play_queue_tick(project, root, jobs) -> bool:
                 continue
             if launch["action"] == "start" and board.stored_runs_on(root, job) == "shop":
                 continue  # Runs on: shop never starts here; it stays queued for shop_tick
-            if not take_room():
+            if not take_room(root, job["id"]):
                 mark_ram_hold(project, root, jobs)
                 return True
             # job 1356: held past RAM_HOLD_SECS while machine_ok(claim=True) has room, it skips the RAM gate as idle_claim's does
@@ -831,7 +850,7 @@ def idle_claim(project, root, jobs) -> bool:
     if head and head[0] == project and (lead := next((j for j in ok if j["id"] == head[1]), None)):
         pick = lead
     if cpu_hot(bool(pick.get("queued_launch") and pick.get("play_queued_manual"))) \
-            or not take_room():
+            or not take_room(root, pick["id"]):
         return False
     IDLE_SINCE.pop(project, None)  # one try per IDLE_CLAIM_SECS, so a refused pick never spends a slot every tick
     if launch := pick.get("queued_launch"):
@@ -4071,7 +4090,7 @@ def watchdog_tick():
     guard; job 1312), then hard_stop_tick once (stops every scrum session on an account at board.HARD_STOP_PCT 7d, in
     its own guard; Trevor 2026-11-20). A no-git project (board.no_git, job 1362) runs every pass, and each git or gh
     pass returns early for it (main_ff_tick, e2e_full_tick, ui_sweep_tick, reclaim_disk, cloud_tick, actions_alert)."""
-    global RESUME_ROOM, E2E_RESUMED
+    global RESUME_ROOM, E2E_RESUMED, RESUME_ONLY
     try:
         board.record_cpu_sample()  # cpu_busy_pct's reading; first, so this tick's machine_ok sees it
     except (Exception, SystemExit) as e:
@@ -4157,7 +4176,7 @@ def watchdog_tick():
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: idle claim: {e}", file=sys.stderr, flush=True)
     finally:
-        RESUME_ROOM, E2E_RESUMED = None, None
+        RESUME_ROOM, E2E_RESUMED, RESUME_ONLY = None, None, None
     played = False
     if not pending and candidates and board.live_sessions() == 0:
         try:

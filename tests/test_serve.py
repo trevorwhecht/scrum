@@ -1277,6 +1277,27 @@ class ServeTest(unittest.TestCase):
             out = s.play_queue_tick("repo", self.root, jobs)
         return out, err.getvalue()
 
+    def test_play_queue_tick_starts_only_solo_holder_launch(self):
+        """Job 1375: while RESUME_ONLY names the queued solo holder, play_queue_tick skips (never unqueues) every other
+        queued launch, even one that sorts first, and still starts the holder's."""
+        s = self.serve
+        other = self.queued_launch_job("Sorts first", 3)
+        holder = self.queued_launch_job("Solo holder", 2)
+        jobs = json.loads((self.root / "board.json").read_text())["jobs"]
+        self.assertEqual([j["id"] for j in sorted((j for j in jobs if j["id"] in (other, holder)),
+                                                  key=lambda j: s.held_order(self.root, j))], [other, holder])
+        self.addCleanup(setattr, s, "RESUME_ROOM", None)
+        self.addCleanup(setattr, s, "RESUME_ONLY", None)
+        s.RESUME_ROOM, s.RESUME_ONLY = 3, (str(self.root.resolve()), holder)
+        with mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s, "spawn", return_value="runs/x.log") as spawn:
+            self.assertTrue(s.play_queue_tick("repo", self.root, [j for j in jobs if j["id"] in (other, holder)]))
+        self.assertEqual([c.args[2] for c in spawn.call_args_list], [holder])
+        self.assertEqual(s.RESUME_ROOM, 2)
+        left = self.stage_of(other)
+        self.assertTrue(left.get("play_queued"))
+        self.assertEqual(left["queued_launch"], {"action": "approve", "prompt": "p", "stage": "needs-human"})
+
     def test_play_queue_tick_ram_hold_budget_spent(self):
         job_id = self.queued_launch_job("Budget spent", 2)
         self.assertEqual(self.tick_ram([job_id], take_room=False)[0], True)
@@ -8324,15 +8345,39 @@ class AutoResumeTest(unittest.TestCase):
         board_file = repo / "scrum" / "board.json"
         board_file.write_text(json.dumps({"jobs": [holder]}))
         self.addCleanup(setattr, s, "RESUME_ROOM", None)
+        self.addCleanup(setattr, s, "RESUME_ONLY", None)
         with mock.patch.object(s.board, "ram_room", return_value=3):
             self.assertEqual(s.resume_budget(), 0)
+            self.assertIsNone(s.RESUME_ONLY, "a holder with no queued launch: no job may spend")
             s.RESUME_ROOM = s.resume_budget()
             self.assertFalse(s.take_room())
             board_file.write_text(json.dumps({"jobs": [dict(holder, stalled=True, reason=self.SOLOWAIT,
                                                             queued_launch={"action": "resume", "prompt": "p", "stage": "build"})]}))
             self.assertEqual(s.resume_budget(), 3, "its own queued launch can still start")
+            self.assertEqual(s.RESUME_ONLY, (str((repo / "scrum").resolve()), "009-solo"))
             board_file.write_text(json.dumps({"jobs": [dict(holder, stage="check")]}))
             self.assertEqual(s.resume_budget(), 3, "the run moved on: no holder")
+            self.assertIsNone(s.RESUME_ONLY, "the run moved on: every queued launch may spend again")
+
+    def test_take_room_only_holder_while_solo_queued(self):
+        """Job 1375: while RESUME_ONLY names the queued solo holder, only its own launch spends RESUME_ROOM."""
+        s = self.serve
+        holder_root, other_root = self.root / "holder" / "scrum", self.root / "other" / "scrum"
+        self.addCleanup(setattr, s, "RESUME_ROOM", None)
+        self.addCleanup(setattr, s, "RESUME_ONLY", None)
+        s.RESUME_ROOM, s.RESUME_ONLY = 3, (str(holder_root.resolve()), "009-solo")
+        for args in ((), (other_root, "009-solo"), (holder_root, "010-other")):
+            self.assertFalse(s.take_room(*args), args)
+            self.assertEqual(s.RESUME_ROOM, 3, args)
+        self.assertTrue(s.take_room(holder_root, "009-solo"))
+        self.assertEqual(s.RESUME_ROOM, 2)
+        s.RESUME_ONLY, s.RESUME_ROOM = None, 1
+        self.assertTrue(s.take_room())
+        self.assertEqual(s.RESUME_ROOM, 0)
+        self.assertFalse(s.take_room())
+        s.RESUME_ROOM = None
+        self.assertTrue(s.take_room())
+        self.assertTrue(s.take_room(other_root, "010-other"))
 
     def test_auto_resume_solo_wait_held_while_machine_refuses(self):
         self.jobs = [{"id": "solo", "stage": "check", "stalled": True, "reason": self.SOLOWAIT, "loadWaits": 3, "loadSolo": 1}]
@@ -9943,6 +9988,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
             spawn, _, _ = self.tick()
         self.assertEqual(len([c for c in spawn.call_args_list if c.args[3] == "resume"]), 1)
         self.assertIsNone(self.serve.RESUME_ROOM, "the budget only lives for one tick")
+        self.assertIsNone(self.serve.RESUME_ONLY, "the solo holder's claim on the budget only lives for one tick")
         self.assertIsNone(self.serve.E2E_RESUMED, "the one-E2E-resume cap only lives for one tick")
         usage, now = self.repo / "usage.json", time.time()
         usage.write_text(json.dumps({"written_at": now, "rate_limits": {
@@ -9956,6 +10002,13 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual([c.args[2:4] for c in spawn.call_args_list if c.args[3] == "resume"], [])
         spawn, _, _ = self.tick()  # no usage.json: the resume goes ahead
         self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [("012-c", "resume")])
+        # job 1375: a tick whose budget named a queued solo holder clears that claim when it ends
+        self.addCleanup(setattr, self.serve, "RESUME_ONLY", None)
+        held = lambda: (setattr(self.serve, "RESUME_ONLY", (str(self.root.resolve()), "009-solo")), 1)[1]
+        with mock.patch.object(self.serve, "resume_budget", side_effect=held) as budget:
+            self.tick()
+        budget.assert_called_once_with()
+        self.assertIsNone(self.serve.RESUME_ONLY, "the solo holder's claim ends with the tick")
 
     def test_watchdog_starts_play_queued_first(self):
         s = self.serve
@@ -11037,6 +11090,25 @@ class IdleClaimTest(unittest.TestCase):
         s.RESUME_ROOM = 1
         self.assertIs(self.claim()[0], True)
         self.assertEqual(s.RESUME_ROOM, 0)
+
+    def test_idle_claim_held_beside_solo_holder(self):
+        """Job 1375: while RESUME_ONLY names another project's queued solo holder, idle_claim starts nothing and spends
+        no room; when it names this pick, the claim goes ahead."""
+        s = self.serve
+        launch = {"action": "resume", "prompt": "/trevskills-scrum resume 007-q", "stage": "build"}
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "007-q", "stage": "build", "queued_launch": launch, "updatedAt": self.board.now()}]}))
+        self.addCleanup(setattr, s, "RESUME_ROOM", None)
+        self.addCleanup(setattr, s, "RESUME_ONLY", None)
+        s.RESUME_ROOM, s.RESUME_ONLY = 3, (str((self.repo / "elsewhere" / "scrum").resolve()), "009-solo")
+        with mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "live_sessions", return_value=0), \
+                mock.patch.object(s, "cpu_hot", return_value=False):
+            got, spawn = self.claim()
+            self.assertEqual((got, spawn.call_args_list, s.RESUME_ROOM), (False, [], 3))
+            s.RESUME_ONLY = (str(self.root.resolve()), "007-q")
+            got, spawn = self.claim()
+        self.assertEqual((got, self.started(spawn), s.RESUME_ROOM), (True, [("007-q", "resume", True)], 2))
 
     def test_tick_order(self):
         s = self.serve
