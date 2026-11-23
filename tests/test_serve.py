@@ -15209,6 +15209,24 @@ class StuckAlertTest(unittest.TestCase):
         self.pulse(150, SCRUM_VM_PRESSURE="2")
         self.assertEqual(self.sent, [[str(self.script), "alert-handle", self.LEFTOVER]])
 
+    def test_a_raising_stuck_alert_never_breaks_pulse_tick(self):
+        def boom(now, why, sessions):
+            raise RuntimeError("stuck-alert.json: disk full")
+        with mock.patch.object(self.serve, "stuck_alert", boom), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.serve.pulse_tick({}, now=self.NOW)
+        self.assertEqual(err.getvalue(), "watchdog: pulse: stuck alert: stuck-alert.json: disk full\n")
+        self.assertEqual([json.loads(l)["t"] for l in (self.base / "pulse.log").read_text().splitlines()], [self.NOW])
+
+    def test_a_long_hold_stops_rewriting_the_state_file(self):
+        self.alert(0), self.alert(150)
+        state = self.base / "stuck-alert.json"
+        before = state.stat().st_mtime_ns, state.read_text()
+        os.utime(state, ns=(1, 1))
+        for t in (300, 450, 600):
+            self.alert(t)
+        self.assertEqual(state.stat().st_mtime_ns, 1, "an unchanged state is never written again")
+        self.assertEqual(json.loads(before[1]), {"held": 2, "clear": 0, "sent": self.NOW + 150})
+
     def test_cooling_usage_hold_and_running_sessions_never_text(self):
         usage = {"written_at": self.NOW, "rate_limits": {"five_hour": {"used_percentage": 90,
                                                                        "resets_at": self.NOW + 5 * 3600 - 92 * 60}}}

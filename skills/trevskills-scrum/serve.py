@@ -4676,9 +4676,10 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None) -> str | 
     board.machine_ok(claim=False) refusal (pulse_tick; never COOLING, never a usage hold). It fires when why is set
     and sessions is 0 on STUCK_ALERT_PULSES pulses in a row, once an episode: a pulse with sessions > 0, or
     STUCK_ALERT_CLEAR clear pulses in a row, ends it, and a hold still on STUCK_ALERT_REPEAT_S after the last text texts
-    once more. The state {"held", "clear", "sent"} (pulse counts in a row, the last text's time) lives in
-    stuck-alert.json beside pulse.log, so a reload neither repeats nor forgets; an unreadable file is no state. It is
-    written (tmp + os.replace) only when it changed, before any send. The one-line text starts `This Mac stopped
+    once more. The state {"held", "clear", "sent"} (pulse counts in a row, capped at STUCK_ALERT_PULSES and
+    STUCK_ALERT_CLEAR; the last text's time) lives in stuck-alert.json beside pulse.log, so a reload neither repeats
+    nor forgets; an unreadable file is no state. It is written (tmp + os.replace) only when it changed (so a long hold
+    or a quiet day writes nothing), before any send. The one-line text starts `This Mac stopped
     starting scrum jobs` (no `<word>:` before it: messageManager reads `<project>: <text>` self-texts as commands),
     names why, then stuck_process's clause (its one ps runs only on the pulse that fires), and goes to the first line
     of alert-to.txt (beside pulse.log) through ~/.claude/scripts/imsg-send.sh by argv, 30 s timeout, check=False. A
@@ -4692,7 +4693,7 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None) -> str | 
         old = {}  # unreadable: no state
     old = old if isinstance(old, dict) else {}
     num = lambda k: old[k] if board.is_num(old.get(k)) else None
-    held = (num("held") or 0) + 1 if why and why != board.COOLING and sessions == 0 else 0
+    held = min((num("held") or 0) + 1, STUCK_ALERT_PULSES) if why and why != board.COOLING and sessions == 0 else 0
     clear = 0 if held else min((num("clear") or 0) + 1, STUCK_ALERT_CLEAR)
     sent = None if sessions > 0 or clear >= STUCK_ALERT_CLEAR else num("sent")  # the episode ended
     fire = held >= STUCK_ALERT_PULSES and (sent is None or now - sent >= STUCK_ALERT_REPEAT_S)
