@@ -287,6 +287,16 @@ def gate_heads(root, job):
     return {g.split("(", 1)[0] for g in gates}
 
 
+def held_by(root, job, stage):
+    """The gate names a waiting job whose depends_on are all done is held by right now (gate_heads, comma-joined), or None.
+    A depends_on:<id> gate whose job is done is dropped: that blocker merged, so it is no longer the cause (job 1406).
+    `stage` is {job id: stage}."""
+    if job.get("stage") != "waiting" or not all(stage.get(d) == "done" for d in job.get("depends_on") or []):
+        return None
+    heads = {g for g in gate_heads(root, job) if not (g.startswith("depends_on:") and stage.get(g[11:]) == "done")}
+    return ", ".join(sorted(heads)) or None
+
+
 def mem_held(root, job):
     """True for a non-manual light job whose queue-gates.txt names vm_pressure or swap; cpu_first lets it lead while held_work."""
     return (not job.get("play_queued_manual") and board.light_job(root, job)
@@ -551,6 +561,7 @@ def wake_waiting(project, root):
         return
     why = board.machine_ok(root, claim=True) or board.finish_first(root)
     cooling = why == board.COOLING or bool(why and why.startswith((board.FINISH_FIRST, board.SOFT_COOLING)))
+    cool_gate = held_gate(why) if cooling else None
     if cooling:  # only a parked wake job passes; plain waiting jobs stay held (hold below)
         why = board.machine_ok(root) or (None if any(j.get("wake") for j in filter(board.parked_waiting, board.read_board(root)["jobs"])) else why)
     if why:
@@ -569,8 +580,20 @@ def wake_waiting(project, root):
     if cpu_hot():  # re-read right before the claim
         note_held(root, cpu_token(), ready_waiting(root))
         return
-    out = board.wake_waiting(root, room, hold=lambda j: (cooling and not j.get("wake")) or j.get("wake") and board.resume_blocker(
-        root, j["id"], live_ids(project)) or (not j.get("wake") and board.heavy_cap_reason(root, j)))  # job 1314: a heavy start at the cap waits
+    held = {}  # job id -> the gate hold() passed it over for, noted below (job 1406: a held job named no cause)
+
+    def hold(j):
+        if j.get("wake"):
+            return board.resume_blocker(root, j["id"], live_ids(project))
+        if cooling:
+            held[j["id"]] = cool_gate
+        elif board.heavy_cap_reason(root, j):  # job 1314: a heavy start at the cap waits
+            held[j["id"]] = "heavy_cap"
+        return j["id"] in held
+
+    out = board.wake_waiting(root, room, hold=hold)
+    for job_id, gate in held.items():
+        note_held(root, gate, [job_id])
     for job_id in out["ready"]:
         spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
     for job_id in out.get("retry", []):
@@ -6144,6 +6167,8 @@ def board_with_activity(root, project):
         if job.get("stage") == "waiting" and (deps := [d for d in job.get("depends_on") or []
                                                        if stage.get(d) not in ("done", "aborted")]):
             job["waitingOn"] = {"ids": deps, "why": "not merged yet"}  # parked by board.py wait-on, or a sibling's wait
+        if (gates := held_by(root, job, stage)) and not job.get("waitingOn"):
+            job["heldBy"] = gates  # the dashboard's "Held by <gate>" line, in place of the stale waiting on <blocker>
         hold = job.get("overlap_hold") or {}
         if job.get("stage") == "waiting" and not job.get("waitingOn") and (
                 ids := [i for i in hold.get("ids") or [] if stage.get(i) not in ("done", "aborted")]):
@@ -6202,7 +6227,7 @@ JOB_STATES_MAX = 200  # ids one GET /api/p/<project>/job-states may ask for
 
 
 def job_states(root, ids):
-    """GET /api/p/<project>/job-states: {id, title, stage, reason, pr, lane, paused, stalled, play_queued, question, options} per job, in board order,
+    """GET /api/p/<project>/job-states: {id, title, stage, reason, heldBy, pr, lane, paused, stalled, play_queued, question, options} per job, in board order,
     read from cached_board only (no activity, refusal, lock or session work). ids (exact strings) picks those jobs and
     leaves unknown ids out; None or empty gives every job not done or aborted."""
     jobs = cached_board(root).get("jobs", [])
@@ -6211,7 +6236,9 @@ def job_states(root, ids):
         jobs = [j for j in jobs if j.get("id") in want]
     else:
         jobs = [j for j in jobs if j.get("stage") not in ("done", "aborted")]
+    stage = {j.get("id"): j.get("stage") for j in cached_board(root).get("jobs", [])}
     return [{"id": j.get("id"), "title": j.get("title"), "stage": j.get("stage"), "reason": j.get("reason"),
+             "heldBy": held_by(root, j, stage),
              "pr": j.get("pr"), "lane": j.get("lane"), "paused": bool(j.get("paused")), "stalled": board.stalled(j),
              "play_queued": bool(j.get("play_queued")), "question": j.get("question"), "options": j.get("options")}
             for j in jobs]

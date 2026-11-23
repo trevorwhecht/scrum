@@ -9740,6 +9740,52 @@ class WatchdogIdleParentTest(unittest.TestCase):
         appr.assert_called_once()
         self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("needs-human", "waiting"))
 
+    def test_wake_waiting_cool_down_notes_gate_on_plain_job(self):
+        """Job 1406: the plain job cool-down holds while a wake job passes names cool_down in queue-gates.txt."""
+        wake = {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "wake": "approve 002-second"}
+        self.queue_board({"id": "001-first", "stage": "done"}, wake,
+                         {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"]})
+        for i in ("002-second", "003-third"):
+            (self.root / "jobs" / i).mkdir(parents=True, exist_ok=True)
+        with mock.patch.object(self.serve, "spawn"), mock.patch.object(self.serve, "approve_job"), \
+                mock.patch.object(self.board, "machine_ok", side_effect=lambda r, claim=False: self.board.COOLING if claim else None), \
+                mock.patch.object(self.board, "ram_room", return_value=2), \
+                mock.patch.object(self.board, "usage_allowance", return_value=None):
+            self.serve.wake_waiting("idle", self.root)
+        self.assertEqual((self.gate_text("003-third"), self.gate_text("002-second")), ("cool_down\n", None))
+
+    def test_wake_waiting_heavy_cap_notes_gate(self):
+        """Job 1406: a heavy start held at the heavy cap names heavy_cap in its queue-gates.txt."""
+        self.waiting_pair()
+        with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", return_value=2), \
+                mock.patch.object(self.board, "usage_allowance", return_value=None), \
+                mock.patch.object(self.board, "heavy_cap_reason", return_value="heavy_cap(2/2)"):
+            self.serve.wake_waiting("idle", self.root)
+        spawn.assert_not_called()
+        self.assertEqual(self.job("002-second")["stage"], "waiting")
+        self.assertEqual((self.gate_text("002-second"), self.gate_text("003-third")), ("heavy_cap\n", None))
+
+    def test_held_by_drops_done_blocker_gate(self):
+        """Job 1406: a waiting job whose depends_on are all done gets heldBy from fresh gates, minus depends_on:<done id>."""
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"],
+                          "reason": "waiting on 001-first"},
+                         {"id": "003-third", "stage": "waiting", "depends_on": ["009-open"]},
+                         {"id": "009-open", "stage": "running"},
+                         {"id": "004-fourth", "stage": "waiting", "depends_on": ["001-first"]})
+        for i, text in (("002-second", "depends_on:001-first\nheavy_cap\n"), ("003-third", "depends_on:009-open\n"),
+                        ("004-fourth", "depends_on:001-first\n")):
+            (self.root / "jobs" / i).mkdir(parents=True, exist_ok=True)
+            (self.root / "jobs" / i / "queue-gates.txt").write_text(text)
+        jobs = {j["id"]: j for j in self.serve.board_with_activity(self.root, "repo")["jobs"]}
+        self.assertEqual(jobs["002-second"]["heldBy"], "heavy_cap")
+        self.assertNotIn("heldBy", jobs["003-third"])  # its blocker is open: waitingOn names it
+        self.assertEqual(jobs["003-third"]["waitingOn"]["ids"], ["009-open"])
+        self.assertNotIn("heldBy", jobs["004-fourth"])  # only the done blocker's gate: nothing to name
+        states = {j["id"]: j for j in self.serve.job_states(self.root, None)}
+        self.assertEqual((states["002-second"]["heldBy"], states["004-fourth"]["heldBy"]), ("heavy_cap", None))
+
     def test_wake_waiting_cool_down_wake_job_still_needs_ram(self):
         self.queue_board({"id": "001-first", "stage": "done"},
                          {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "wake": "approve 002-second"})
