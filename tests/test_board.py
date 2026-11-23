@@ -14916,3 +14916,76 @@ class HeavyCapReadyTest(HeavyCapBase):
         with mock.patch.object(board, "machine_ok", return_value=None), mock.patch.object(board, "ram_room", return_value=5), \
                 mock.patch.object(board, "pick_account", return_value=(None, None)):
             self.assertEqual(board.cmd_ready(self.root, "010-p")["ready"], ["011-h", "012-h"])
+
+
+class ProjectNoteTest(unittest.TestCase):
+    """Job 1369: `project-note '<line>'` appends a spec's Project note line to scrum/project.md's Notes, after a backup."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp()) / "scrum"
+        self.root.mkdir()
+        self.md = self.root / "project.md"
+
+    def test_appends_to_notes_after_backup(self):
+        before = b"# Project\r\n- Stack: x\r\n- Notes: A.\r\n- Colour: 10\r\n"
+        self.md.write_bytes(before)
+        real_replace, replaced, locked = os.replace, [], []
+        real_flock = board.fcntl.flock
+
+        def spy_replace(src, dst):
+            replaced.append((Path(src).parent, Path(dst)))
+            return real_replace(src, dst)
+
+        def spy_flock(f, op):
+            locked.append((Path(f.name), op))
+            return real_flock(f, op)
+
+        with mock.patch.object(board.os, "replace", side_effect=spy_replace), \
+                mock.patch.object(board.fcntl, "flock", side_effect=spy_flock):
+            r = run_board("--dir", str(self.root), "project-note", "Use X for Y.")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"added": True})
+        self.assertEqual((self.root / "project.md.bak").read_bytes(), before)
+        self.assertEqual(self.md.read_bytes(), b"# Project\r\n- Stack: x\r\n- Notes: A. Use X for Y.\r\n- Colour: 10\r\n")
+        self.assertEqual(replaced, [(self.root, self.md)])
+        self.assertEqual(locked[0], (self.root / ".project.md.lock", board.fcntl.LOCK_EX))
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), [".project.md.lock", "project.md", "project.md.bak"])
+
+    def test_first_notes_line_only(self):
+        self.md.write_text("- Notes: A.\n- Notes: B.")
+        self.assertEqual(board.cmd_project_note(self.root, "  C.  "), {"added": True})
+        self.assertEqual(self.md.read_text(), "- Notes: A. C.\n- Notes: B.")
+
+    def test_adds_notes_line_when_missing(self):
+        self.md.write_text("# Project\n- Stack: x")
+        self.assertEqual(board.cmd_project_note(self.root, "Use X for Y."), {"added": True})
+        self.assertEqual(self.md.read_text(), "# Project\n- Stack: x\n- Notes: Use X for Y.\n")
+        self.md.write_text("- Stack: x\n")
+        self.assertEqual(board.cmd_project_note(self.root, "Z."), {"added": True})
+        self.assertEqual(self.md.read_text(), "- Stack: x\n- Notes: Z.\n")
+
+    def test_rerun_is_a_no_op(self):
+        self.md.write_text("- Notes: A.\n")
+        self.assertEqual(board.cmd_project_note(self.root, "Use X for Y."), {"added": True})
+        (self.root / "project.md.bak").unlink()
+        r = run_board("--dir", str(self.root), "project-note", " Use X for Y. ")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"added": False})
+        self.assertEqual(self.md.read_text(), "- Notes: A. Use X for Y.\n")
+        self.assertFalse((self.root / "project.md.bak").exists())
+
+    def test_refuses_empty_line_and_missing_file(self):
+        for bad in ("", "   ", "a\nb", "a\r\nb"):
+            with self.assertRaises(SystemExit) as e:
+                board.cmd_project_note(self.root, bad)
+            self.assertEqual(str(e.exception), "project-note: the line is empty or has a newline")
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_project_note(self.root, "Use X for Y.")
+        self.assertEqual(str(e.exception), "project-note: scrum/project.md is missing")
+        self.assertFalse(self.md.exists())
+        self.assertFalse((self.root / "project.md.bak").exists())
+        self.md.write_text("- Notes: A.\n")
+        with self.assertRaises(SystemExit):
+            board.cmd_project_note(self.root, "a\nb")
+        self.assertEqual(self.md.read_text(), "- Notes: A.\n")
+        self.assertFalse((self.root / "project.md.bak").exists())

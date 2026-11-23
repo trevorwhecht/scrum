@@ -24,7 +24,9 @@
   board.py answer <id> <a|b|c>     log the pick on the job's open question to questions.log, print that option as JSON
   board.py followup <id> "<fix>"   a Prod check stop's follow-up answer: add "<fix> (from <id>)" to the backlog (once),
                                    then set the job stage=done
-  board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
+  board.py project-note "<line>"   append a spec's Project note line to project.md's "- Notes:" line (backup in
+                                   project.md.bak; a line already in the file writes nothing), print {"added"}
+  board.py sync <id>              re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite,
                                    no {after repo:job} job of another registered repo that is not done, no {setup: …} Human
                                    setup, no trailing "(from <id>)" job still open, and is not held by the requeue loop
@@ -7448,6 +7450,41 @@ def cmd_followup(root, job_id, fix):
     cmd_set(root, job_id, ["stage=done", f"reason={FOLLOWUP_REASON}"])
 
 
+def cmd_project_note(root, line) -> dict:
+    """`project-note '<line>'` (job 1369): append a spec's `Project note:` line to the first `- Notes:` line of
+    <root>/project.md, or add `- Notes: <line>` as a new last line when there is none. Under an fcntl lock on
+    .project.md.lock: a line whose stripped text is already in the file writes nothing ({"added": false}); otherwise
+    the old bytes go to project.md.bak, then the new text is written through a tmp file and os.replace. Every other
+    byte, line endings included, stays. Never creates project.md."""
+    note = (line or "").strip()
+    if not note or "\n" in note or "\r" in note:
+        raise SystemExit("project-note: the line is empty or has a newline")
+    path = Path(root) / "project.md"
+    if not path.is_file():
+        raise SystemExit("project-note: scrum/project.md is missing")
+    with open(path.with_name(".project.md.lock"), "w") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        try:
+            before = path.read_bytes()
+        except FileNotFoundError:
+            raise SystemExit("project-note: scrum/project.md is missing") from None
+        text = before.decode()
+        if note in text:
+            return {"added": False}
+        lines = re.findall(r"[^\n]*\n|[^\n]+", text)  # each keeps its own line ending
+        hit = next((i for i, l in enumerate(lines) if l.startswith("- Notes:")), None)
+        if hit is None:
+            lines.append(("\n" if text and not text.endswith("\n") else "") + f"- Notes: {note}\n")
+        else:
+            body = lines[hit].rstrip("\r\n")
+            lines[hit] = f"{body.rstrip()} {note}" + lines[hit][len(body):]
+        path.with_name("project.md.bak").write_bytes(before)
+        tmp = path.with_name(f"project.md.{os.getpid()}.tmp")
+        tmp.write_bytes("".join(lines).encode())
+        os.replace(tmp, path)
+    return {"added": True}
+
+
 def log_note(root, job_id, action, text):
     """Append Trevor's typed rework or discuss text to questions.log as a `kind: note` line; blank text logs nothing.
     Takes the board's flock only, like serve.py `refused`: board.json is left as it was."""
@@ -8815,6 +8852,7 @@ def main(argv=None):
     an = sub.add_parser("answer")
     an.add_argument("id")
     an.add_argument("key", choices=("a", "b", "c"))
+    sub.add_parser("project-note").add_argument("line")
     fu = sub.add_parser("followup")
     fu.add_argument("id")
     fu.add_argument("fix")
@@ -8977,6 +9015,8 @@ def main(argv=None):
         print(json.dumps(cmd_answer(a.dir, a.id, a.key)))
     elif a.cmd == "followup":
         cmd_followup(a.dir, a.id, a.fix)
+    elif a.cmd == "project-note":
+        print(json.dumps(cmd_project_note(a.dir, a.line)))
     elif a.cmd == "next":
         print(json.dumps(cmd_next(a.dir, a.index)))
     elif a.cmd == "cloud-claim":
