@@ -15459,6 +15459,77 @@ class E2eWaitRecordTest(unittest.TestCase):
         self.assertTrue(self.gone(child))
         self.assertFalse(self.holder.exists())
 
+    def test_reap_orphan_uses_stop_group(self):
+        """Job 1412: the orphan branch stops the holder through stop_group (its descendant tree too), never a bare
+        os.killpg; the lsof loop still frees the flock child."""
+        child = self.flock_child()
+        self.write_holder(child.pid, start=int(self.now - 7300), cwd=str(self.root.parent))
+        with mock.patch.object(self.serve, "stop_group", return_value=False) as stop, \
+                mock.patch.object(self.serve.os, "killpg") as killpg:
+            self.reap()
+        self.assertEqual(stop.call_args_list, [mock.call(child.pid)])
+        killpg.assert_not_called()
+        self.assertTrue(self.gone(child))
+        self.assertFalse(self.holder.exists())
+
+    def test_reap_orphan_takes_own_group_descendant(self):
+        """Job 1412: a holder in its own session whose child runs in another new session (Playwright's webServer)
+        loses both on the reap."""
+        script = ("import subprocess, sys, time\n"
+                  "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+                  "print(g.pid, flush=True)\n"
+                  "time.sleep(60)\n")
+        p = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True, start_new_session=True)
+        grand = int(p.stdout.readline())
+
+        def cleanup():
+            for pid in (grand, p.pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            p.wait()
+            p.stdout.close()
+        self.addCleanup(cleanup)
+        threading.Thread(target=p.wait, daemon=True).start()  # reap the holder at once, as its real parent would
+        self.write_holder(p.pid, start=int(self.now - 7300), cwd=str(self.root.parent))
+        self.reap()
+
+        def alive(pid):
+            try:
+                os.kill(pid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+        deadline = time.time() + 30
+        while (alive(p.pid) or alive(grand)) and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertFalse(alive(p.pid), "holder")
+        self.assertFalse(alive(grand), "its own-session child")
+        self.assertFalse(self.holder.exists())
+
+    def test_main_checkout_orphan_matches_e2e_full_worktree(self):
+        """Job 1412: a full run's holder in <repo>/.claude/worktrees/e2e-full counts as an orphan, as the main checkout
+        does; a job worktree, a subdirectory, a young holder and a watched run do not."""
+        main = self.root.parent
+        full = main / ".claude" / "worktrees" / "e2e-full"
+        job = main / ".claude" / "worktrees" / "scrum-1234-x"
+        for d in (full / "sub", job):
+            d.mkdir(parents=True)
+        self.addCleanup(self.serve.E2E_FULL.update, running=None)
+        self.serve.E2E_FULL["running"] = None
+        old, young = int(self.now - 7300), int(self.now - 600)
+        orphan = self.serve.main_checkout_orphan
+        self.assertTrue(orphan((4242, str(full), old), self.now))
+        self.assertTrue(orphan((4242, str(main), old), self.now))
+        self.assertFalse(orphan((4242, str(job), old), self.now))
+        self.assertFalse(orphan((4242, str(full / "sub"), old), self.now))
+        self.assertFalse(orphan((4242, str(full), young), self.now))
+        self.serve.E2E_FULL["running"] = main.name
+        self.assertFalse(orphan((4242, str(full), old), self.now))
+
     def test_over_two_hours(self):
         self.waiter(7810)
         self.write_holder(4242)
@@ -15545,6 +15616,119 @@ class E2eWaitRecordTest(unittest.TestCase):
             self.reap()
         self.assertFalse(self.gone(child))
         self.assertEqual(self.holder.read_text().split("\n")[2], str(int(self.now)))
+
+
+class E2eDevOrphanStopTest(unittest.TestCase):
+    """Job 1412: with no live e2e.lock holder, a ppid-1 shell that tees a webServer's next dev log and whose tree
+    listens on that port in a project's main checkout or e2e-full worktree is stopped through stop_group."""
+    SH = "/bin/sh -c npx next dev --port {} 2>&1 | tee /tmp/e2e-next-dev-{}.log"
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(os.path.realpath(self.tmp.name))
+        self.dir = base / "home" / ".claude" / "trevskills-scrum"
+        self.dir.mkdir(parents=True)
+        self.main = base / "proj"
+        (self.main / "scrum").mkdir(parents=True)
+        self.full = self.main / ".claude" / "worktrees" / "e2e-full"
+        self.job = self.main / ".claude" / "worktrees" / "scrum-1234-x"
+        for d in (self.full, self.job, base / "other"):
+            d.mkdir(parents=True)
+        self.other = base / "other"
+        (base / "projects.json").write_text(json.dumps([str(self.main)]))
+        p = mock.patch.dict(os.environ, HOME=str(base / "home"), SCRUM_REGISTRY=str(base / "projects.json"))
+        p.start()
+        self.addCleanup(p.stop)
+        self.now = time.time()
+
+    def procs(self, port=4100, tee_port=None, ppid=1, cmd=None):
+        """The orphaned shell 5001 (ppid 1), its npx 5002 and the listening next-server 5003."""
+        return [(5001, ppid, cmd if cmd is not None else self.SH.format(port, tee_port or port)),
+                (5002, 5001, f"node npx next dev --port {port}"), (5003, 5002, "next-server (v15)"),
+                (7000, 1, "/usr/sbin/syslogd")]
+
+    def run_stop(self, procs, listening, holder=None):
+        """(e2e_dev_orphan_stop's result, stop_group's calls, the processes.log lines) with the inputs mocked."""
+        with mock.patch.object(self.serve, "processes", return_value=procs), \
+                mock.patch.object(self.serve.board, "listeners", return_value=listening), \
+                mock.patch.object(self.serve, "read_holder", return_value=holder), \
+                mock.patch.object(self.serve, "stop_group", return_value=True) as stop:
+            out, lines = processes_logged(lambda: self.serve.e2e_dev_orphan_stop(self.now))
+        return out, stop.call_args_list, lines
+
+    def dead_pid(self):
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        return p.pid
+
+    def test_stops_orphaned_webserver(self):
+        for name, cwd, holder in (("e2e-full worktree", self.full, None), ("main checkout", self.main, None),
+                                  ("dead holder", self.full, (self.dead_pid(), str(self.full), 0))):
+            with self.subTest(name):
+                out, calls, lines = self.run_stop(self.procs(), [(5003, 4100, str(cwd))], holder)
+                self.assertEqual(out, [5001])
+                self.assertEqual(calls, [mock.call(5001)])
+                self.assertEqual(lines, [{"process": "E2E lock reaps", "result": "stopped", "pid": 5001,
+                                          "port": 4100, "cwd": str(cwd)}])
+
+    def test_spares_non_matching(self):
+        full = str(self.full)
+        cases = {
+            "live holder": (self.procs(), [(5003, 4100, full)], (os.getpid(), full, 0)),
+            "ppid not 1": (self.procs(ppid=4321), [(5003, 4100, full)], None),
+            "tee port differs": (self.procs(tee_port=4200), [(5003, 4100, full)], None),
+            "job worktree": (self.procs(), [(5003, 4100, str(self.job))], None),
+            "unregistered dir": (self.procs(), [(5003, 4100, str(self.other))], None),
+            "keep port": (self.procs(port=3001), [(5003, 3001, full)], None),
+            "no tee": (self.procs(cmd="/bin/sh -c npx next dev --port 4100"), [(5003, 4100, full)], None),
+            "listener outside the tree": (self.procs(), [(7000, 4100, full)], None),
+        }
+        for name, (procs, listening, holder) in cases.items():
+            with self.subTest(name):
+                out, calls, lines = self.run_stop(procs, listening, holder)
+                self.assertEqual(out, [])
+                self.assertEqual(calls, [])
+                self.assertEqual(lines, [])
+
+    def test_empty_and_failing_inputs(self):
+        full = str(self.full)
+        for name, procs, listening in (("no ps", [], [(5003, 4100, full)]), ("no lsof", self.procs(), [])):
+            with self.subTest(name):
+                out, calls, _ = self.run_stop(procs, listening)
+                self.assertEqual(out, [])
+                self.assertEqual(calls, [])
+        err = io.StringIO()
+        with mock.patch.object(self.serve, "processes", side_effect=RuntimeError("boom")), \
+                mock.patch.object(self.serve, "read_holder", return_value=None), \
+                mock.patch.object(self.serve, "stop_group") as stop, mock.patch("sys.stderr", new=err):
+            self.assertEqual(self.serve.e2e_dev_orphan_stop(self.now), [])
+        stop.assert_not_called()
+        self.assertIn("e2e_dev_orphan_stop: RuntimeError('boom')", err.getvalue())
+
+    def test_reap_calls_dev_orphan_stop(self):
+        holder = self.dir / "e2e.lock.holder"
+        holder.write_text(f"{self.dead_pid()}\n{self.full}\n{int(self.now - 7300)}")
+        (self.dir / "e2e.lock.waiting").mkdir()
+        m = self.dir / "e2e.lock.waiting" / str(os.getpid())
+        m.write_text(f"{self.job}\n0")
+        os.utime(m, (self.now - 7810, self.now - 7810))
+        seen = []
+        with mock.patch.object(self.serve, "e2e_dev_orphan_stop",
+                               side_effect=lambda now: seen.append(holder.exists()) or []) as dev, \
+                mock.patch("sys.stderr", new=io.StringIO()):
+            self.serve.e2e_lock_reap(self.now)
+        self.assertEqual(dev.call_args_list, [mock.call(self.now)])
+        self.assertEqual(seen, [False], "called after the slot loop freed the dead holder's slot")
+        snapshots = iter([self.procs(), []])  # the second tick's snapshot no longer lists the stopped orphan
+        with mock.patch.object(self.serve, "processes", side_effect=lambda: next(snapshots)), \
+                mock.patch.object(self.serve.board, "listeners", return_value=[(5003, 4100, str(self.full))]), \
+                mock.patch.object(self.serve, "stop_group", return_value=True) as stop, \
+                mock.patch("sys.stderr", new=io.StringIO()):
+            processes_logged(lambda: (self.serve.e2e_lock_reap(self.now), self.serve.e2e_lock_reap(self.now)))
+        self.assertEqual(stop.call_args_list, [mock.call(5001)])
 
 
 if __name__ == "__main__":
