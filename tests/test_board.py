@@ -8777,6 +8777,175 @@ class CloudSyncTest(unittest.TestCase):
                 if rc:
                     self.assertIn("fatal: not a working tree", e.getvalue())
 
+    def shop_job(self, job_id=None):
+        """The job as a shop session left it: stage cloud with its shop pid and worker (job 1414)."""
+        board.cmd_set(self.root, job_id or self.job, ["shop=4242", "worker=shopmac"])
+
+    def home(self, pulls, ended, worktree="/wt", pushed=False):
+        with self.gh(pulls), mock.patch.object(board, "cloud_worktree", return_value=worktree) as wt, \
+                mock.patch.object(board, "branch_pushed", return_value=pushed) as bp, \
+                mock.patch("sys.stderr", io.StringIO()):
+            out = board.cmd_cloud_sync(self.root, ended=ended)
+        return out, wt, bp
+
+    def test_ended_open_pr_brought_home(self):
+        self.shop_job()
+        with board.locked_board(self.root) as b:
+            board.find(b, self.job)["updatedAt"] = "2026-01-01T00:00:00+00:00"
+        head = "scrum/001-cloud-fix"
+        open_pr = self.pr(head={"ref": head, "repo": {"full_name": "o/r"}}, body="Scrum lane: fast")
+        out, wt, bp = self.home([open_pr], [self.job])
+        reason = f"stalled: shop session ended leaving PR {self.URL} open; its branch {head} is home for the local pipeline"
+        self.assertEqual(out, {"moved": [{"id": self.job, "state": "HOME", "pr": self.URL, "reason": reason,
+                                          "worktree": "/wt", "artifacts": False}], "arrived": [], "error": None})
+        wt.assert_called_once_with(self.root.parent, self.job, head)
+        bp.assert_not_called()  # a trusted PR decides; no branch read
+        job = self.get()
+        self.assertEqual((job["stage"], job["stalled"], job["reason"], job["pr"], job["base"], job["worktree"], job["branch"]),
+                         ("spec", True, reason, self.URL, "origin/main", "/wt", head))
+        self.assertNotEqual(job["updatedAt"], "2026-01-01T00:00:00+00:00")
+        self.assertNotIn("shop", job)
+        self.assertIsNone(job.get("lane"))  # the local New job's spec decides the lane
+        self.assertNotIn("artifactsPending", job)
+        self.assertNotIn("without a PR", job["reason"])
+        board.artifacts_pushed.assert_not_called()
+        self.assertEqual(self.calls, [(self.root.parent, self.PULLS)])  # no PATCH state=closed
+        self.assertEqual(self.backlog_texts(), [])  # no requeue
+        self.assertEqual(board.stall_stage(job), "spec")
+
+    def test_ended_branch_without_pr_brought_home(self):
+        self.shop_job()
+        other = self.pr(title="[scrum 999-other] x", head={"ref": "scrum/999-other", "repo": {"full_name": "o/r"}})
+        out, wt, bp = self.home([other], [self.job], pushed=True)
+        reason = (f"stalled: shop session ended leaving branch scrum/{self.job} pushed with no PR; it is home for the "
+                  "local pipeline")
+        self.assertEqual(out["moved"], [{"id": self.job, "state": "HOME", "pr": None, "reason": reason, "worktree": "/wt",
+                                         "artifacts": False}])
+        bp.assert_called_once_with(self.root.parent, self.job)
+        wt.assert_called_once_with(self.root.parent, self.job)
+        job = self.get()
+        self.assertEqual((job["stage"], job["stalled"], job["reason"], job["pr"], job["base"], job["worktree"], job["branch"]),
+                         ("spec", True, reason, None, None, "/wt", f"scrum/{self.job}"))
+        self.assertNotIn("shop", job)
+        self.assertNotIn("artifactsPending", job)
+        board.artifacts_pushed.assert_not_called()
+        self.assertEqual(self.backlog_texts(), [])
+
+        self.setUp()  # no branch either: left in cloud for serve.py's SHOP_ENDED abort
+        self.shop_job()
+        before = self.get()
+        out, wt, bp = self.home([], [self.job], pushed=False)
+        self.assertEqual(out, {"moved": [], "arrived": [], "error": None})
+        bp.assert_called_once_with(self.root.parent, self.job)
+        wt.assert_not_called()
+        self.assert_untouched(before)
+
+        self.setUp()  # a closed trusted PR is a PR: CLOSED, with no branch read
+        self.shop_job()
+        out, wt, bp = self.home([self.pr(state="closed")], [self.job], pushed=True)
+        self.assertEqual([m["state"] for m in out["moved"]], ["CLOSED"])
+        bp.assert_not_called()
+
+        self.setUp()  # not ended: no branch read at all
+        self.shop_job()
+        out, wt, bp = self.home([], [], pushed=True)
+        self.assertEqual(out["moved"], [])
+        bp.assert_not_called()
+
+    def test_branch_pushed_false_on_git_failure(self):
+        argv = ["git", "-C", str(self.root.parent), "ls-remote", "--exit-code", "origin", "refs/heads/scrum/007-x"]
+        for effect, want in ((subprocess.CompletedProcess(argv, 0, b"abc\trefs/heads/scrum/007-x\n", b""), True),
+                             (subprocess.CompletedProcess(argv, 2, b"", b""), False),
+                             (subprocess.CompletedProcess(argv, 128, b"", b"fatal: unable to access"), False),
+                             (subprocess.TimeoutExpired(argv, 30), False),
+                             (FileNotFoundError(2, "No such file", "git"), False),
+                             (PermissionError(13, "denied"), False)):
+            with self.subTest(effect=effect):
+                kw = {"return_value": effect} if isinstance(effect, subprocess.CompletedProcess) else {"side_effect": effect}
+                with mock.patch.object(board.subprocess, "run", **kw) as run:
+                    self.assertIs(board.branch_pushed(self.root.parent, "007-x"), want)
+                self.assertEqual(run.call_args.args[0], argv)
+        with mock.patch.object(board.subprocess, "run") as run, self.assertRaises(SystemExit):
+            board.branch_pushed(self.root.parent, "--upload-pack=x")
+        run.assert_not_called()
+
+    def test_ended_home_worktree_add_fails_needs_human(self):
+        self.shop_job()
+        out, wt, bp = self.home([self.pr()], [self.job], worktree=None)
+        reason = (f"shop session ended leaving PR {self.URL} open, but its worktree could not be added here. "
+                  f"Fix: free .claude/worktrees/scrum-{self.job}, then rework or abort the job.")
+        self.assertEqual(out["moved"], [{"id": self.job, "state": "NEEDS-HUMAN", "pr": self.URL, "reason": reason,
+                                         "worktree": None, "artifacts": False}])
+        job = self.get()
+        self.assertEqual((job["stage"], job["pr"], job["base"], job["reason"], job["worktree"], job["branch"]),
+                         ("needs-human", self.URL, "origin/main", reason, None, f"scrum/{self.job}"))
+        self.assertFalse(job.get("stalled"))
+        self.assertNotIn("artifactsPending", job)
+        self.assertEqual(self.calls, [(self.root.parent, self.PULLS)])  # the PR stays open
+        self.assertEqual(self.backlog_texts(), [])
+
+        self.setUp()
+        self.shop_job()
+        out, wt, bp = self.home([], [self.job], worktree=None, pushed=True)
+        reason = (f"shop session ended leaving branch scrum/{self.job} pushed with no PR, but its worktree could not be "
+                  f"added here. Fix: free .claude/worktrees/scrum-{self.job}, then rework or abort the job.")
+        self.assertEqual(out["moved"], [{"id": self.job, "state": "NEEDS-HUMAN", "pr": None, "reason": reason,
+                                         "worktree": None, "artifacts": False}])
+        job = self.get()
+        self.assertEqual((job["stage"], job["pr"], job["base"], job["reason"], job["worktree"]),
+                         ("needs-human", None, None, reason, None))
+        self.assertEqual(self.backlog_texts(), [])
+
+    def test_ended_home_skips_job_that_left_cloud(self):
+        for pulls, pushed in (([self.pr()], False), ([], True)):
+            with self.subTest(pr=bool(pulls)):
+                self.setUp()
+                self.shop_job()
+                def add(repo, job_id, ref=None):  # the worktree lands, then Trevor moves the job by hand
+                    board.cmd_set(self.root, job_id, ["stage=build", "reason=picked up locally"])
+                    return "/r/.claude/worktrees/scrum-x"
+                with self.gh(pulls), mock.patch.object(board, "cloud_worktree", side_effect=add), \
+                        mock.patch.object(board, "branch_pushed", return_value=pushed), \
+                        mock.patch.object(board, "cloud_worktree_remove") as rm, mock.patch("sys.stderr", io.StringIO()):
+                    out = board.cmd_cloud_sync(self.root, ended=[self.job])
+                self.assertEqual(out, {"moved": [], "arrived": [], "error": None})
+                rm.assert_called_once_with(self.root.parent, "/r/.claude/worktrees/scrum-x")
+                job = self.get()
+                self.assertEqual((job["stage"], job["reason"], job["shop"], job["worktree"], job["branch"], job["pr"]),
+                                 ("build", "picked up locally", "4242", None, f"scrum/{self.job}", None))
+                self.assertFalse(job.get("stalled"))
+
+    def test_ended_labelled_pr_still_needs_human(self):
+        self.shop_job()
+        labelled = self.pr(labels=[{"name": "scrum:needs-human"}])
+        comments = [{"user": self.TREV, "body": "blocked: y\n<!-- scrum needs-human -->"}]
+        with self.gh([labelled], comments), mock.patch.object(board, "cloud_worktree", return_value="/wt"), \
+                mock.patch.object(board, "branch_pushed", return_value=True) as bp:
+            out = board.cmd_cloud_sync(self.root, ended=[self.job])
+        self.assertEqual([(m["state"], m["reason"]) for m in out["moved"]], [("NEEDS-HUMAN", "blocked: y")])
+        self.assertEqual((self.get()["stage"], self.get()["reason"]), ("needs-human", "blocked: y"))
+        bp.assert_not_called()
+        for pr, state, stage in ((self.pr(state="closed"), "CLOSED", "aborted"),
+                                 (self.pr(state="closed", merged_at="2026-10-01T00:00:00Z"), "MERGED", "done")):
+            with self.subTest(state=state):
+                self.setUp()
+                self.shop_job()
+                out, wt, bp = self.home([pr], [self.job], pushed=True)
+                self.assertEqual([m["state"] for m in out["moved"]], [state])
+                self.assertEqual(self.get()["stage"], stage)
+                wt.assert_not_called()
+        self.setUp()  # a gh read error still changes nothing, and reads no branch
+        self.shop_job()
+        before = self.get()
+        with mock.patch.object(board, "gh_api", side_effect=board.GhError("HTTP 502")), \
+                mock.patch.object(board, "branch_pushed", return_value=True) as bp, \
+                mock.patch.object(board, "cloud_worktree", return_value="/wt") as wt:
+            self.assertEqual(board.cmd_cloud_sync(self.root, ended=[self.job]),
+                             {"moved": [], "arrived": [], "error": "HTTP 502"})
+        bp.assert_not_called()
+        wt.assert_not_called()
+        self.assert_untouched(before)
+
     def test_cli_prints_json(self):
         with self.gh([self.pr(state="closed")]), redirect_stdout(io.StringIO()) as out:
             code = board.main(["--dir", str(self.root), "cloud-sync"])
