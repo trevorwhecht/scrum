@@ -4276,7 +4276,7 @@ def watchdog_tick():
     except (Exception, SystemExit) as e:
         print(f"watchdog: cpu sample: {e}", file=sys.stderr, flush=True)
     try:
-        e2e_lock_reap(time.time())  # frees e2e.lock from a dead or out-of-check holder once a waiter has waited 2 h
+        e2e_lock_reap(time.time())  # frees e2e.lock (dead, out-of-check, orphaned holder), stops orphaned E2E dev servers
     except Exception as e:
         print(f"watchdog: e2e lock reap: {e}", file=sys.stderr, flush=True)
     try:
@@ -5920,21 +5920,71 @@ def e2e_wait_info(job, now):
 
 
 def main_checkout_orphan(h, now) -> bool:
-    """True when holder h (read_holder) runs in a registered project's main checkout, started over E2E_FULL_STALE ago,
-    and E2E_FULL["running"] is not that project: a full run whose watching thread is gone (backlog #363e)."""
+    """True when holder h (read_holder) runs in a registered project's main checkout or its
+    <repo>/.claude/worktrees/e2e-full worktree (where a full run runs since PR 967; realpaths, never a subdirectory),
+    started over E2E_FULL_STALE ago, and E2E_FULL["running"] is not that project: a full run whose watching thread is
+    gone (backlog #363e, job 1412)."""
     cwd = os.path.realpath(h[1])
     return now - h[2] > E2E_FULL_STALE and any(
-        os.path.realpath(repo) == cwd and E2E_FULL["running"] != name for name, repo in board.projects().items())
+        cwd in (os.path.realpath(repo), os.path.realpath(Path(repo) / ".claude" / "worktrees" / "e2e-full"))
+        and E2E_FULL["running"] != name for name, repo in board.projects().items())
+
+
+E2E_DEV_TEE = re.compile(re.escape("tee " + E2E_FULL_DEV_LOG).replace(re.escape("{}"), r"(\d+)"))  # tee'd port
+
+
+def e2e_dev_orphan_stop(now) -> list[int]:
+    """Job 1412: stop a full run's Playwright webServer its killed run left behind. With no e2e.lock slot holding a
+    live holder (read_holder; dead, missing or malformed counts as none), a root R with ppid 1 in one processes()
+    snapshot whose command tees E2E_FULL_DEV_LOG for port P (E2E_DEV_TEE), and that itself or a descendant (ppid
+    links) is a board.listeners() pid on P whose cwd is a registered project's main checkout or
+    <repo>/.claude/worktrees/e2e-full, P off board.KEEP_PORTS and R not this process, gets stop_group(R) and one
+    processes.log line. Returns the roots stopped. ps or lsof missing gives []; never raises (stderr instead). `now`
+    keeps the reap's signature, for tests and later age checks."""
+    stopped = []
+    try:
+        for slot in buildlock.slot_paths(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock"):
+            if (h := read_holder(slot)) and h[0] > 1 and not e2e_full_pid_gone(h[0]):
+                return []  # a running job or full E2E may own the server
+        procs = processes()
+        roots = [(pid, int(m[1])) for pid, ppid, cmd in procs
+                 if ppid == 1 and pid != os.getpid() and (m := E2E_DEV_TEE.search(cmd))
+                 and int(m[1]) not in board.KEEP_PORTS]
+        if not roots:
+            return []
+        allowed = {os.path.realpath(p) for repo in board.projects().values()
+                   for p in (repo, Path(repo) / ".claude" / "worktrees" / "e2e-full")}
+        listening = board.listeners()
+        kids = {}
+        for pid, ppid, _ in procs:
+            kids.setdefault(ppid, []).append(pid)
+        for root, port in roots:
+            tree, todo = set(), [root]
+            while todo:
+                if (p := todo.pop()) not in tree:
+                    tree.add(p)
+                    todo.extend(kids.get(p, []))
+            cwd = next((c for p, lport, c in listening if p in tree and lport == port and c in allowed), None)
+            if cwd is None:
+                continue
+            stop_group(root)
+            stopped.append(root)
+            board.log_process("E2E lock reaps", "stopped", pid=root, port=port, cwd=cwd)
+    except Exception as e:
+        print(f"e2e_dev_orphan_stop: {e!r}", file=sys.stderr)
+    return stopped
 
 
 def e2e_lock_reap(now):
-    """An e2e.lock holder in a registered project's main checkout older than E2E_FULL_STALE while E2E_FULL["running"]
-    is not that project (main_checkout_orphan) is freed with or without a waiter: its process group gets SIGTERM, then
-    the holder file goes. Otherwise, while some e2e.lock waiter has waited over E2E_WAIT_RECORD_SECS, free each slot whose holder file names a dead
+    """An e2e.lock holder in a registered project's main checkout or e2e-full worktree older than E2E_FULL_STALE while
+    E2E_FULL["running"] is not that project (main_checkout_orphan) is freed with or without a waiter: stop_group stops
+    its process group and descendant tree (Playwright's webServer in a group of its own, job 1412), then the holder
+    file goes. Otherwise, while some e2e.lock waiter has waited over E2E_WAIT_RECORD_SECS, free each slot whose holder file names a dead
     wrapper pid (a grandchild kept the inherited fd) or a cwd in a job no longer in `check`: SIGTERM every pid
     `lsof -t` lists for the slot file, then remove the holder file. A live holder in a `check` job, a holder whose
     cwd matches no job, a missing or malformed holder file, an lsof failure, and a holder file that changed since
-    it was first read (a new holder took the slot) are left alone. Never raises on a missing lsof."""
+    it was first read (a new holder took the slot) are left alone. Never raises on a missing lsof. After the slots,
+    e2e_dev_orphan_stop stops an E2E webServer left with ppid 1 once no slot has a live holder."""
     old_waiter = any(age > E2E_WAIT_RECORD_SECS for _, age in e2e_waiters(now))
     for slot in buildlock.slot_paths(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock"):
         h = read_holder(slot)
@@ -5963,12 +6013,8 @@ def e2e_lock_reap(now):
             continue
         if r.returncode not in (0, 1):  # 1: nobody has it open
             continue
-        if orphan:  # the buildlock child outlived its thread: take its whole group (the run's playwright and dev servers)
-            try:
-                if (pgid := os.getpgid(h[0])) != os.getpgrp():
-                    os.killpg(pgid, signal.SIGTERM)
-            except OSError:
-                pass
+        if orphan:  # the buildlock child outlived its thread: its group and descendant tree (playwright, its webServer)
+            stop_group(h[0])
         for pid in {int(x) for x in r.stdout.split() if x.isdigit()} - {os.getpid()}:
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -5979,6 +6025,7 @@ def e2e_lock_reap(now):
         print(f"watchdog: freed {slot.name} from {'dead holder' if dead else 'an orphaned main-checkout run' if orphan else 'a job out of check'} {h[0]} ({h[1]})",
               file=sys.stderr, flush=True)
         board.log_process("E2E lock reaps", "freed", slot=slot.name, pid=h[0], cwd=h[1], dead=dead)
+    e2e_dev_orphan_stop(now)  # after the loop: a slot freed this tick counts as having no live holder
 
 
 AGENT_LINKS_RETRY_S = 3600  # the same bad link set re-runs install.sh at most this often
