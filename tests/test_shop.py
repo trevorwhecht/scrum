@@ -1933,7 +1933,7 @@ START = ('cd ~/scrum-work/onewitharts && (umask 077 && mkdir -p .git/scrum-shop 
          '.git/scrum-shop/964-shop-x.prompt)" --permission-mode acceptEdits --model \'claude-opus-4-5[1m]\' < /dev/null > '
          '.git/scrum-shop/964-shop-x.log 2>&1 & echo $!')
 CLONE = ('d="$HOME/scrum-work/onewitharts"; if [ -d "$d/.git" ]; then [ "$(git -C "$d" config --get remote.origin.url)" '
-         '= https://github.com/trevorwhecht/onewitharts.git ] || exit 3; git -C "$d" fetch origin && git -C "$d" checkout '
+         '= https://github.com/trevorwhecht/onewitharts.git ] || exit 3; git -C "$d" fetch -q origin && git -C "$d" checkout '
          '-q "$(git -C "$d" symbolic-ref --short refs/remotes/origin/HEAD | sed "s,^origin/,,")" && git -C "$d" merge '
          '--ff-only refs/remotes/origin/HEAD; else mkdir -p "$HOME/scrum-work" && git clone -- '
          'https://github.com/trevorwhecht/onewitharts.git "$d"; fi && ' + shop.TRUST)
@@ -2044,16 +2044,16 @@ class DispatchTest(SetupCase):
         work, bare = self.origin()
         dest = Path(self.home) / "scrum-work" / "onewitharts"
         self.shop(("scrum-work", LOCAL, ""))
-        self.assertTrue(shop.clone("onewitharts", URL))
+        self.assertTrue(shop.clone("onewitharts", URL)[0])
         self.assertEqual((self.head(dest), self.git("config", "--get", "remote.origin.url", cwd=dest)),
                          (self.head(work), URL))
         self.commit(work, bare, "two")
-        self.assertTrue(shop.clone("onewitharts", URL))
+        self.assertTrue(shop.clone("onewitharts", URL)[0])
         self.assertEqual(self.head(dest), self.head(work))
         self.git("commit", "-q", "--allow-empty", "-m", "shop only", cwd=dest)  # not on origin: no fast-forward
         mine = self.head(dest)
         self.commit(work, bare, "three")
-        self.assertFalse(shop.clone("onewitharts", URL))
+        self.assertFalse(shop.clone("onewitharts", URL)[0])
         self.assertEqual((self.head(dest), self.head(dest, "refs/remotes/origin/main")), (mine, self.head(work)))
         self.assertEqual(self.calls, [(CLONE, 600, None)] * 3)
 
@@ -2061,11 +2061,11 @@ class DispatchTest(SetupCase):
         work, bare = self.origin()
         dest = Path(self.home) / "scrum-work" / "onewitharts"
         self.shop(("scrum-work", LOCAL, ""))
-        self.assertTrue(shop.clone("onewitharts", URL))
+        self.assertTrue(shop.clone("onewitharts", URL)[0])
         self.git("checkout", "-q", "-b", "scrum/081-x", cwd=dest)  # a lilguy job's branch, squash-merged so not an ancestor
         self.git("commit", "-q", "--allow-empty", "-m", "branch work", cwd=dest)
         self.commit(work, bare, "two")
-        self.assertTrue(shop.clone("onewitharts", URL))
+        self.assertTrue(shop.clone("onewitharts", URL)[0])
         self.assertEqual((self.git("symbolic-ref", "--short", "HEAD", cwd=dest), self.head(dest)), ("main", self.head(work)))
 
     def test_clone_marks_work_folder_trusted(self):
@@ -2076,7 +2076,7 @@ class DispatchTest(SetupCase):
         (h / ".claude-owa" / ".claude.json").write_text('{"projects": {"/x": {"a": 1}}}')
         (h / ".claude.json").write_text("{}")
         for _ in range(2):  # idempotent
-            self.assertTrue(shop.clone("onewitharts", URL))
+            self.assertTrue(shop.clone("onewitharts", URL)[0])
         for f in (h / ".claude-owa" / ".claude.json", h / ".claude.json"):
             self.assertTrue(json.loads(f.read_text())["projects"][str(h / "scrum-work" / "onewitharts")]
                             ["hasTrustDialogAccepted"])
@@ -2090,24 +2090,107 @@ class DispatchTest(SetupCase):
                     "git@github.com:trevorwhecht/onewitharts.git", URL + "\n", "https://github.com/trevorwhecht/a;id",
                     "https://github.com/trevorwhecht/..", "https://github.com/trevorwhecht/a b", "--upload-pack=x", ""):
             with self.subTest(url=url):
-                self.assertFalse(shop.clone("onewitharts", url))
+                self.assertFalse(shop.clone("onewitharts", url)[0])
         for name in ("-x", "../x", "a b", "", "x\n"):
             with self.subTest(name=name):
-                self.assertFalse(shop.clone(name, URL))
+                self.assertFalse(shop.clone(name, URL)[0])
         self.assertEqual(self.argv, [])
         work, bare = self.origin()
         other = "https://github.com/trevorwhecht/other"  # no .git: accepted
         self.origin(other)
         dest = Path(self.home) / "scrum-work" / "onewitharts"
-        self.assertTrue(shop.clone("onewitharts", URL))
+        self.assertTrue(shop.clone("onewitharts", URL)[0])
         fetched = self.head(dest, "refs/remotes/origin/main")
         self.commit(work, bare, "two")
-        self.assertFalse(shop.clone("onewitharts", other))
+        self.assertFalse(shop.clone("onewitharts", other)[0])
         self.assertEqual((self.head(dest, "refs/remotes/origin/main"), self.git("config", "--get", "remote.origin.url",
                                                                               cwd=dest)), (fetched, URL))
-        self.assertTrue(shop.clone("other", other))
+        self.assertTrue(shop.clone("other", other)[0])
         self.assertEqual(self.git("config", "--get", "remote.origin.url", cwd=Path(self.home) / "scrum-work" / "other"),
                          other)
+
+    def test_clone_reports_git_error_on_dirty_clone(self):
+        """Job 1415: clone() says why it failed: git's stderr on one line (cut to 300), `exit <code>` with none, the
+        origin it refused, or a refused name or URL with no ssh."""
+        self.shop()
+        self.assertEqual(shop.clone("-x", URL), (False, "bad project or URL"))
+        self.assertEqual(shop.clone("onewitharts", "--upload-pack=x"), (False, "bad project or URL"))
+        self.assertEqual(self.argv, [])
+        for answer, why in (((3, ""), "origin is not https://github.com/trevorwhecht/onewitharts.git"),
+                            ((128, "fatal:   one\n\ttwo  "), "fatal: one two remote-noise-962"),
+                            ((1, "x" * 400), "x" * 300)):
+            with self.subTest(answer=answer):
+                self.shop(("scrum-work", *answer))
+                self.assertEqual(shop.clone("onewitharts", URL), (False, why))
+        with mock.patch.object(shop, "run", return_value=subprocess.CompletedProcess([], 255, "", " \n")):
+            self.assertEqual(shop.clone("onewitharts", URL), (False, "exit 255"))
+        work, bare = self.origin()
+        (work / "a.txt").write_text("one\n")
+        self.git("add", "a.txt", cwd=work)
+        self.commit(work, bare, "add a")
+        dest = Path(self.home) / "scrum-work" / "onewitharts"
+        self.shop(("scrum-work", LOCAL, ""))
+        self.assertEqual(shop.clone("onewitharts", URL), (True, ""))
+        (dest / "a.txt").write_text("shop edit\n")
+        mine = self.head(dest)
+        (work / "a.txt").write_text("two\n")
+        self.git("add", "a.txt", cwd=work)
+        self.commit(work, bare, "change a")
+        ok, why = shop.clone("onewitharts", URL)
+        self.assertFalse(ok)
+        self.assertIn("would be overwritten", why)
+        self.assertTrue(why.startswith("error: "), why)
+        self.assertNotIn("\n", why)
+        self.assertLessEqual(len(why), 300)
+        self.assertEqual(((dest / "a.txt").read_text(), self.head(dest)), ("shop edit\n", mine))
+
+    def test_stash_dirty_sets_tracked_changes_aside(self):
+        """Job 1415: stash_dirty() sets the clone's modified tracked files aside with one git stash push named for the
+        job, returns their paths, leaves untracked files, and the next clone() fast-forwards."""
+        self.shop()
+        for project, job in (("-x", "1415-a"), ("../x", "1415-a"), ("onewitharts", "1415"), ("onewitharts", "1415-a;id"),
+                             ("onewitharts", "-1415-a"), ("onewitharts", "1415-a\n")):
+            with self.subTest(project=project, job=job):
+                self.assertIsNone(shop.stash_dirty(project, job))
+        self.assertEqual(self.argv, [])
+        self.shop(("scrum-work", LOCAL, ""))
+        self.assertIsNone(shop.stash_dirty("onewitharts", "1415-a"), "no clone there")
+        work, bare = self.origin()
+        for name in ("a.txt", "b.txt"):
+            (work / name).write_text("one\n")
+        self.git("add", "a.txt", "b.txt", cwd=work)
+        self.commit(work, bare, "add a, b")
+        dest = Path(self.home) / "scrum-work" / "onewitharts"
+        self.assertEqual(shop.clone("onewitharts", URL), (True, ""))
+        self.calls.clear()
+        self.assertEqual(shop.stash_dirty("onewitharts", "1415-a"), [], "a clean clone")
+        self.assertEqual(self.git("stash", "list", cwd=dest), "")
+        self.assertEqual(len(self.calls), 1)
+        self.assertNotRegex(self.calls[0][0], r"reset|clean|checkout|drop|stash -u|--include-untracked|pop|apply")
+        (dest / "a.txt").write_text("shop edit\n")
+        (dest / "b.txt").write_text("shop edit\n")
+        (dest / "new.txt").write_text("untracked\n")
+        (work / "a.txt").write_text("two\n")
+        self.git("add", "a.txt", cwd=work)
+        self.commit(work, bare, "change a")
+        self.assertFalse(shop.clone("onewitharts", URL)[0])
+        before = time.time()
+        self.assertEqual(shop.stash_dirty("onewitharts", "1415-a"), ["a.txt", "b.txt"])
+        stashes = self.git("stash", "list", "--format=%s", cwd=dest).splitlines()
+        self.assertEqual(len(stashes), 1, stashes)
+        self.assertRegex(stashes[0], r"scrum 1415-a: set aside by shop dispatch \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        stamp = datetime.datetime.strptime(stashes[0][-20:], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+        self.assertLessEqual(abs(stamp.timestamp() - before), 5)
+        self.assertEqual((dest / "new.txt").read_text(), "untracked\n", "untracked files stay")
+        self.assertEqual(shop.clone("onewitharts", URL), (True, ""))
+        self.assertEqual(((dest / "a.txt").read_text(), (dest / "b.txt").read_text(), self.head(dest)),
+                         ("two\n", "one\n", self.head(work)))
+        self.assertEqual(len(self.git("stash", "list", cwd=dest).splitlines()), 1, "never dropped")
+        with mock.patch.object(shop, "run", return_value=subprocess.CompletedProcess([], 0, "motd\nSTASHED\nx y.ts\n", "")):
+            self.assertEqual(shop.stash_dirty("onewitharts", "1415-a"), ["x y.ts"], "shell startup output is skipped")
+        for r in (subprocess.CompletedProcess([], 1, "STASHED\na\n", ""), subprocess.CompletedProcess([], 0, "a\n", "")):
+            with mock.patch.object(shop, "run", return_value=r):
+                self.assertIsNone(shop.stash_dirty("onewitharts", "1415-a"))
 
     def test_ended_states(self):
         h = Path(self.home)
