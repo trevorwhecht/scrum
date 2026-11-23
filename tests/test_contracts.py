@@ -3181,7 +3181,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(key, board.STOP_TITLES, span)
             self.assertEqual(words[words.index("--title") + 2], "--recommend", span)
             self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot'|a 'it is not a code failure; the board resumes it when CI runs again'|a 'the machine was overloaded, not the code')$")
-        self.assertEqual(len(board.STOP_TITLES), 19)
+        self.assertEqual(len(board.STOP_TITLES), 20)
         stops = self.lane("stops")
         for key, meaning in board.STOP_TITLES.items():
             self.assertRegex(key, r"^[A-Z]+(_[A-Z]+)*$")
@@ -4107,11 +4107,25 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         skill = ROOT / "skills" / "trevskills-scrum"
         self.assertFalse((skill / "lanes" / "video.md").exists())
         lane = self.lane("edit")
-        self.assertEqual(re.findall(r"^### (.*)$", lane, re.M), ["edit-reel", "edit-animation", "edit-vector", "edit-photo"])
-        at = lane.index("\n### edit-reel\n")
-        shared, kinds = lane[:at], lane[at + 1:]
+        self.assertEqual(re.findall(r"^### edit-.*$", lane, re.M), [])  # job 1363: each kind has its own file
+        shared = lane
+        kind_files = {k: self.lane(k) for k in ("edit-reel", "edit-animation", "edit-vector", "edit-photo")}
+        self.assertIn("Read `$HOME/.claude/skills/trevskills-scrum/lanes/<kind>.md` for the job's kind", shared)
+        self.assertIn("and no other file of that pattern", shared)
+        for kind in kind_files:
+            self.assertEqual(re.findall(r"^### (.*)$", kind_files[kind], re.M), [kind])
+            self.assertNotIn(f"lanes/{kind}.md", (ROOT / "agents" / "edit-builder.md").read_text())
+            self.assertNotIn(f"lanes/{kind}.md", (ROOT / "agents" / "edit-reviewer.md").read_text())
+            self.assertNotIn(f"lanes/{kind}.md", skill_text())
+        # Job 1363: the step before each approval ask writes view.md, per kind.
+        approval = self.section(shared, "6. **Approval.**", "\n7. **")
+        for phrase in ("--title EDIT_APPROVE", "`$F/jobs/$ID/view.md`", "`View: <app> <absolute path>`",
+                       "`QuickTime Player` plus the master's absolute path", "`Edits` with no path (Edits takes no file)",
+                       "`VectorCraft`", "`PhotoCraft`", "replacing any older file"):
+            self.assertIn(phrase, approval, phrase)
+        self.assertNotIn("VIDEO_REVIEW", lane + "".join(kind_files.values()))
         for phrase in ("Kind: ", "lane=edit", "kind=", "edit-builder", "edit-reviewer", "edit-logger", "review-N.md",
-                       "RECUT", "--title VIDEO_REVIEW", "one-current-version.md", "word for word",
+                       "RECUT", "--title EDIT_APPROVE", "one-current-version.md", "word for word",
                        "Before anything else in New job, run `B set $ID lane=edit kind=<kind>`",
                        "no worktree, branch, PR, Check gate, Review or Merge",
                        "a fresh `edit-reviewer` each round", "After the third `RECUT` in a row",
@@ -4123,10 +4137,10 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             if name.startswith("scrum-"):
                 self.assertNotIn(name, lane, name)
         self.assertNotIn("general-purpose", lane)
-        spans = [sp for name, sp in self.ask_spans() if name == "edit"]
+        spans = [sp for name, sp in self.ask_spans() if name.startswith("edit")]
         self.assertGreaterEqual(len(spans), 5)
         for span in spans:
-            self.assertRegex(span, r"--title (VIDEO_REVIEW|BUILDER_BLOCKED) --recommend <key> '<why>'$", span)
+            self.assertRegex(span, r"--title (EDIT_APPROVE|BUILDER_BLOCKED) --recommend <key> '<why>'$", span)
         # No kind: in a no-git project a job with no valid Kind: line starts nothing and asks for the kind.
         no_kind = self.section(shared, "**No kind:**", "\n")
         for phrase in ("`- Git: none`", "no valid `Kind:` line", "starts nothing", "stop.md",
@@ -4137,11 +4151,12 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for phrase in ("a resume, re-run, rework or approve", "reads the job ledger first",
                        "continues at its last unfinished step", "never re-asks an approved storyboard"):
             self.assertIn(phrase, resume, phrase)
-        animation = self.section(kinds, "### edit-animation\n", "\n### edit-vector\n")
+        animation = kind_files["edit-animation"]
         for phrase in ("Video folder: ", "video.md", "templates/storyboard.html", "references/style-rules.md",
                        "contact_sheet.py", "review/v<V>.html", "Archivve/<project>-archive.zip", "~/Desktop/videos/",
                        "ElevenLabs", "Suno", "only when Trevor asks", "vid-img-editing/motion/video/",
-                       "never reuses a version number", "`edit-builder`", "`edit-reviewer`"):
+                       "never reuses a version number", "`edit-builder`", "`edit-reviewer`",
+                       "`View: QuickTime Player <the master's absolute path>`"):
             self.assertIn(phrase, animation, phrase)
         # Job 1398: before each VIDEO_REVIEW ask the lane lists the files the phone shows in the stop box.
         for step, end, files in (("3. **Storyboard.**", "\n4. **", "the desktop and phone screenshots"),
@@ -4153,7 +4168,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for kind, job in (("edit-reel", "1364-edit-project-edit-reel-instagram-print-r"),
                           ("edit-vector", "1365-edit-project-edit-vector-and-edit-photo"),
                           ("edit-photo", "1365-edit-project-edit-vector-and-edit-photo")):
-            body = [l for l in self.section(kinds + "\n### ", f"### {kind}\n", "\n### ").splitlines()[1:] if l.strip()]
+            body = [l for l in kind_files[kind].splitlines()[1:] if l.strip()]
             self.assertEqual(len(body), 1, (kind, body))  # a one-line stub until its job lands
             self.assertIn(job, body[0], kind)
             self.assertIn("not built yet", body[0], kind)
@@ -4177,7 +4192,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertLess(reviewer.index("`must fix`", first), reviewer.index("`left out`", first))
         self.assertLess(reviewer.index("`left out`", first), reviewer.index("`stitch chances`", first))
         builder = read("edit-builder")
-        for phrase in ("its kind's section of `lanes/edit.md`", "that kind's rules file"):
+        for phrase in ("its kind's file, `$HOME/.claude/skills/trevskills-scrum/lanes/<KIND>.md`", "that kind's rules file"):
             self.assertIn(phrase, builder, phrase)
         logger = read("edit-logger")
         for phrase in ("Write `<project>/log/rows/<clip stem>.json`", "Reply with one line per clip: `<clip> <rows> rows`, then `DONE`."):

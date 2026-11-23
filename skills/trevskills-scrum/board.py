@@ -249,6 +249,7 @@ STOP_TITLES = {
     "TWO_SESSIONS": "two sessions were working the same job at once and the watchdog could not tell which one owns it",
     "AGENT_MISSING": "a scrum agent could not be loaded (Agent type not found), so the job stopped instead of running a stand-in agent",
     "VIDEO_REVIEW": "a video job needs Trevor to approve its storyboard or a cut, or to send notes",
+    "EDIT_APPROVE": "an edit is ready: Trevor views it and approves, or sends notes",
 }
 
 # The scrum commands a needs-human question's option may run (shape only: the id need not be the asked job's).

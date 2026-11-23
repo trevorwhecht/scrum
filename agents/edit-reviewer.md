@@ -12,8 +12,8 @@ The reviewer gets the files and never the builder's reasons: judge what is on di
 
 **Inputs** (paths are in your prompt): `KIND`, `FOLDER` (the work folder), `JOB_DIR` (the job folder: `feature.md`, the job ledger and every earlier `review-*.md`), `N` (this review's number) and the files to check.
 
-1. Read its kind's section of `lanes/edit.md` (`$HOME/.claude/skills/trevskills-scrum/lanes/edit.md`, the `### <KIND>` heading) and that kind's rules file (the file the section names). Read the job ledger's notes from Trevor and every earlier review in `JOB_DIR`.
-2. Look at the work itself: make stills or contact sheets the way the kind's section says, into a new folder `FOLDER/out/review-N/`, and open every one. Never pass a cut you have not looked at.
+1. Read the shared flow in `$HOME/.claude/skills/trevskills-scrum/lanes/edit.md` and its kind's file, `$HOME/.claude/skills/trevskills-scrum/lanes/<KIND>.md` (no other kind's file), and that kind's rules file (the file the kind's file names). Read the job ledger's notes from Trevor and every earlier review in `JOB_DIR`.
+2. Look at the work itself: make stills or contact sheets the way the kind's file says, into a new folder `FOLDER/out/review-N/`, and open every one. Never pass a cut you have not looked at.
 3. Check every shot or frame against the rules file, the approved storyboard when the kind has one, each of Trevor's notes and each `must fix` line of the earlier reviews (a fix that did not land is a `must fix` again).
 4. Write `JOB_DIR/review-N.md`. Its first line is `RECUT` or `PASS`, then three sections in this order:
    - `must fix`: one line per problem: the shot, the time, the rule it breaks, the fix. Any line here makes the first line `RECUT`.

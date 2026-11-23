@@ -6339,6 +6339,59 @@ def edit_preview(root, job):
             for i, (path, kind, _, rev) in enumerate(preview_files(root, job))]
 
 
+VIEW_APPS = ("QuickTime Player", "Edits", "VectorCraft", "PhotoCraft")  # the apps an edit job's View button may open
+VIEW_FOLDERS = ("~/Developer/vid-img-editing", "~/Desktop/Mockups")  # a View file must sit under one of these
+
+
+def view_target(root, job):
+    """(app, path or None, "") for an edit job's jobs/<id>/view.md (job 1363), else (None, None, why it is refused). The
+    file's first non-empty line is `View: <app> <absolute path>`: the app is one of VIEW_APPS, and `Edits` takes no path.
+    The path is absolute, a file, and its realpath is under VIEW_FOLDERS (compared with a trailing separator, so a `..`,
+    a symlink out or `vid-img-editing-x` is refused). Only a needs-human job in lane `edit` with stopTitle
+    EDIT_APPROVE has a View."""
+    if not job or job.get("lane") != "edit" or job.get("stage") != "needs-human" or job.get("stopTitle") != "EDIT_APPROVE":
+        return None, None, "this job is not waiting on an edit approval"
+    try:
+        lines = (root / "jobs" / str(job.get("id")) / "view.md").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None, None, "this job has no view.md"
+    line = next((l.strip() for l in lines if l.strip()), "")
+    if not line.startswith("View: "):
+        return None, None, "view.md has no `View: <app> <path>` line"
+    rest = line[len("View: "):]
+    app = next((a for a in VIEW_APPS if rest == a or rest.startswith(a + " ")), None)
+    if not app:
+        return None, None, "view.md names an app that is not allowed"
+    path = rest[len(app):].strip()
+    if app == "Edits":
+        return (app, None, "") if not path else (None, None, "Edits takes no file")
+    if not path or not os.path.isabs(path):
+        return None, None, "view.md needs an absolute file path"
+    real = os.path.realpath(path)
+    bases = [os.path.realpath(os.path.expanduser(f)) + os.sep for f in VIEW_FOLDERS]
+    if not any(real.startswith(b) for b in bases):
+        return None, None, "the file is not inside an allowed folder"
+    if not os.path.isfile(real):
+        return None, None, "the file does not exist"
+    return app, real, ""
+
+
+def view_job(root, job):
+    """POST .../jobs/<id>/view (job 1363): run `open -a <app> [<path>]` for view_target's line. (200, {...}) or a 4xx
+    {"error"}; nothing runs on a refusal. A nonzero `open` exit returns its stderr."""
+    app, path, why = view_target(root, job)
+    if not app:
+        return 409, {"error": why}
+    try:
+        r = subprocess.run(["open", "-a", app, *([path] if path else [])], capture_output=True, text=True, timeout=15,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        return 502, {"error": f"could not run open: {e.__class__.__name__}"}
+    if r.returncode != 0:
+        return 502, {"error": (r.stderr or "").strip()[:300] or f"open exited {r.returncode}"}
+    return 200, {"id": job["id"], "app": app}
+
+
 def board_with_activity(root, project):
     """board.json plus a computed `activity` on every job that isn't done or aborted, and `routed` on every job
     (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it). A job whose Play/Resume could show (the
@@ -6406,6 +6459,8 @@ def board_with_activity(root, project):
                 pass
         if job.get("stage") == "needs-human" and job.get("lane") == "edit" and (preview := edit_preview(root, job)):
             job["preview"] = preview  # the stop box's clip and pictures (job 1398)
+        if job.get("stage") == "needs-human" and job.get("lane") == "edit" and view_target(root, job)[0]:
+            job["view"] = True  # the stop box's View button (job 1363)
         if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
             job["waitingOn"] = {**job["waitingOn"], "titles": [title.get(i, "") for i in job["waitingOn"]["ids"]]}
     data["checkoutAlert"] = checkout_alert(root.parent, data.get("jobs", []))
@@ -8258,7 +8313,7 @@ class Handler(BaseHTTPRequestHandler):
                 return 400, {"error": "decision must be revert"}
             return digest_revert(root, digest_id, unquote(pid))
         job_id, action = board.check_id(rest.split("/")[2]), rest.split("/")[3]
-        if action not in ("abort", "pause", "setup-done", "reopen", "answer", "resume", "approve", "discuss", "rework"):
+        if action not in ("abort", "pause", "setup-done", "reopen", "answer", "resume", "approve", "discuss", "rework", "view"):
             return 404, {"error": "no such action"}  # else it would fall through to rework
         if action == "abort" and not isinstance(body.get("cascade", False), bool):
             raise SystemExit("cascade must be true or false")
@@ -8279,6 +8334,8 @@ class Handler(BaseHTTPRequestHandler):
             return 202, {"id": new_id, "reopened_from": job_id, **queued(started)}
         jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
         job = next((j for j in jobs if j["id"] == job_id), None)
+        if action == "view":
+            return view_job(root, job)
         if action == "answer":
             return answer_job(project, root, job, jobs, body.get("key"), body.get("note"), raise_window=True)
         if action == "resume":  # a paused job (Play), one stopped for a reason whose card offers Resume (RESUMABLE), or a queued one (Start now)

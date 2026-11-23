@@ -1271,7 +1271,7 @@ const modalStatus = job => {
 // A needs-human job's closed question (board.py ask): armed/pending/note-open state per job key, outside the DOM so a
 // poll re-render keeps it. actionError: a refused POST's message per job key, kept across re-renders until the next
 // POST for that job succeeds or its stage changes.
-const answerState = {}, actionError = {}, merging = {};  // merging: job keys whose Approve POST is in flight
+const answerState = {}, actionError = {}, merging = {}, viewing = {};  // viewing: job keys whose View POST is in flight  // merging: job keys whose Approve POST is in flight
 const setActionError = (key, stage, msg) => {
   actionError[key] = {msg, stage};
   const p = $("viewer").dataset.key === key && $("actions").querySelector(":scope > .error");
@@ -1280,8 +1280,8 @@ const setActionError = (key, stage, msg) => {
 // Recommended option first, then key order.
 const stopOptions = job => [...(job.options || [])].sort((a, b) =>
   (b.key === job.recommend?.key) - (a.key === job.recommend?.key) || String(a.key).localeCompare(String(b.key)));
-// A VIDEO_REVIEW stop asks Trevor to approve work, not to fix a failure: its box and card are green (job 1398).
-const approveStop = job => job.stopTitle === "VIDEO_REVIEW";
+// An EDIT_APPROVE (job 1363) or VIDEO_REVIEW (job 1398) stop asks Trevor to approve work, not to fix a failure: its box and card are green.
+const approveStop = job => job.stopTitle === "EDIT_APPROVE" || job.stopTitle === "VIDEO_REVIEW";
 // An edit job's clip and pictures (serve.py edit_preview), above the option buttons. data-sig names the project, the job,
 // each file's URL and its rev (mtime and size), so keepPreview never keeps another job's media or an older cut.
 function previewHtml(job) {
@@ -1305,11 +1305,14 @@ function stopBox(job) {
   if (job.stage !== "needs-human" || playQueued(job) || isStalled(job) || answering(job)) return "";
   const st = answerState[job.key] || {}, run = runs[job.key], off = st.pending || (run?.alive && run.action !== "discuss");
   const rec = job.recommend, dis = off ? " disabled" : "";
-  const buttons = job.play_queued ? "" : stopOptions(job).map((o, i) => {
+  // An EDIT_APPROVE edit job with a View line (serve.py `view`) opens its file in the right app: View sits first in the box, beside Approve.
+  const view = job.stopTitle === "EDIT_APPROVE" && job.view && !job.play_queued
+    ? `<button class="btn tall" type="button" data-view${viewing[job.key] || off ? " disabled" : ""}>${viewing[job.key] ? "Opening…" : "View"}</button>` : "";
+  const buttons = view + (job.play_queued ? "" : stopOptions(job).map((o, i) => {
     const armed = st.armed === o.key, top = i === 0 && !!rec && o.key === rec.key;
     return `<button class="btn tall${armed ? " danger" : ""}" type="button" data-answer="${esc(o.key)}"${dis}>${st.pending === o.key && !st.noteOpen ? "Sending…" : `${armed ? "Confirm: " : ""}${esc(o.label)}${top ? ' <span class="badge">Recommended</span>' : ""}`}</button>`
       + (top && rec.why ? `<p class="note">${esc(rec.why)}</p>` : "");
-  }).join("");
+  }).join(""));
   // Without options the reason's own fix (after " Fix: ") stays as the box's second line, as before.
   const fix = buttons ? "" : (job.reason || "").split(" Fix: ").slice(1).join(" Fix: ");
   const note = !st.noteOpen ? "" : `<div class="sendback"><textarea name="note" maxlength="2000" placeholder="Anything the builder should know? (optional)" aria-label="Note for the builder"${dis}>${esc(st.note || "")}</textarea>
@@ -1422,6 +1425,22 @@ async function answer(key, k, note) {
   } catch (err) { answerState[key] = keep; redrawAnswer(key, k); setActionError(key, job.stage, err.message); }
 }
 // answer() end
+// The View click: one POST per click (disabled while it is pending); a refusal shows in the modal's error line.
+async function view(key) {
+  const job = jobs.find(j => j.key === key);
+  if (!job || viewing[key]) return;
+  viewing[key] = true; redrawAnswer(key, "");
+  let failed = "";
+  try {
+    await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/view`, {});
+    delete actionError[key];
+  } catch (err) { failed = err.message; }
+  delete viewing[key]; redrawAnswer(key, "");
+  const p = $("viewer").dataset.key === key && $("actions").querySelector(":scope > .error");
+  if (failed) setActionError(key, job.stage, failed);
+  else if (p) p.textContent = "";
+  $("actions").querySelector?.(".stop button[data-view]")?.focus();
+}
 $("actions").addEventListener("click", e => {
   const kids = e.target.closest("[data-kids-more]")?.dataset.kidsMore, job = kids && jobs.find(j => j.key === kids);
   if (job) {
@@ -1430,8 +1449,9 @@ $("actions").addEventListener("click", e => {
     $("actions").querySelector("[data-kids-more]")?.focus();
     return;
   }
-  const b = e.target.closest("button[data-answer], button[data-send]"), key = $("viewer").dataset.key;
-  if (b?.dataset.answer) answer(key, b.dataset.answer);
+  const b = e.target.closest("button[data-answer], button[data-send], button[data-view]"), key = $("viewer").dataset.key;
+  if (b && "view" in b.dataset) view(key);
+  else if (b?.dataset.answer) answer(key, b.dataset.answer);
   else if (b) answer(key, b.dataset.send, $("actions").querySelector('.stop textarea[name="note"]')?.value ?? "");
 });
 $("actions").addEventListener("input", e => {  // the note draft lives in answerState, so a re-render keeps it
