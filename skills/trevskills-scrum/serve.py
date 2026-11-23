@@ -2676,7 +2676,11 @@ def shop_tick(project, repo, root) -> bool:
         url = ""
     ok, why = shop.clone(repo.name, url, alias=alias)
     stashed = False
-    if not ok and board.shop_jobs_by_worker()[alias] == 0:  # no shop session there: its clone's edits are no one's work
+    try:
+        idle = not ok and board.shop_jobs_by_worker()[alias] == 0  # no shop session there: its clone's edits are no one's work
+    except SystemExit:  # a bad board.json hides its shop jobs: never stash then
+        idle = False
+    if idle:
         if paths := shop.stash_dirty(repo.name, job_id, alias=alias):
             note(f"{project}: {job_id}: set aside {', '.join(paths)} on {alias} (git stash)", "stashed")
             stashed = True
@@ -5019,7 +5023,7 @@ def machine_status():
             "restart_waiting": restart_blockers(), "history": machine_history("mac", ram, cpu, now),
             "shop": [{**s, "cooldown": board.cooling_down(s["name"]),
                       "history": machine_history(("shop", s["name"]), s["free_ram_pct"], s["cpu_load_pct"], now),
-                      **({"note": SHOP_NOTES[s["name"]]} if s["name"] in SHOP_NOTES else {})}
+                      **({"note": n} if (n := SHOP_NOTES.get(s["name"])) else {})}
                      for s in shop_stats()], "hogs": HOGS}
 
 

@@ -1,6 +1,6 @@
 """Job 964: serve.py's shop_tick sends one held job to the shop Mac whenever a worker has room, and
 cloud_tick requeues a shop session that ended without a PR. Every shop.py function is a mock: no test reaches ssh."""
-import contextlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
+import collections, contextlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
 from unittest import mock
 from pathlib import Path
 
@@ -613,6 +613,16 @@ class ShopTickTest(unittest.TestCase):
                 self.assertEqual(self.calls(), ["ready", "md_sync", "setup", "clone"], "a session there: never stashed")
                 self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
                 self.backed_off(t0)
+        with self.subTest("a bad board hides its shop jobs: never stashed"):
+            self.serve.SHOP_RETRY_AT.clear()
+            self.sh.reset_mock()
+            self.sh.clone.side_effect = [(False, self.GIT_ERR), (True, "")]
+            self.project("aa", [])
+            root = self.project("mm", self.runall({"id": "043-a"}))
+            with mock.patch.object(self.board, "shop_jobs_by_worker", side_effect=[collections.Counter(), SystemExit("bad")]):
+                self.assertEqual(self.tick(), (False, "", f"shop: mm: 043-a: clone failed on shopmac: {self.GIT_ERR}\n"))
+            self.assertEqual(self.calls(), ["ready", "md_sync", "setup", "clone"])
+            self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
         self.project("aa", [{"id": "010-x", "stage": "cloud", "shop": "11", "account": "main", "worker": "newmac"}])
         for stashed in ([], None):
             with self.subTest(stashed=stashed):
