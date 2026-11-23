@@ -441,7 +441,8 @@ class E2eFullFilingTest(unittest.TestCase):
             Path(log).write_text(out)
             return code
 
-        with mock.patch.object(serve, "e2e_full_exec", side_effect=fake):
+        with mock.patch.object(serve, "e2e_full_exec", side_effect=fake), \
+                mock.patch.object(serve, "e2e_full_worktree", return_value=self.repo):  # exec is mocked: no git
             return serve.e2e_full_run(self.repo, self.root, cmd, "h" * 40, 1.0, None)
 
     def items(self):
@@ -501,7 +502,8 @@ class E2eFullFilingTest(unittest.TestCase):
                 loads.append(board.MAX_CPU_LOAD_PCT + 50)
             return 1
 
-        with mock.patch.object(serve, "e2e_full_exec", side_effect=fake):
+        with mock.patch.object(serve, "e2e_full_exec", side_effect=fake), \
+                mock.patch.object(serve, "e2e_full_worktree", return_value=self.repo):  # exec is mocked: no git
             serve.e2e_full_run(self.repo, self.root, "npm run test:e2e", "h" * 40, 1.0, None)
         self.assertEqual(self.items(), [])
 
