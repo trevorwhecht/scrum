@@ -2392,6 +2392,19 @@ class ServeTest(unittest.TestCase):
                                         "history": {"free_ram_pct": [41.0], "cpu_load_pct": [150.0]}}])
         self.assertNotIn("history", s.SHOP_STATS["value"][0], "the cached shop read is never changed")
 
+    def test_api_machine_sends_shop_note(self):
+        """Job 1415: a worker's last shop_tick note (SHOP_NOTES) rides on its /api/machine shop entry."""
+        s = self.serve
+        self.history_state()
+        cached = [{"name": "shopmac", "free_ram_pct": 41.0, "cpu_load_pct": 150.0, "cpu_cores": 4, "at": 1000.0}]
+        self.shop_stats_state(value=cached, at=time.monotonic(), busy=False)
+        note = {"text": "mm: 043-a: clone failed on shopmac: error: x", "kind": "failed", "at": 1000.0}
+        with mock.patch.dict(s.SHOP_NOTES, {"shopmac": note}, clear=True):
+            s.MACHINE_CACHE.clear()
+            out = self.req("GET", "/api/machine")[1]
+        s.MACHINE_CACHE.clear()
+        self.assertEqual(out["shop"][0]["note"], note)
+
     PAUSED_REASON = "stalled in build: paused by Trevor. Fix: click Play."
 
     def paused_job(self, title, **fields):
