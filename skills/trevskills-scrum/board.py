@@ -990,14 +990,38 @@ def abort_job(root, job, requeue, reason):
     job["files"] = job_files(folder)  # after the spec move, so it never names a file that left the folder
 
 
+def requeue_after(root, job):
+    """{after <repo>:<job>} refs for a `requeue: depends on jobs 1362-1365, not merged` reason: one per job on this board
+    (not job itself) that is not done and whose number or full id the reason names after `job` or `jobs` (a comma or `and` list); a `1362-1365` range names every number
+    from 1362 to 1365 (at most 20 apart). [] for any other reason. Caller holds the lock."""
+    reason = str(job.get("reason") or "")
+    if not reason.startswith("requeue:"):
+        return []
+    named = set()
+    ref = r"\d+(?:-[a-z0-9-]*[a-z0-9])?"
+    cued = re.findall(rf"\bjobs?\s+({ref}(?:(?:,\s*|\s+and\s+){ref})*)", reason)  # numbers only after "job(s)", never "after 5 minutes"
+    for tok in re.findall(ref, " ".join(cued)):
+        if m := re.fullmatch(r"(\d+)-(\d+)", tok):
+            lo, hi = int(m[1]), int(m[2])
+            named.update(range(lo, hi + 1) if lo <= hi <= lo + 20 else (lo, hi))
+        else:
+            named.add(int(tok) if tok.isdigit() else tok)
+    num = lambda i: int(m[1]) if (m := re.match(r"(\d+)(?:-|$)", str(i))) else None
+    repo = Path(root).resolve().parent.name
+    return [f"{repo}:{j['id']}" for j in read_board(root).get("jobs") or []
+            if j.get("id") != job["id"] and j.get("stage") != "done" and (j.get("id") in named or num(j.get("id")) in named)]
+
+
 def requeue_job(root, job, folder, feature):
     """Put an aborted job's item back on the backlog: its claimed line reopened in place when there is no feature.md,
     else a new line with feature.md's text (the title with neither). Caller holds the lock. job["requeued"] records the
-    item_key of the line put back, as the next read parses it, for requeue_loop."""
+    item_key of the line put back, as the next read parses it, for requeue_loop. A `requeue: depends on jobs ...`
+    reason adds an {after <repo>:<job>} marker for each named job on this board that is not done (requeue_after)."""
     lines, items = read_backlog(root)
+    after = requeue_after(root, job)
     claimed = next((i for i in items if i["job"] == job["id"]), None)
     if claimed and not feature.exists():
-        claimed.update(done=False, job=None)
+        claimed.update(done=False, job=None, after=list(dict.fromkeys(claimed["after"] + after)))
         at = claimed["line"]
         lines[at] = format_item(claimed)
         if (folder / "spec.md").is_file():
@@ -1005,7 +1029,7 @@ def requeue_job(root, job, folder, feature):
             os.replace(folder / "spec.md", spec_path(root, claimed["text"]))
     else:
         text = clean(feature.read_text() if feature.exists() else job["title"], ITEM_MAX) or job["title"]
-        lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None}))
+        lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None, "after": after}))
         at = len(lines) - 1
     write_backlog(root, lines)
     if back := next((i for i in read_backlog(root)[1] if i["line"] == at), None):
