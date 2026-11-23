@@ -7177,6 +7177,9 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False, spa
                 and not any(d.glob("round-*/review-code.md")):
             raise SystemExit(f"not merging: {lane} job {job_id} has no round-N/review-code.md, decision.md or "
                              "human-approval.md; run the code review (Fast lane step 2 / Review) first")
+        if os.environ.get("SCRUM_SHOP") and given.get("lane") in ("fast", "standard") and not (d / "lilguy-fit.json").exists() \
+                and (not job.get("parent") or next((j.get("lane") for j in board["jobs"] if j["id"] == job["parent"]), None) == "runall"):
+            raise SystemExit(f"run B lilguy-fit {job_id} first (New job step 3 Lilguy route)")  # digest 113: shop jobs skipped the route
         for pair in pairs:
             key, sep, value = pair.partition("=")
             if not sep or key not in FIELDS:
