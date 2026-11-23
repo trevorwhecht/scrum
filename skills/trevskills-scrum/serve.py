@@ -4261,7 +4261,8 @@ def watchdog_tick():
     Then report_hogs lists, never stops, each process outside the scrum over one core for 10+ minutes, for the meter.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
-    6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard.
+    6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard,
+       and its stuck_alert texts Trevor when machine_ok holds every start with nothing running.
     Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard, then runs e2e_lock_reap,
     then write_shop_room (shop-room.json, which cmd_ready reads), written again after a shop_tick that dispatched,
     then agent_links_tick (re-runs install.sh when a scrum agent link is bad, in its own guard), then hot_stop_tick once,
@@ -4537,6 +4538,8 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     run-all, SWEEP_HELD, a machine or usage hold; play_queue_tick's queued_launch:<id> for a launch spawn still holds) in the last PULSE_HOLD_TTL_S adds `held:<token>` to that project's gates, which
     board.write_pulse counts as gated even beside claimable work. guard: the first project's machine_ok(claim=False) refusal, else the allowance reason when
     board.pick_account has no account or the live count reaches its allowance (the 5h pace included), else null.
+    stuck_alert gets the machine_ok refusal alone (never the allowance reason) and the same sessions count, in its own
+    guard.
     started: spawn's PULSE_STARTS since the last tick (copied and cleared in one step under PULSE_STARTS_LOCK; [] when
     serve.py started nothing). A project whose board.json is unreadable is left out. Unknown readings are null. When the first line is
     older than board.PULSE_KEEP_SECS plus a day (or unreadable), the file is first rewritten (tmp + os.replace)
@@ -4656,10 +4659,11 @@ def stuck_process(why: str) -> str:
     pid, ppid, uid, rss, pcpu, cmd = max(rows, key=lambda r: r[4] if cpu else r[3])
     prog, rest = command_head(cmd)
     arg = next((w for w in rest if w), "")
-    name = " ".join(w for w in (os.path.basename(prog), os.path.basename(arg) if "/" in arg and arg[0] != "-" else arg) if w)
+    arg = os.path.basename(arg) if "/" in arg and arg[0] != "-" else arg  # a path argument by its basename
+    name = " ".join(w for w in (os.path.basename(prog), arg) if w)
     label = "leftover dev server " if ppid == 1 and DEV_SERVER_RE.search(cmd) else ""
     size = f"{pcpu:.0f}% CPU, {rss / 1048576:.1f} GB" if cpu else f"{rss / 1048576:.1f} GB"
-    keep = ("the scrum server" if pid == os.getpid() or os.path.basename(arg) == "serve.py"
+    keep = ("the scrum server" if pid == os.getpid() or arg == "serve.py"
             else "a claude session" if board._is_claude(cmd)
             else "a system process" if uid < 500 or prog.startswith(SYSTEM_PATHS)
             else "another user's process" if uid != os.getuid() else None)
@@ -4669,13 +4673,18 @@ def stuck_process(why: str) -> str:
 
 def stuck_alert(now: float, why: str | None, sessions: int, send=None) -> str | None:
     """Text Trevor when this Mac holds every start with nothing running (job 1413). why is the first project's
-    board.machine_ok(claim=False) refusal (pulse_tick). It fires when why is set and sessions is 0 on
-    STUCK_ALERT_PULSES pulses in a row. The state {"held", "sent"} lives in stuck-alert.json beside pulse.log; it is
-    written (tmp + os.replace) only when it changed. The one-line text starts `This Mac stopped starting scrum jobs`
-    (no `<word>:` before it: messageManager reads `<project>: <text>` self-texts as commands), names why, then
-    stuck_process's clause, and goes to the first line of alert-to.txt (beside pulse.log) through
-    ~/.claude/scripts/imsg-send.sh by argv, 30 s timeout, check=False. send (tests) replaces that run; under unittest
-    nothing is sent without it. Returns the text it sent, else None."""
+    board.machine_ok(claim=False) refusal (pulse_tick; never COOLING, never a usage hold). It fires when why is set
+    and sessions is 0 on STUCK_ALERT_PULSES pulses in a row, once an episode: a pulse with sessions > 0, or
+    STUCK_ALERT_CLEAR clear pulses in a row, ends it, and a hold still on STUCK_ALERT_REPEAT_S after the last text texts
+    once more. The state {"held", "clear", "sent"} (pulse counts in a row, the last text's time) lives in
+    stuck-alert.json beside pulse.log, so a reload neither repeats nor forgets; an unreadable file is no state. It is
+    written (tmp + os.replace) only when it changed, before any send. The one-line text starts `This Mac stopped
+    starting scrum jobs` (no `<word>:` before it: messageManager reads `<project>: <text>` self-texts as commands),
+    names why, then stuck_process's clause (its one ps runs only on the pulse that fires), and goes to the first line
+    of alert-to.txt (beside pulse.log) through ~/.claude/scripts/imsg-send.sh by argv, 30 s timeout, check=False. A
+    missing or empty alert-to.txt, or a missing script, sends nothing and prints one `watchdog: stuck alert:` line, as
+    a send that raises does. Each fire logs board.log_process("Stuck alert", sent / unsent / failed, reason=why). send
+    (tests) replaces the run; under unittest nothing is sent or run without it. Returns the text it sent, else None."""
     path = board.pulse_path().parent / "stuck-alert.json"
     try:
         old = json.loads(path.read_text(encoding="utf-8"))
@@ -4708,7 +4717,8 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None) -> str | 
     clause = stuck_process(why)
     text = f"This Mac stopped starting scrum jobs and none are running. Cause: {why}.{' ' + clause if clause else ''}"
     try:
-        (send or (lambda argv: subprocess.run(argv, capture_output=True, timeout=30, check=False)))([str(script), handle, text])
+        argv = [str(script), handle, text]
+        send(argv) if send else subprocess.run(argv, capture_output=True, timeout=30, check=False)
     except (OSError, subprocess.SubprocessError) as e:
         print(f"watchdog: stuck alert: {e}", file=sys.stderr, flush=True)
         board.log_process("Stuck alert", "failed", reason=why, error=str(e))
