@@ -15361,6 +15361,30 @@ class StuckAlertTest(unittest.TestCase):
                                               "error": "imsg-send.sh: exec format error"}])
         self.assertIsNone(self.alert(750), "a failed send still ends the episode's text")
 
+    def test_nonzero_sender_exit_logs_failed(self):
+        """Job 1420: imsg-send.sh that runs but exits nonzero logs failed with its last output line, never sent."""
+        def episode(t, code, stdout, stderr):
+            """End the last episode, then fire a new one whose sender returns CompletedProcess(code, stdout, stderr)."""
+            self.alert(t - 300, sessions=1)
+            self.alert(t - 150)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                got = self.serve.stuck_alert(self.NOW + t, self.MEM, 0, send=lambda argv: subprocess.CompletedProcess(
+                    argv, code, stdout=stdout, stderr=stderr))
+            return got, err.getvalue()
+        failed = lambda error, code: {"process": "Stuck alert", "result": "failed", "reason": self.MEM,
+                                      "error": error, "exit": code}
+        self.assertEqual(episode(300, 1, "", "osascript: execution error: Messages got an error\n"), (
+            None, "watchdog: stuck alert: imsg-send.sh exit 1: osascript: execution error: Messages got an error\n"))
+        self.assertEqual(self.logged(), [failed("osascript: execution error: Messages got an error", 1)])
+        self.assertEqual(episode(750, 2, "", ""), (None, "watchdog: stuck alert: imsg-send.sh exit 2: exit 2\n"))
+        self.assertEqual(self.logged()[1:], [failed("exit 2", 2)])
+        self.assertEqual(episode(1200, 3, "first line\n  last stdout line  \n\n", " \n"),
+                         (None, "watchdog: stuck alert: imsg-send.sh exit 3: last stdout line\n"))
+        self.assertEqual(episode(1650, 4, None, None), (None, "watchdog: stuck alert: imsg-send.sh exit 4: exit 4\n"))
+        self.assertEqual(self.logged()[2:], [failed("last stdout line", 3), failed("exit 4", 4)])
+        self.assertEqual(episode(2100, 0, "", ""), (self.LEFTOVER, ""))
+        self.assertEqual(self.logged()[4:], [{"process": "Stuck alert", "result": "sent", "reason": self.MEM}])
+
     def test_never_sends_under_unittest_without_a_sender(self):
         for t in (0, 150, 300):
             self.assertIsNone(self.serve.stuck_alert(self.NOW + t, self.MEM, 0))

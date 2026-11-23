@@ -4714,7 +4714,9 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None) -> str | 
     names why, then stuck_process's clause (its one ps runs only on the pulse that fires), and goes to the first line
     of alert-to.txt (beside pulse.log) through ~/.claude/scripts/imsg-send.sh by argv, 30 s timeout, check=False. A
     missing or empty alert-to.txt, or a missing script, sends nothing and prints one `watchdog: stuck alert:` line, as
-    a send that raises does. Each fire logs board.log_process("Stuck alert", sent / unsent / failed, reason=why). send
+    a send that raises does. Each fire logs board.log_process("Stuck alert", sent / unsent / failed, reason=why); an
+    imsg-send.sh that exits nonzero also logs failed, with its last output line (stderr, else stdout, else `exit <code>`)
+    as error and exit=<code>, prints one `watchdog: stuck alert:` line and returns None (job 1420). send
     (tests) replaces the run; under unittest nothing is sent or run without it. Returns the text it sent, else None."""
     path = board.pulse_path().parent / "stuck-alert.json"
     try:
@@ -4749,10 +4751,18 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None) -> str | 
     text = f"This Mac stopped starting scrum jobs and none are running. Cause: {why}.{' ' + clause if clause else ''}"
     try:
         argv = [str(script), handle, text]
-        send(argv) if send else subprocess.run(argv, capture_output=True, timeout=30, check=False)
+        result = send(argv) if send else subprocess.run(argv, capture_output=True, text=True, errors="replace",
+                                                        timeout=30, check=False)
     except (OSError, subprocess.SubprocessError) as e:
         print(f"watchdog: stuck alert: {e}", file=sys.stderr, flush=True)
         board.log_process("Stuck alert", "failed", reason=why, error=str(e))
+        return None
+    if isinstance(result, subprocess.CompletedProcess) and result.returncode != 0:
+        lines = [ln.strip() for ln in (result.stderr or "").splitlines() if ln.strip()] or \
+            [ln.strip() for ln in (result.stdout or "").splitlines() if ln.strip()]
+        last = lines[-1] if lines else f"exit {result.returncode}"
+        print(f"watchdog: stuck alert: imsg-send.sh exit {result.returncode}: {last}", file=sys.stderr, flush=True)
+        board.log_process("Stuck alert", "failed", reason=why, error=last, exit=result.returncode)
         return None
     board.log_process("Stuck alert", "sent", reason=why)
     return text
