@@ -986,18 +986,39 @@ def abort_job(root, job, requeue, reason):
     job.pop("queued_launch", None)
     job.pop("ram_hold", None)
     if requeue:
-        requeue_job(root, job, folder, feature)
+        requeue_job(root, job, folder, feature, reason)
     job["files"] = job_files(folder)  # after the spec move, so it never names a file that left the folder
 
 
-def requeue_job(root, job, folder, feature):
+REQUEUE_DEPS_RE = re.compile(r"^requeue:.*?\bjobs? (\d{3,}(?:-\d{3,})?(?:(?:, | and |, and | & |,)\d{3,}(?:-\d{3,})?)*)")
+
+
+def requeue_after(root, reason):
+    """{after <repo>:<number>} refs for a `requeue: ... job(s) 1362-1365 ...` reason: one per job number it names (a list,
+    or a range a-b) that is on this board and not done. The reason is prose, so a number with no such job adds nothing."""
+    m = REQUEUE_DEPS_RE.match(reason or "")
+    if not m:
+        return []
+    nums = []
+    for part in re.split(r", and |, | and | & |,", m[1]):
+        lo, _, hi = part.partition("-")
+        nums += range(int(lo), int(hi or lo) + 1) if int(hi or lo) - int(lo) < 20 else [int(lo)]
+    open_ids = {int(n[1]) for j in read_board(root).get("jobs") or []
+                if isinstance(j, dict) and j.get("stage") != "done" and (n := re.match(r"(\d+)(?:-|$)", str(j.get("id"))))}
+    repo = Path(root).resolve().parent.name
+    return [f"{repo}:{n}" for n in dict.fromkeys(nums) if n in open_ids]
+
+
+def requeue_job(root, job, folder, feature, reason=None):
     """Put an aborted job's item back on the backlog: its claimed line reopened in place when there is no feature.md,
     else a new line with feature.md's text (the title with neither). Caller holds the lock. job["requeued"] records the
-    item_key of the line put back, as the next read parses it, for requeue_loop."""
+    item_key of the line put back, as the next read parses it, for requeue_loop. A reason naming unfinished jobs on this
+    board adds an {after} marker for each (requeue_after), so claims wait for them."""
     lines, items = read_backlog(root)
+    deps = requeue_after(root, reason)
     claimed = next((i for i in items if i["job"] == job["id"]), None)
     if claimed and not feature.exists():
-        claimed.update(done=False, job=None)
+        claimed.update(done=False, job=None, after=list(dict.fromkeys([*claimed["after"], *deps])))
         at = claimed["line"]
         lines[at] = format_item(claimed)
         if (folder / "spec.md").is_file():
@@ -1005,7 +1026,7 @@ def requeue_job(root, job, folder, feature):
             os.replace(folder / "spec.md", spec_path(root, claimed["text"]))
     else:
         text = clean(feature.read_text() if feature.exists() else job["title"], ITEM_MAX) or job["title"]
-        lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None}))
+        lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None, "after": deps}))
         at = len(lines) - 1
     write_backlog(root, lines)
     if back := next((i for i in read_backlog(root)[1] if i["line"] == at), None):

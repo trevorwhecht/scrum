@@ -4333,6 +4333,18 @@ class BoardTest(unittest.TestCase):
         items = board.backlog_items(self.root)
         self.assertEqual((items[-1]["done"], items[-1]["text"]), (False, "Short title with the full details on line two"))
 
+    def test_requeue_reason_naming_unfinished_jobs_adds_after_markers(self):
+        a, b, c = (board.cmd_new(self.root, t) for t in ("dep one", "dep two", "waiter"))
+        board.cmd_set(self.root, b, ["stage=done"])
+        (self.root / "jobs" / c / "feature.md").write_text("waiter text\n")
+        board.cmd_abort(self.root, c, requeue=True, reason="requeue: depends on jobs 001-002, not merged")
+        repo = Path(self.root).resolve().parent.name
+        self.assertEqual(board.backlog_items(self.root)[-1]["after"], [f"{repo}:1"])
+        d = board.cmd_new(self.root, "plain")
+        (self.root / "jobs" / d / "feature.md").write_text("plain text\n")
+        board.cmd_abort(self.root, d, requeue=True, reason="requeue: cloud PR closed without merging")
+        self.assertEqual(board.backlog_items(self.root)[-1]["after"], [])
+
     def test_abort_refuses_done_or_already_aborted_jobs(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["stage=done"])
