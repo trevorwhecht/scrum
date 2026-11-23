@@ -7492,7 +7492,9 @@ print("stub err", file=sys.stderr)
         no_claude_pid(self)
 
     def records(self, n=1):
-        for _ in range(200):
+        end = time.time() + 30
+        lines = []
+        while time.time() < end:
             lines = self.out.read_text().splitlines() if self.out.exists() else []
             if len(lines) >= n:
                 return [json.loads(l) for l in lines]
