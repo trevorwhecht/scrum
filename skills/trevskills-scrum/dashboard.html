@@ -916,6 +916,8 @@ function shopNoteToggle(e) {
   if (shopNoteOpen.get(name) === text) shopNoteOpen.delete(name); else shopNoteOpen.set(name, text);
   renderMachine(machineLast);
 }
+$("meters").addEventListener("click", shopNoteToggle);
+$("meters").addEventListener("keydown", shopNoteToggle);
 
 // Every project's board.checkoutAlert (its live checkout cannot go live) and board.actionsAlert (GitHub refused to start
 // runs, or a scheduled workflow failed) and board.hogAlert (an outside app hogs the CPU while jobs wait), one per line, repeats shown once, whatever the project filter.
@@ -2453,8 +2455,6 @@ $("softCooldown").addEventListener("click", async e => {
 // A shop Mac's own Cool down / Resume work button (renderMachine): #cooldown's explicit on/off POST, naming the worker.
 // One POST per worker at a time; its answer sets only that worker's flag in the last reading, so two workers' answers
 // arriving out of order each land on their own button, and the next poll redraws from the server anyway.
-$("meters").addEventListener("click", shopNoteToggle);
-$("meters").addEventListener("keydown", shopNoteToggle);
 $("machine").addEventListener("click", async e => {
   const btn = e.target.closest("button[data-worker]"), worker = btn && btn.dataset.worker;
   if (!btn || shopCoolPending.has(worker)) return;
