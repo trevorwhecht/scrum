@@ -2430,9 +2430,12 @@ def cloud_tick(project, root, jobs, now=None):
     Between polls, a stage-cloud `shop` job is probed with shop.ended at most every SHOP_ENDED_EVERY seconds, and a
     session that has ended runs the sync at once (so shop_tick can refill the slot in the same tick).
     Before the sync, each stage-cloud job with a `shop` pid asks shop.ended on its own worker (its `worker` alias, else
-    shop.ALIAS: jobs dispatched before workers.txt ran on shopmac); after a sync with no error, one whose
-    session ended (a str) and that is still in stage cloud after the sync is aborted with SHOP_ENDED
-    (requeued unless a BigBoy child), after a usage-limit line in its log tail marks its account limited (note_limit);
+    shop.ALIAS: jobs dispatched before workers.txt ran on shopmac). The ids whose session ended (a str) go to the sync
+    as ended (job 1414), which brings such a job's open unlabelled PR, or its pushed scrum/<id> branch with no PR, home
+    as a spec stall with a local worktree, the PR left open (HOME: no cloud-home spawn; auto_resume's spec-stall rule
+    resumes it); with none ended it is called with no ended. After a sync with no error, a usage-limit line in an ended
+    session's log tail marks its account limited (note_limit), whatever stage the sync left the job in; one still in
+    stage cloud after the sync (no PR and no branch) is aborted with SHOP_ENDED (requeued unless a BigBoy child), and
     once that abort took effect, shop_pr_close closes the job's open unlabelled PR, so the rerun opens no duplicate.
     A no-git project (board.no_git, job 1362) is skipped: none of its jobs goes to the cloud or the shop."""
     if board.cooling_down() or board.no_git(root):
@@ -2452,7 +2455,8 @@ def cloud_tick(project, root, jobs, now=None):
         if not due and all(t is None for t in ended.values()):  # an ended shop session syncs at once, freeing its slot
             return
         CLOUD_LAST[project] = now
-        out = board.cmd_cloud_sync(root)
+        gone = [job_id for job_id, tail in ended.items() if isinstance(tail, str)]
+        out = board.cmd_cloud_sync(root, ended=gone) if gone else board.cmd_cloud_sync(root)
         for m in out.get("moved") or []:
             board.log_process("Cloud jobs", m.get("state"), repo=str(Path(root).parent), job=m.get("id"), pr=m.get("pr"))
         if out.get("error"):
@@ -2462,12 +2466,14 @@ def cloud_tick(project, root, jobs, now=None):
             live = {j["id"]: j for j in board.read_board(root)["jobs"]}
             for job_id, tail in ended.items():
                 job = live.get(job_id) or {}
-                if tail is None or job.get("stage") != "cloud":  # a PR the sync just moved wins
+                if not isinstance(tail, str) or not job:  # a job gone from the board names no account
                     continue
-                if LIMIT_RE.search(tail):
+                if LIMIT_RE.search(tail):  # before the stage check: a brought-home job still marks its account
                     reset = limit_in(tail, datetime.now())[1]
                     board.note_limit(job.get("account") or board.accounts()[0].name,
                                      reset if reset and reset > now else now + AUTO_RESUME_EVERY)
+                if job.get("stage") != "cloud":  # a PR or branch the sync just moved wins
+                    continue
                 try:  # re-checks stage cloud under the lock
                     board._cloud_abort(root, job_id, job.get("pr"), True, SHOP_ENDED)
                 except SystemExit as e:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
-  board.py new "<title>" [--id ID] [--by <serve|runall|wake|hand>] create jobs/<id>/ and a board entry, print the id (--id keeps a given id; --by records who started it, default hand)
+  board.py new "<title>" [--id ID] [--by <serve|runall|wake|hand>] create jobs/<id>/ and a board entry, print the id (--id keeps a given id; --by records who started it, default hand; without --id it refuses a title an open job already has, naming that job)
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/runlog/lane/setup/waiting/specwriter/cloud/outcome/account/shop/worker (empty = null);
                                    stage=needs-human is refused: park a job with ask
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only); with stage= it
@@ -163,11 +163,14 @@
   board.py cloud-sync              move each stage-cloud job whose [scrum <id>] PR finished (one gh REST pulls call):
                                    MERGED -> done, CLOSED -> aborted + requeued, open + scrum:needs-human -> needs-human with
                                    the PR comment's reason and a fetched worktree (a requeue:/obsolete:/looks already
-                                   fixed: reason aborts it and closes the PR instead); only a same-repo scrum/<id> head PR and
-                                   its author's comments count. A moved job with no scrum-artifacts/<id> branch yet is
+                                   fixed: reason aborts it and closes the PR instead); only a same-repo scrum/<id>,
+                                   scrum/<number> or scrum/<number>-<slug> head PR and its author's comments count. A
+                                   moved job with no scrum-artifacts/<id> branch yet is
                                    re-checked each run and keeps its mark until cloud-home starts, or until 24 h pass
                                    with no branch; print {"moved","arrived","error"}, exit 1 on a gh error (nothing
-                                   changed). serve.py runs it every 10 min while a job is in stage cloud
+                                   changed). serve.py runs it every 10 min while a job is in stage cloud, passing the
+                                   ids whose shop session ended: such a job's open PR or pushed scrum/<id> branch is
+                                   brought home as a spec stall on a local worktree (HOME); this CLI never passes any
   board.py spawn <id> <action> ["<prompt>"] [--model M]  start a detached headless `claude -p <prompt>` (default
                                    "/trevskills-scrum <action> <id>") from the repo, logging to runs/; start/resume get the
                                    Orchestrator model unless --model; set the job's runlog (ignored when <id> is not on the
@@ -417,10 +420,16 @@ def add_job(root, board, title, job_id=None, started_by="hand"):
     return job_id
 
 
-def cmd_new(root, title, job_id=None, unique=False, started_by="hand"):
-    """unique: return None, adding nothing, while a job with this exact title is neither done nor aborted."""
+def cmd_new(root, title, job_id=None, unique=False, started_by="hand", refuse=False):
+    """unique: return None, adding nothing, while a job with this exact title is neither done nor aborted. refuse (the
+    CLI `new` without --id, job 1414): raise SystemExit naming that open job's id and stage instead, writing nothing."""
     with locked_board(root) as board:
-        if unique and any(j["title"] == title and j["stage"] not in ("done", "aborted") for j in board["jobs"]):
+        twin = (unique or refuse) and next((j for j in board["jobs"] if j.get("title") == title
+                                            and j.get("stage") not in ("done", "aborted")), None)
+        if twin and refuse:
+            raise SystemExit(f"job {twin['id']} (in {twin['stage']}) already has the title {title!r}: "
+                             "work on that job, or give this one a different title")
+        if twin and unique:
             return None
         return add_job(root, board, title, job_id, started_by)
 
@@ -606,6 +615,15 @@ def pick(items, index):
     if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(items):
         raise SystemExit(f"no backlog item {index!r}")
     return items[index]
+
+
+FLAG_HINT = 'flags go before -- (backlog-add --priority 3 -- "item text")'
+
+
+def flag_item(text) -> bool:
+    """A backlog item whose cleaned text starts with `--` is a flag passed as the item (job 1414: argparse keeps a quoted
+    "--priority 3" as a positional, and cmd_next claimed that line as a job four times); it is never saved or claimed."""
+    return clean(text, ITEM_MAX).startswith("--")
 
 
 def check_priority(priority):
@@ -880,7 +898,8 @@ def cmd_next(root, index=None, shop=None):
         lines, items = read_backlog(root)
         capped = index is None and shop is None and heavy_cap_reason(root)  # job 1314: heavy lines wait for the shop Mac
         if index is None:
-            item = next((i for i in sorted(items, key=priority_key) if not i["done"] and not i["setup"] and not waiting_on(i, items, board) and not origin_open(i, board)
+            item = next((i for i in sorted(items, key=priority_key) if not i["done"] and not i["setup"] and not flag_item(i["text"])
+                         and not waiting_on(i, items, board) and not origin_open(i, board)
                          and (shop is None or shop(i)) and not (capped and heavy_job(root, i))), None)
             if item is None:
                 return {"id": None, "feature": None}
@@ -888,6 +907,8 @@ def cmd_next(root, index=None, shop=None):
             item = pick(items, index)
             if item["done"]:
                 raise SystemExit(f"backlog item {index} is already claimed")
+            if flag_item(item["text"]):
+                raise SystemExit(f"backlog item {index} is only a flag ({item['text']!r}), not work: {FLAG_HINT}")
             if item["setup"]:
                 raise SystemExit(f"backlog item {index} waits on Human setup")
             if waits := waiting_on(item, items, board):
@@ -1231,11 +1252,14 @@ def cmd_backlog_add(root, items, setup=None, priority=None, top=False, by=None, 
     """Append each non-empty item, each with the Human setup checklist `setup` ("step; step") when given; returns the
     texts as stored. An empty checklist adds nothing. top puts each item first with {p:5}; by and critical set the
     source and priority (see backlog_op). unless_open skips an item while an open item's text contains it (checked
-    under the add's lock); skipped items are left out of the result."""
+    under the add's lock); skipped items are left out of the result. An item that is only a flag (flag_item) refuses
+    the whole call before any write."""
     check_source(by, priority, top, critical)
     if setup is not None:
         setup_steps(setup)
     check_priority(priority)
+    if flags := [clean(item, ITEM_MAX) for item in items if flag_item(item)]:
+        raise SystemExit(f"backlog item {flags[0]!r} is a flag, not work; nothing added: {FLAG_HINT}")
     added = []
     for item in items:
         if clean(item):
@@ -7719,6 +7743,17 @@ def artifacts_pushed(repo: Path, job_id: str) -> bool:
     return r.returncode == 0
 
 
+def branch_pushed(repo: Path, job_id: str) -> bool:
+    """Whether an ended shop session pushed scrum/<id> (job 1414: its work, with no PR, comes home). An offline or failed
+    ls-remote reads as no branch."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "ls-remote", "--exit-code", "origin",
+                            f"refs/heads/scrum/{check_id(job_id)}"], capture_output=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return r.returncode == 0
+
+
 def _login(item):
     """item's user.login (a REST PR or comment), or None."""
     user = item.get("user")
@@ -7726,12 +7761,16 @@ def _login(item):
 
 
 def _cloud_trusted(pr, job_id):
-    """Whether pr is this job's: its head is this repo's own scrum/<id> (or scrum/<number>) branch, and a leading
-    `[scrum <tag>]` names the id or its number. An untagged title is matched by its head; a fork PR, another branch or
-    another job's tag steers nothing."""
+    """Whether pr is this job's: its head is this repo's own scrum/<id> (or scrum/<number>, or scrum/<number>-<one or
+    more chars> for this job's own number: a session's own slug, job 1414) branch, and a leading `[scrum <tag>]` names
+    the id or its number. An untagged title is matched by its head; a fork PR, another branch or another job's tag
+    steers nothing."""
     head, base = pr.get("head"), pr.get("base")
-    names = {job_id, job_id.split("-", 1)[0]}
-    if not isinstance(head, dict) or not isinstance(base, dict) or head.get("ref") not in {f"scrum/{n}" for n in names}:
+    number = job_id.split("-", 1)[0]
+    names = {job_id, number}
+    ref = head.get("ref") if isinstance(head, dict) else None
+    if not isinstance(base, dict) or not isinstance(ref, str) or not (
+            ref in {f"scrum/{n}" for n in names} or re.fullmatch(rf"scrum/{re.escape(number)}-.+", ref)):
         return False
     tag = re.match(r"\[scrum ([^\]]*)\]", str(pr.get("title") or ""))
     if tag and tag[1] not in names:
@@ -7774,10 +7813,23 @@ def cloud_pending_clear(root: Path, job_id: str) -> None:
                 job.pop("artifactsPending", None)
 
 
-def _cloud_plan(repo, job_id, prs):
+def _cloud_home_plan(job_id, head, url=None, ref=None):
+    """_cloud_plan's HOME tuple for an ended shop job (job 1414): its open PR (url, head, base ref), or, with url None,
+    its pushed scrum/<id> branch head. reason is the spec stall's; pairs are the needs-human fallback's cmd_set pairs,
+    used when its worktree cannot be added. No lane: the local New job's spec decides it."""
+    left = f"PR {url} open" if url else f"branch {head} pushed with no PR"
+    reason = f"{STALL}shop session ended leaving {left}; {f'its branch {head}' if url else 'it'} is home for the local pipeline"
+    pairs = ["stage=needs-human", *([f"pr={url}"] if url else []), *([f"base=origin/{ref}"] if url and ref else []),
+             f"reason=shop session ended leaving {left}, but its worktree could not be added here. "
+             f"Fix: free .claude/worktrees/scrum-{job_id}, then rework or abort the job."]
+    return "HOME", pairs, reason, True, None, head
+
+
+def _cloud_plan(repo, job_id, prs, ended=False):
     """(state, pairs, reason, needs a worktree, abort, head ref) for this job's newest PR (_cloud_trusted), or None while it still
     runs. abort is None, or (requeue, PR number to close or None). Makes the one comments call a needs-human PR needs;
-    raises GhError."""
+    raises GhError. ended (its shop session ended, job 1414): an open PR without the scrum:needs-human label is HOME
+    (_cloud_home_plan) instead of None."""
     pr = next((p for p in prs if isinstance(p, dict) and _cloud_trusted(p, job_id)), None)
     if not pr:
         return None
@@ -7788,7 +7840,7 @@ def _cloud_plan(repo, job_id, prs):
     if pr.get("state") == "closed":
         return "CLOSED", [f"pr={url}"] + lane, CLOUD_CLOSED, False, (True, None), head
     if CLOUD_LABEL not in [l.get("name") for l in pr.get("labels") or [] if isinstance(l, dict)]:
-        return None
+        return _cloud_home_plan(job_id, head, url, (pr.get("base") or {}).get("ref")) if ended else None
     number = pr.get("number")
     if not isinstance(number, int):
         raise GhError(f"PR {url} has no number")
@@ -7822,12 +7874,35 @@ def _cloud_abort(root, job_id, url, requeue, reason, lane=None):
         abort_job(root, job, requeue and (not job.get("parent") or runall_child(board, job)), reason)
 
 
-def cmd_cloud_sync(root: Path) -> dict:
+def _cloud_home(root: Path, job_id: str, url: str | None, base: str | None, worktree: str, head: str,
+                reason: str) -> None:
+    """Bring an ended shop job's work home (job 1414) in one locked_board: still in stage cloud (else SystemExit, the
+    job left as it was), it becomes a spec stall on worktree and branch head, with pr and base when given, and loses its
+    shop pid. No lane is written. serve.py auto_resume's spec-stall rule then resumes it."""
+    with locked_board(root) as board:
+        job = live(board, check_id(job_id))
+        if job["stage"] != "cloud":
+            raise SystemExit(f"job {job_id} is {job['stage']}, not cloud; left alone")
+        job.update(stage="spec", stalled=True, reason=reason, worktree=worktree, branch=head, updatedAt=now())
+        if url:
+            job["pr"] = url
+        if base:
+            job["base"] = base
+        job.pop("shop", None)
+
+
+def cmd_cloud_sync(root: Path, ended=()) -> dict:
     """Move every stage-`cloud` job whose PR finished: MERGED -> done, CLOSED -> aborted and requeued, open with the
     scrum:needs-human label -> needs-human with the comment's reason and a local worktree, or, for a requeue:,
-    obsolete: or looks already fixed: reason, aborted with the PR closed. Every gh read runs before any write, so a
-    gh failure changes nothing. A job that left stage cloud meanwhile is skipped. A moved job with no artifacts branch
-    yet gets the internal artifactsPending mark; every run re-checks marked jobs and lists those whose branch arrived.
+    obsolete: or looks already fixed: reason, aborted with the PR closed. ended (serve.py cloud_tick: ids whose shop
+    session ended, job 1414) brings that job's work home (HOME): its open unlabelled PR, or with no trusted PR at all its
+    pushed scrum/<id> branch (branch_pushed), gets a local worktree (cloud_worktree on the PR head, or scrum/<id>) and the
+    job becomes a spec stall on it (_cloud_home), the PR left open; when the worktree add fails it goes to needs-human
+    instead; a job with neither is left in cloud for cloud_tick's abort. Without ended an open unlabelled PR's job stays
+    in cloud. Every gh and branch read runs before any write, so a gh failure changes nothing. A job that left stage
+    cloud meanwhile is skipped, and a worktree added for it removed. A moved job with no artifacts branch yet gets the
+    internal artifactsPending mark (a HOME plan's move never does, nor reads that branch); every run re-checks marked
+    jobs and lists those whose branch arrived.
     Returns {"moved": [{"id","state","pr","reason","worktree","artifacts"}], "arrived": [ids], "error"}."""
     root = Path(root)
     repo = root.parent
@@ -7835,20 +7910,34 @@ def cmd_cloud_sync(root: Path) -> dict:
     arrived = _cloud_arrivals(root, repo)
     if not cloud:
         return {"moved": [], "arrived": arrived, "error": None}
+    ended = set(ended)
     try:
         prs = gh_api(repo, CLOUD_PULLS)
         if not isinstance(prs, list):
             raise GhError(f"gh api {CLOUD_PULLS} did not return a list")
-        plans = [(job_id, plan) for job_id in cloud if (plan := _cloud_plan(repo, job_id, prs))]
+        plans = [(job_id, plan) for job_id in cloud if (plan := _cloud_plan(repo, job_id, prs, job_id in ended))]
     except GhError as e:
         return {"moved": [], "arrived": arrived, "error": str(e) or type(e).__name__}
-    moved = []
+    planned = {job_id for job_id, _ in plans}
+    plans += [(job_id, _cloud_home_plan(job_id, f"scrum/{job_id}")) for job_id in cloud
+              if job_id in ended and job_id not in planned
+              and not any(isinstance(p, dict) and _cloud_trusted(p, job_id) for p in prs) and branch_pushed(repo, job_id)]
+    moved, homed = [], set()
     for job_id, (state, pairs, reason, wants_worktree, abort, head) in plans:
-        worktree, url = None, next(p[3:] for p in pairs if p.startswith("pr="))
+        worktree, url = None, next((p[3:] for p in pairs if p.startswith("pr=")), None)
         try:
             if live(read_board(root), job_id)["stage"] != "cloud":
                 continue  # moved meanwhile: add no worktree for it
-            if abort:
+            if state == "HOME":
+                homed.add(job_id)
+                worktree = cloud_worktree(repo, job_id, head) if url else cloud_worktree(repo, job_id)
+                if worktree:
+                    _cloud_home(root, job_id, url, next((p[5:] for p in pairs if p.startswith("base=")), None),
+                                worktree, head, reason)
+                else:  # with no worktree, New job step 4 would branch afresh from BASE and lose the shop commits
+                    state, reason = "NEEDS-HUMAN", pairs[-1][len("reason="):]
+                    cmd_set(root, job_id, pairs, expect="cloud", internal=True)
+            elif abort:
                 lane = next((p[5:] for p in pairs if p.startswith("lane=")), None)
                 if reason.startswith("obsolete: needs Trevor"):  # newjob 3b's manual-add, lost on the cloud's own board
                     try:
@@ -7876,8 +7965,8 @@ def cmd_cloud_sync(root: Path) -> dict:
             except GhError as e:
                 print(f"cloud-sync: {job_id}: PR close failed: {e}", file=sys.stderr)
         moved.append({"id": job_id, "state": state, "pr": url, "reason": reason, "worktree": worktree,
-                      "artifacts": artifacts_pushed(repo, job_id)})
-    pending = {m["id"] for m in moved if not m["artifacts"]}
+                      "artifacts": job_id not in homed and artifacts_pushed(repo, job_id)})
+    pending = {m["id"] for m in moved if not m["artifacts"] and m["id"] not in homed}  # HOME: rebuilt locally
     if pending:  # the session pushes scrum-artifacts/<id> last, so a poll can land between its label and that push
         with locked_board(root) as board:
             for job in board["jobs"]:
@@ -9113,7 +9202,7 @@ def main(argv=None):
         return 1 if out["up"] is False else 0
     require_scrum_dir(a.dir)
     if a.cmd == "new":
-        print(cmd_new(a.dir, a.title, a.id, started_by=a.by))
+        print(cmd_new(a.dir, a.title, a.id, started_by=a.by, refuse=a.id is None))
     elif a.cmd == "set":
         cmd_set(a.dir, a.id, a.pairs, unpause=a.unpause)
     elif a.cmd == "sync":

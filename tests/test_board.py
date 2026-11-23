@@ -8618,6 +8618,41 @@ class CloudSyncTest(unittest.TestCase):
         self.assertEqual([(m["state"], m["pr"]) for m in out["moved"]], [("MERGED", "https://github.com/o/r/pull/9")])
         self.assertEqual(self.get()["stage"], "done")
 
+    J1390 = "1390-a-cloud-job-that-requeues-for-an-unmerge"
+
+    def pr978(self, head="scrum/1390-requeue-after", title=f"[scrum {J1390}] requeue adds after markers", fork=False):
+        """PR #978's real head and title (job 1414), or a variant."""
+        return {"number": 978, "html_url": "https://github.com/o/r/pull/978", "title": title, "state": "open",
+                "merged_at": None, "labels": [], "head": {"ref": head, "repo": {"full_name": "evil/r" if fork else "o/r"}},
+                "base": {"ref": "main", "repo": {"full_name": "o/r"}}, "user": {"login": "trev"}}
+
+    def test_cloud_trusted_number_slug_head(self):
+        self.assertIs(board._cloud_trusted(self.pr978(), self.J1390), True)
+        for head in (f"scrum/{self.J1390}", "scrum/1390", "scrum/1390-x"):
+            self.assertIs(board._cloud_trusted(self.pr978(head=head), self.J1390), True, head)
+        self.assertIs(board._cloud_trusted(self.pr978(title="requeue adds after markers"), self.J1390), True)
+        merged = self.pr(state="closed", merged_at="2026-10-01T00:00:00Z",
+                         head={"ref": "scrum/001-cloud-fix", "repo": {"full_name": "o/r"}})
+        with self.gh([merged]):
+            out = board.cmd_cloud_sync(self.root)
+        self.assertEqual([(m["state"], m["pr"]) for m in out["moved"]], [("MERGED", self.URL)])
+        self.assertEqual(self.get()["stage"], "done")
+
+    def test_cloud_trusted_number_prefix_never_crosses_numbers(self):
+        untagged = "requeue adds after markers"
+        self.assertIs(board._cloud_trusted(self.pr978(title=untagged), "139-x"), False)
+        self.assertIs(board._cloud_trusted(self.pr978(), "139-x"), False)
+        for head in ("scrum/1390-x", "scrum/13900-x", "scrum/139-", "scrum/1390", "scrum/x139-y", "139-requeue-after",
+                     "scrum/139-x\nmain"):
+            self.assertIs(board._cloud_trusted(self.pr978(head=head, title=untagged), "139-x"), False, head)
+        for head in ("scrum/139-x", "scrum/13900-x", "scrum/1390-", "scrum/1390-x\nmain", "other/1390-x"):
+            self.assertIs(board._cloud_trusted(self.pr978(head=head, title=untagged), self.J1390), False, head)
+
+    def test_cloud_trusted_odd_head_fork_or_other_tag_refused(self):
+        self.assertIs(board._cloud_trusted(self.pr978(fork=True), self.J1390), False)
+        self.assertIs(board._cloud_trusted(self.pr978(title="[scrum 1391] requeue adds after markers"), self.J1390), False)
+        self.assertIs(board._cloud_trusted(self.pr978(title="[scrum 1391-other] x"), self.J1390), False)
+
     def test_cloud_sync_ignores_outsider_needs_human_comment(self):
         mark = "\n<!-- scrum needs-human -->"
         comments = [{"user": self.TREV, "body": "Hard stop: money in checkout" + mark},
@@ -8741,6 +8776,175 @@ class CloudSyncTest(unittest.TestCase):
                 self.assertNotIn("artifactsPending", self.get())
                 if rc:
                     self.assertIn("fatal: not a working tree", e.getvalue())
+
+    def shop_job(self, job_id=None):
+        """The job as a shop session left it: stage cloud with its shop pid and worker (job 1414)."""
+        board.cmd_set(self.root, job_id or self.job, ["shop=4242", "worker=shopmac"])
+
+    def home(self, pulls, ended, worktree="/wt", pushed=False):
+        with self.gh(pulls), mock.patch.object(board, "cloud_worktree", return_value=worktree) as wt, \
+                mock.patch.object(board, "branch_pushed", return_value=pushed) as bp, \
+                mock.patch("sys.stderr", io.StringIO()):
+            out = board.cmd_cloud_sync(self.root, ended=ended)
+        return out, wt, bp
+
+    def test_ended_open_pr_brought_home(self):
+        self.shop_job()
+        with board.locked_board(self.root) as b:
+            board.find(b, self.job)["updatedAt"] = "2026-01-01T00:00:00+00:00"
+        head = "scrum/001-cloud-fix"
+        open_pr = self.pr(head={"ref": head, "repo": {"full_name": "o/r"}}, body="Scrum lane: fast")
+        out, wt, bp = self.home([open_pr], [self.job])
+        reason = f"stalled: shop session ended leaving PR {self.URL} open; its branch {head} is home for the local pipeline"
+        self.assertEqual(out, {"moved": [{"id": self.job, "state": "HOME", "pr": self.URL, "reason": reason,
+                                          "worktree": "/wt", "artifacts": False}], "arrived": [], "error": None})
+        wt.assert_called_once_with(self.root.parent, self.job, head)
+        bp.assert_not_called()  # a trusted PR decides; no branch read
+        job = self.get()
+        self.assertEqual((job["stage"], job["stalled"], job["reason"], job["pr"], job["base"], job["worktree"], job["branch"]),
+                         ("spec", True, reason, self.URL, "origin/main", "/wt", head))
+        self.assertNotEqual(job["updatedAt"], "2026-01-01T00:00:00+00:00")
+        self.assertNotIn("shop", job)
+        self.assertIsNone(job.get("lane"))  # the local New job's spec decides the lane
+        self.assertNotIn("artifactsPending", job)
+        self.assertNotIn("without a PR", job["reason"])
+        board.artifacts_pushed.assert_not_called()
+        self.assertEqual(self.calls, [(self.root.parent, self.PULLS)])  # no PATCH state=closed
+        self.assertEqual(self.backlog_texts(), [])  # no requeue
+        self.assertEqual(board.stall_stage(job), "spec")
+
+    def test_ended_branch_without_pr_brought_home(self):
+        self.shop_job()
+        other = self.pr(title="[scrum 999-other] x", head={"ref": "scrum/999-other", "repo": {"full_name": "o/r"}})
+        out, wt, bp = self.home([other], [self.job], pushed=True)
+        reason = (f"stalled: shop session ended leaving branch scrum/{self.job} pushed with no PR; it is home for the "
+                  "local pipeline")
+        self.assertEqual(out["moved"], [{"id": self.job, "state": "HOME", "pr": None, "reason": reason, "worktree": "/wt",
+                                         "artifacts": False}])
+        bp.assert_called_once_with(self.root.parent, self.job)
+        wt.assert_called_once_with(self.root.parent, self.job)
+        job = self.get()
+        self.assertEqual((job["stage"], job["stalled"], job["reason"], job["pr"], job["base"], job["worktree"], job["branch"]),
+                         ("spec", True, reason, None, None, "/wt", f"scrum/{self.job}"))
+        self.assertNotIn("shop", job)
+        self.assertNotIn("artifactsPending", job)
+        board.artifacts_pushed.assert_not_called()
+        self.assertEqual(self.backlog_texts(), [])
+
+        self.setUp()  # no branch either: left in cloud for serve.py's SHOP_ENDED abort
+        self.shop_job()
+        before = self.get()
+        out, wt, bp = self.home([], [self.job], pushed=False)
+        self.assertEqual(out, {"moved": [], "arrived": [], "error": None})
+        bp.assert_called_once_with(self.root.parent, self.job)
+        wt.assert_not_called()
+        self.assert_untouched(before)
+
+        self.setUp()  # a closed trusted PR is a PR: CLOSED, with no branch read
+        self.shop_job()
+        out, wt, bp = self.home([self.pr(state="closed")], [self.job], pushed=True)
+        self.assertEqual([m["state"] for m in out["moved"]], ["CLOSED"])
+        bp.assert_not_called()
+
+        self.setUp()  # not ended: no branch read at all
+        self.shop_job()
+        out, wt, bp = self.home([], [], pushed=True)
+        self.assertEqual(out["moved"], [])
+        bp.assert_not_called()
+
+    def test_branch_pushed_false_on_git_failure(self):
+        argv = ["git", "-C", str(self.root.parent), "ls-remote", "--exit-code", "origin", "refs/heads/scrum/007-x"]
+        for effect, want in ((subprocess.CompletedProcess(argv, 0, b"abc\trefs/heads/scrum/007-x\n", b""), True),
+                             (subprocess.CompletedProcess(argv, 2, b"", b""), False),
+                             (subprocess.CompletedProcess(argv, 128, b"", b"fatal: unable to access"), False),
+                             (subprocess.TimeoutExpired(argv, 30), False),
+                             (FileNotFoundError(2, "No such file", "git"), False),
+                             (PermissionError(13, "denied"), False)):
+            with self.subTest(effect=effect):
+                kw = {"return_value": effect} if isinstance(effect, subprocess.CompletedProcess) else {"side_effect": effect}
+                with mock.patch.object(board.subprocess, "run", **kw) as run:
+                    self.assertIs(board.branch_pushed(self.root.parent, "007-x"), want)
+                self.assertEqual(run.call_args.args[0], argv)
+        with mock.patch.object(board.subprocess, "run") as run, self.assertRaises(SystemExit):
+            board.branch_pushed(self.root.parent, "--upload-pack=x")
+        run.assert_not_called()
+
+    def test_ended_home_worktree_add_fails_needs_human(self):
+        self.shop_job()
+        out, wt, bp = self.home([self.pr()], [self.job], worktree=None)
+        reason = (f"shop session ended leaving PR {self.URL} open, but its worktree could not be added here. "
+                  f"Fix: free .claude/worktrees/scrum-{self.job}, then rework or abort the job.")
+        self.assertEqual(out["moved"], [{"id": self.job, "state": "NEEDS-HUMAN", "pr": self.URL, "reason": reason,
+                                         "worktree": None, "artifacts": False}])
+        job = self.get()
+        self.assertEqual((job["stage"], job["pr"], job["base"], job["reason"], job["worktree"], job["branch"]),
+                         ("needs-human", self.URL, "origin/main", reason, None, f"scrum/{self.job}"))
+        self.assertFalse(job.get("stalled"))
+        self.assertNotIn("artifactsPending", job)
+        self.assertEqual(self.calls, [(self.root.parent, self.PULLS)])  # the PR stays open
+        self.assertEqual(self.backlog_texts(), [])
+
+        self.setUp()
+        self.shop_job()
+        out, wt, bp = self.home([], [self.job], worktree=None, pushed=True)
+        reason = (f"shop session ended leaving branch scrum/{self.job} pushed with no PR, but its worktree could not be "
+                  f"added here. Fix: free .claude/worktrees/scrum-{self.job}, then rework or abort the job.")
+        self.assertEqual(out["moved"], [{"id": self.job, "state": "NEEDS-HUMAN", "pr": None, "reason": reason,
+                                         "worktree": None, "artifacts": False}])
+        job = self.get()
+        self.assertEqual((job["stage"], job["pr"], job["base"], job["reason"], job["worktree"]),
+                         ("needs-human", None, None, reason, None))
+        self.assertEqual(self.backlog_texts(), [])
+
+    def test_ended_home_skips_job_that_left_cloud(self):
+        for pulls, pushed in (([self.pr()], False), ([], True)):
+            with self.subTest(pr=bool(pulls)):
+                self.setUp()
+                self.shop_job()
+                def add(repo, job_id, ref=None):  # the worktree lands, then Trevor moves the job by hand
+                    board.cmd_set(self.root, job_id, ["stage=build", "reason=picked up locally"])
+                    return "/r/.claude/worktrees/scrum-x"
+                with self.gh(pulls), mock.patch.object(board, "cloud_worktree", side_effect=add), \
+                        mock.patch.object(board, "branch_pushed", return_value=pushed), \
+                        mock.patch.object(board, "cloud_worktree_remove") as rm, mock.patch("sys.stderr", io.StringIO()):
+                    out = board.cmd_cloud_sync(self.root, ended=[self.job])
+                self.assertEqual(out, {"moved": [], "arrived": [], "error": None})
+                rm.assert_called_once_with(self.root.parent, "/r/.claude/worktrees/scrum-x")
+                job = self.get()
+                self.assertEqual((job["stage"], job["reason"], job["shop"], job["worktree"], job["branch"], job["pr"]),
+                                 ("build", "picked up locally", "4242", None, f"scrum/{self.job}", None))
+                self.assertFalse(job.get("stalled"))
+
+    def test_ended_labelled_pr_still_needs_human(self):
+        self.shop_job()
+        labelled = self.pr(labels=[{"name": "scrum:needs-human"}])
+        comments = [{"user": self.TREV, "body": "blocked: y\n<!-- scrum needs-human -->"}]
+        with self.gh([labelled], comments), mock.patch.object(board, "cloud_worktree", return_value="/wt"), \
+                mock.patch.object(board, "branch_pushed", return_value=True) as bp:
+            out = board.cmd_cloud_sync(self.root, ended=[self.job])
+        self.assertEqual([(m["state"], m["reason"]) for m in out["moved"]], [("NEEDS-HUMAN", "blocked: y")])
+        self.assertEqual((self.get()["stage"], self.get()["reason"]), ("needs-human", "blocked: y"))
+        bp.assert_not_called()
+        for pr, state, stage in ((self.pr(state="closed"), "CLOSED", "aborted"),
+                                 (self.pr(state="closed", merged_at="2026-10-01T00:00:00Z"), "MERGED", "done")):
+            with self.subTest(state=state):
+                self.setUp()
+                self.shop_job()
+                out, wt, bp = self.home([pr], [self.job], pushed=True)
+                self.assertEqual([m["state"] for m in out["moved"]], [state])
+                self.assertEqual(self.get()["stage"], stage)
+                wt.assert_not_called()
+        self.setUp()  # a gh read error still changes nothing, and reads no branch
+        self.shop_job()
+        before = self.get()
+        with mock.patch.object(board, "gh_api", side_effect=board.GhError("HTTP 502")), \
+                mock.patch.object(board, "branch_pushed", return_value=True) as bp, \
+                mock.patch.object(board, "cloud_worktree", return_value="/wt") as wt:
+            self.assertEqual(board.cmd_cloud_sync(self.root, ended=[self.job]),
+                             {"moved": [], "arrived": [], "error": "HTTP 502"})
+        bp.assert_not_called()
+        wt.assert_not_called()
+        self.assert_untouched(before)
 
     def test_cli_prints_json(self):
         with self.gh([self.pr(state="closed")]), redirect_stdout(io.StringIO()) as out:
@@ -14714,6 +14918,77 @@ class StartedByTest(unittest.TestCase):
         out = board.wake_waiting(self.root)
         self.assertEqual((out["ready"], out["retry"]), (["002-second"], ["003-third"]))
         self.assertEqual([self.by(j) for j in ("002-second", "003-third", "004-held")], ["wake", "wake", "hand"])
+
+
+class NewSameTitleTest(unittest.TestCase):
+    """Job 1414: the CLI `new` refuses a title an open job already has; `--id` and library callers still add it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        self.root.mkdir()
+        no_claude_pid(self)
+
+    def new(self, *args):
+        return run_board("--dir", str(self.root), "new", *args)
+
+    def folders(self):
+        return sorted(p.name for p in (self.root / "jobs").iterdir())
+
+    def titles(self):
+        return [j["title"] for j in board.read_board(self.root)["jobs"]]
+
+    def test_cli_new_refuses_open_same_title(self):
+        first = self.new("Fix the login page")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(first.stdout.strip(), "001-fix-the-login-page")
+        before, folders = (self.root / "board.json").read_bytes(), self.folders()
+        again = self.new("Fix the login page")
+        self.assertNotEqual(again.returncode, 0)
+        self.assertIn("001-fix-the-login-page", again.stderr)
+        self.assertIn("in spec", again.stderr)
+        self.assertIn("give this one a different title", again.stderr)
+        self.assertEqual(again.stdout, "")
+        self.assertEqual((self.root / "board.json").read_bytes(), before)
+        self.assertEqual(self.folders(), folders)
+        self.assertIn("refuses a title an open job already has", board.__doc__)
+        other = self.new("Fix the login page twice")  # an exact match only
+        self.assertEqual((other.returncode, other.stdout.strip()), (0, "002-fix-the-login-page-twice"), other.stderr)
+        with board.locked_board(self.root) as b:  # an old entry with no title or stage never breaks the check
+            b["jobs"].append({"id": "003-untitled"})
+        bare = self.new("Fourth")
+        self.assertEqual((bare.returncode, bare.stdout.strip()), (0, "004-fourth"), bare.stderr)
+
+    def test_cli_new_allows_done_or_aborted_title(self):
+        for stage, title in (("done", "Ship it"), ("aborted", "Drop it")):
+            first = self.new(title)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            with board.locked_board(self.root) as b:
+                board.find(b, first.stdout.strip())["stage"] = stage
+            again = self.new(title)
+            self.assertEqual(again.returncode, 0, again.stderr)
+            self.assertNotEqual(again.stdout.strip(), first.stdout.strip())
+        self.assertEqual(self.titles(), ["Ship it", "Ship it", "Drop it", "Drop it"])
+
+    def test_cli_new_with_id_keeps_same_title(self):
+        first = self.new("Cloud thing")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        again = self.new("Cloud thing", "--id", "050-cloud-thing")
+        self.assertEqual((again.returncode, again.stdout.strip()), (0, "050-cloud-thing"), again.stderr)
+        self.assertEqual(self.titles(), ["Cloud thing", "Cloud thing"])
+        self.assertTrue((self.root / "jobs" / "050-cloud-thing").is_dir())
+
+    def test_library_new_and_next_allow_same_title(self):
+        first = self.new("Weekly ask")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(board.cmd_new(self.root, "Weekly ask"), "002-weekly-ask")
+        long = "Make the export button on the reports page download a CSV of every row in the table"
+        (self.root / "backlog.md").write_text(f"# Backlog\n- [ ] {long} first\n- [ ] {long} second\n")
+        a, b = board.cmd_next(self.root, 0), board.cmd_next(self.root, 1)
+        self.assertNotEqual(a["id"], b["id"])
+        self.assertEqual(self.titles()[2:], ["Make the export button on the reports page download a CSV…"] * 2)
+        self.assertEqual(self.titles()[:2], ["Weekly ask", "Weekly ask"])
 
 
 if __name__ == "__main__":

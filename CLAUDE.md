@@ -56,4 +56,6 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
 - An edit made in this checkout from a chat is finished in that same chat: run the tests, then commit and push `main`
   (`/trevskills-commitpush`). Never end a chat with uncommitted edits here; every scrum Merge refuses to run while the
   checkout is dirty. Not finishing it now? Put it on the backlog (`board.py backlog-add`) and leave the files alone.
+  A `/trevskills-scrum cloud-job` session (cloud or shop Mac) is not a chat: it runs every **New job** step in
+  `lanes/cloud.md` and edits only inside its job worktree.
 - Never `git reset`, `git rebase` or force-push.

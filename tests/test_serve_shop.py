@@ -72,6 +72,7 @@ class ShopTickTest(unittest.TestCase):
                   mock.patch.object(self.board, "projects", side_effect=lambda: dict(self.projects)),
                   mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False),
                   mock.patch.object(self.board, "jev_main_only", return_value=None),  # Jev down: the term list decides
+                  mock.patch.object(self.board, "branch_pushed", return_value=False),  # job 1414: no pushed scrum/<id>, no ls-remote
                   mock.patch.object(serve, "run_terminal", side_effect=AssertionError("no Terminal window"))):
             p.start()
             self.addCleanup(p.stop)
@@ -822,6 +823,22 @@ class ShopTickTest(unittest.TestCase):
                 self.assertEqual((acct_dir / "limit_until").read_text(), f"{until}\n")
                 self.assertEqual(self.job(root, "050-x")["stage"], "aborted")
 
+    def test_usage_limit_skips_job_gone_after_sync(self):
+        # job 1414 moved note_limit before the stage check; a job no longer on the board still names no account
+        root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
+        self.sh.ended.side_effect = lambda *a, **kw: "Working\nYou've hit your limit\n"
+
+        def sync(r, ended=()):
+            with self.board.locked_board(r) as b:
+                b["jobs"].clear()
+            return {"moved": [], "arrived": [], "error": None}
+
+        with mock.patch.object(self.board, "cmd_cloud_sync", side_effect=sync) as cs:
+            self.assertEqual(self.cloud(), "")
+        self.assertEqual(cs.call_args, mock.call(root, ended=["050-x"]))
+        for d in (self.main, self.owa):
+            self.assertFalse((d / "limit_until").exists(), d.name)
+
     def test_unreachable_shop_leaves_cloud_job(self):
         root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
         self.sh.ended.return_value = None  # shop asleep, or the pid still runs claude
@@ -853,7 +870,7 @@ class ShopTickTest(unittest.TestCase):
             order.append("ended")
             return "Merged it\n"
 
-        def sync(r):
+        def sync(r, ended=()):
             order.append("sync")
             with self.board.locked_board(r) as b:
                 self.board.find(b, "050-x").update(stage="done", pr="https://github.com/trevorwhecht/mm/pull/7")
@@ -883,25 +900,43 @@ class ShopTickTest(unittest.TestCase):
         """The pulls/<n> PATCH endpoints gh_api was called with."""
         return [c.args[1] for c in gh.call_args_list if "-X" in c.args]
 
-    def test_ended_shop_job_closes_open_pr(self):
-        root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"},
-                                   {"id": PAR, "stage": "running", "lane": "bigboy", "children": ["051-k"]},
-                                   {"id": "051-k", "stage": "cloud", "parent": PAR, "shop": "4343", "account": "main",
-                                    "feature": "Kid work\n"}])
-        self.sh.ended.side_effect = lambda *a, **kw: "Opened the PR\n"
-        prs = [self.pr("051-k", 12), self.pr("050-x", 11)]
-        with mock.patch.object(self.board, "gh_api", side_effect=lambda repo, ep, *f: {} if f else prs) as gh:
-            self.assertEqual(self.cloud(), "")
-        for job_id in ("050-x", "051-k"):
-            job = self.job(root, job_id)
-            self.assertEqual((job["stage"], job["reason"]), ("aborted", "requeue: shop session ended without a PR"))
-        backlog = (root / "backlog.md").read_text()
-        self.assertIn("Fix the widget", backlog)
-        self.assertNotIn("Kid work", backlog)
-        self.assertEqual(self.patches(gh), ["repos/{owner}/{repo}/pulls/11", "repos/{owner}/{repo}/pulls/12"])
-        for c in gh.call_args_list:
-            if "-X" in c.args:
-                self.assertEqual(c.args[2:], ("-X", "PATCH", "-f", "state=closed"))
+    def test_ended_shop_job_with_open_pr_brought_home(self):
+        # job 1414: the ended session's own open PR is finished work: it comes home as a spec stall, never closed
+        for why, tail in (("plain tail", "Opened the PR\n"), ("usage limit in the tail", "Working\nYou've hit your limit\n")):
+            with self.subTest(why):
+                self.serve.CLOUD_LAST.clear()
+                (self.owa / "limit_until").unlink(missing_ok=True)
+                root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"},
+                                           {"id": PAR, "stage": "running", "lane": "bigboy", "children": ["051-k"]},
+                                           {"id": "051-k", "stage": "cloud", "parent": PAR, "shop": "4343",
+                                            "account": "owa", "feature": "Kid work\n"}])
+                self.sh.ended.side_effect = lambda *a, **kw: tail
+                prs = [self.pr("051-k", 12), self.pr("050-x", 11)]
+                now = float(int(time.time()))
+                with mock.patch.object(self.board, "gh_api", side_effect=lambda repo, ep, *f: {} if f else prs) as gh, \
+                        mock.patch.object(self.board, "cloud_worktree", return_value="/wt") as wt, \
+                        mock.patch.object(self.board, "artifacts_pushed", return_value=True) as ap:
+                    self.assertEqual(self.cloud(now=now), "")  # cloud() asserts no cloud-home spawn
+                repo = self.projects["mm"]
+                self.assertEqual(wt.call_args_list, [mock.call(repo, "050-x", "scrum/050-x"),
+                                                     mock.call(repo, "051-k", "scrum/051-k")])
+                for job_id, n in (("050-x", 11), ("051-k", 12)):
+                    job, url = self.job(root, job_id), f"https://github.com/trevorwhecht/mm/pull/{n}"
+                    reason = f"stalled: shop session ended leaving PR {url} open; its branch scrum/{job_id} is home for the local pipeline"
+                    self.assertEqual((job["stage"], job["stalled"], job["reason"], job["pr"], job["base"], job["worktree"],
+                                      job["branch"]), ("spec", True, reason, url, "origin/main", "/wt", f"scrum/{job_id}"))
+                    self.assertNotIn("shop", job)
+                    self.assertNotIn("artifactsPending", job)
+                    self.assertIsNone(job.get("lane"))
+                self.assertEqual((root / "backlog.md").read_text(), "# Backlog\n", "no requeue")
+                self.assertEqual(self.patches(gh), [], "no PR closed")
+                self.assertEqual(gh.call_count, 1, "only the sync's own read: no close lookup")
+                ap.assert_not_called()
+                if why == "plain tail":
+                    self.assertFalse((self.owa / "limit_until").exists())
+                else:  # the job left stage cloud, yet its session's limit line still marks the account
+                    self.assertEqual((self.owa / "limit_until").read_text(),
+                                     f"{int(now) + self.serve.AUTO_RESUME_EVERY}\n")
 
     def test_ended_shop_job_closes_only_own_open_pr(self):
         cases = [("closed", self.pr("050-x", 11, state="closed")),
@@ -952,21 +987,22 @@ class ShopTickTest(unittest.TestCase):
         self.assertEqual((job["stage"], job["reason"]), ("aborted", "requeue: shop session ended without a PR"))
 
     def test_pr_close_failure_keeps_abort(self):
-        def list_fails(repo, ep, *f):
+        def list_fails(repo, ep, *f):  # the sync's read sees no PR (job 1414: an open one comes home); the lookup fails
             if list_fails.n:
                 raise self.board.GhError("gh down")
             list_fails.n += 1
-            return [self.pr("050-x", 11)]
+            return []
 
-        def patch_fails(repo, ep, *f):
+        def patch_fails(repo, ep, *f):  # the sync's read sees no PR; the lookup finds the open one, whose PATCH fails
             if f:
                 raise self.board.GhError("HTTP 403")
-            return [self.pr("050-x", 11)]
+            patch_fails.n += 1
+            return [] if patch_fails.n == 1 else [self.pr("050-x", 11)]
 
         for why, fake, err in (("list", list_fails, "gh down"), ("patch", patch_fails, "HTTP 403")):
             with self.subTest(why):
                 self.serve.CLOUD_LAST.clear()
-                list_fails.n = 0
+                list_fails.n = patch_fails.n = 0
                 root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
                 self.sh.ended.side_effect = lambda *a, **kw: "Session over\n"
                 with mock.patch.object(self.board, "gh_api", side_effect=fake):
@@ -977,7 +1013,7 @@ class ShopTickTest(unittest.TestCase):
     def test_no_close_when_abort_refused(self):
         root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
         self.sh.ended.side_effect = lambda *a, **kw: "Session over\n"
-        with mock.patch.object(self.board, "gh_api", return_value=[self.pr("050-x", 11)]) as gh, \
+        with mock.patch.object(self.board, "gh_api", return_value=[]) as gh, \
                 mock.patch.object(self.board, "_cloud_abort",
                                   side_effect=SystemExit("job 050-x is done, not cloud; left alone")):
             self.assertEqual(self.cloud(), "cloud-sync: mm: 050-x: job 050-x is done, not cloud; left alone\n")

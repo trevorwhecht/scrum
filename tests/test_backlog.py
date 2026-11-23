@@ -177,6 +177,38 @@ class BacklogTest(unittest.TestCase):
         with mock.patch.object(board, "cooling_down", return_value=False):
             return board.cmd_next(self.root)["feature"]
 
+    def test_backlog_add_refuses_flag_item(self):
+        # job 1414: argparse keeps a quoted "--priority 3" as a positional; saved, it was claimed as a job four times
+        before = (self.root / "backlog.md").read_bytes()
+        for items in (["--priority 3"], ["Real item", "--priority 3"], ["  --top  "]):
+            with self.subTest(items=items), self.assertRaisesRegex(SystemExit, "flags go before --"):
+                board.cmd_backlog_add(self.root, items)
+            self.assertEqual((self.root / "backlog.md").read_bytes(), before)
+        for args in (("--priority 3",), ("--", "--priority 3"), ("Real item", "--priority 3")):
+            with self.subTest(args=args):
+                code, err = self.add_cli(*args)
+                self.assertEqual(code, 1)
+                self.assertIn("flags go before --", err)
+                self.assertEqual((self.root / "backlog.md").read_bytes(), before)
+        self.assertEqual(board.cmd_backlog_add(self.root, ["Fix --priority parsing"]), ["Fix --priority parsing"])
+
+    def test_next_skips_open_flag_line(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] --priority 3 {p:5}\n- [ ] Dark mode\n")
+        self.assertEqual(self.claim(), "Dark mode")
+        self.assertIn("- [ ] --priority 3 {p:5}\n", self.text())
+        with mock.patch.object(board, "cooling_down", return_value=False):
+            self.assertEqual(board.cmd_next(self.root), {"id": None, "feature": None})
+        self.assertIn("- [ ] --priority 3 {p:5}\n", self.text())
+        self.assertEqual([j["title"] for j in board.read_board(self.root)["jobs"]], ["Dark mode"])
+
+    def test_next_index_refuses_flag_line(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] --priority 3\n- [ ] Dark mode\n")
+        with self.assertRaisesRegex(SystemExit, "flags go before --"):
+            board.cmd_next(self.root, 0)
+        self.assertEqual(self.text(), "# Backlog\n- [ ] --priority 3\n- [ ] Dark mode\n")
+        self.assertEqual(board.read_board(self.root)["jobs"], [])
+        self.assertFalse((self.root / "jobs").exists() and any((self.root / "jobs").iterdir()))
+
     def test_backlog_add_top_is_claimed_next(self):
         (self.root / "backlog.md").write_text("# Backlog\n- [ ] A\n- [ ] [3] B {p:5}\n")
         self.assertEqual(self.add_cli("--top", "X"), (0, ""))
