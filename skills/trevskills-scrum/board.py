@@ -6460,15 +6460,17 @@ def heavy_interactive(root, ids) -> int:
     roots = {Path(root).resolve(): Path(root)}
     for repo in projects().values():
         roots.setdefault((repo / "scrum").resolve(), repo / "scrum")
-    alive = session_alive_fn()
-    found = set()
+    cands = {}
     for r in roots.values():
         try:
             jobs = read_board(r)["jobs"]
         except (SystemExit, OSError):
             continue
-        found |= {j["id"] for j in jobs if j["id"] in want and j.get("tty") and alive(j)}
-    return len(found)
+        cands.update({j["id"]: j for j in jobs if j["id"] in want and j.get("tty")})
+    if not cands:  # no interactive job: no ps scan (the watchdog tests count scans)
+        return 0
+    alive = session_alive_fn()
+    return sum(1 for j in cands.values() if alive(j))
 
 
 def heavy_counted(root, skip=None) -> tuple[list[str], int]:
