@@ -15685,7 +15685,8 @@ class AsyncBacklogAddTest(_OwnServer, unittest.TestCase):
 
 
 class AgentLinksTest(unittest.TestCase):
-    """Job 1290: agent_links_tick re-runs install.sh when a ~/.claude/agents/scrum-*.md link is dangling, points outside the checkout or is missing."""
+    """Job 1290: agent_links_tick re-runs install.sh when a ~/.claude/agents/scrum-*.md link is dangling, points outside the checkout or is missing.
+    Job 1362: edit-*.md links (the edit project's agents) are checked the same way."""
 
     def setUp(self):
         import serve
@@ -15772,6 +15773,30 @@ class AgentLinksTest(unittest.TestCase):
         out, lines = self.tick(run)
         self.assertTrue(out)
         self.assertEqual(lines[0]["links"], ["scrum-a.md -> missing"])
+        self.assertEqual(len(run.calls), 1)
+
+    def test_missing_edit_agent_link_is_bad(self):
+        # job 1362: the edit project's agents (edit-builder, edit-reviewer, edit-logger) are checked like scrum-*.md
+        self.agent("scrum-a.md")
+        self.agent("edit-reviewer.md")
+        self.agent("edit-builder.md", link=False)
+        (self.links / "edit-logger.md").symlink_to(self.base / "gone.md")
+        (self.src / "edit-logger.md").write_text("x")
+        self.assertEqual(self.serve.bad_agent_links(self.links, self.src),
+                         ["edit-builder.md -> missing", f"edit-logger.md -> {self.base / 'gone.md'}"])
+        run = self.fake_run()
+        out, lines = self.tick(run)
+        self.assertTrue(out)
+        self.assertEqual(lines[0]["links"], ["edit-builder.md -> missing", f"edit-logger.md -> {self.base / 'gone.md'}"])
+        self.assertEqual(len(run.calls), 1)
+
+    def test_missing_edit_agent_link_alone_reruns_install(self):
+        # only edit-*.md agents in the checkout: agent_links_tick still checks and relinks them
+        self.agent("edit-builder.md", link=False)
+        run = self.fake_run()
+        out, lines = self.tick(run)
+        self.assertTrue(out)
+        self.assertEqual(lines[0]["links"], ["edit-builder.md -> missing"])
         self.assertEqual(len(run.calls), 1)
 
     def test_agent_links_ignores_real_files_and_other_agents(self):

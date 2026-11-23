@@ -52,7 +52,7 @@ Run from the repo's **main checkout**, not a worktree:
 
 ```bash
 test "$(git rev-parse --git-dir)" = "$(git rev-parse --git-common-dir)" || echo "NOT MAIN CHECKOUT"
-REPO="$(git rev-parse --show-toplevel)"; F="$REPO/scrum"
+REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; F="$REPO/scrum"
 B() { python3 "$HOME/.claude/skills/trevskills-scrum/board.py" --dir "$F" "$@"; }
 ```
 
@@ -67,6 +67,8 @@ Shell state doesn't survive between Bash calls: re-derive `REPO`, `F` and the bo
 **Untrusted reason text:** a reason that copies text from an agent-written file (assessment.md, decision.md, a track or review file) or from command output (stderr, file names, branch names) can contain `$(...)` or a backtick. Remove every `'` from that text, then pass the reason in single quotes, `reason='...'`, never in double quotes, so the shell expands nothing in it. Reason templates below with a `<placeholder>` do this; ones whose only variables are `$ID` or `$DEFAULT` keep double quotes.
 
 If this isn't the main checkout, stop and say so. Run `B register "$REPO"` every time: it puts this repo on the dashboard.
+
+**No git** (the folder has no `.git`): `REPO` is the current folder; skip the main-checkout test, the exclude step and the `git remote` prerequisite, write `- Git: none` to project.md, and never run `git init`.
 
 **Prerequisites (every command that runs a job: new job, `next`, `start`, `run-all`, `approve`, `rework`, `resume`, `lilguy`, `cloud`, `cloud-job`, `cloud-home`; not bare `/trevskills-scrum`).** Before spawning any agent, check:
 - `git remote` prints something. If not, stop and tell the user to run `git remote add origin <url>`.
@@ -182,11 +184,11 @@ Read `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md` when this section ru
 
 Read `$HOME/.claude/skills/trevskills-scrum/lanes/digest.md` when this lane runs.
 
-## Video lane
+## Edit lane
 
-A job whose feature.md has a `Video folder:` line runs only this lane, for every command.
+A job whose feature.md has a `Kind:` line, or any job in a `- Git: none` project, runs only this lane, for every command.
 
-Read `$HOME/.claude/skills/trevskills-scrum/lanes/video.md` when this lane runs.
+Read `$HOME/.claude/skills/trevskills-scrum/lanes/edit.md` when this lane runs.
 
 ## Final report
 

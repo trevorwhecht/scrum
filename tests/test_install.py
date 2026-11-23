@@ -78,6 +78,18 @@ class InstallTest(unittest.TestCase):
             self.assertNotEqual(refused.returncode, 0)
             self.assertTrue((home / "agents" / "scrum-gone.md").is_symlink())
 
+    def test_install_prunes_dangling_edit_agent_links(self):
+        # job 1362: serve.py bad_agent_links checks edit-*.md too, so the re-run it triggers must drop a dangling one
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t) / "home"
+            agents = home / "agents"
+            agents.mkdir(parents=True)
+            (agents / "edit-gone.md").symlink_to(Path(t) / "nowhere.md")
+            result = self.run_install(home)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"removed dangling link {agents / 'edit-gone.md'}", result.stdout)
+            self.assertFalse((agents / "edit-gone.md").is_symlink())
+
     def test_install_refuses_to_clobber_a_real_file(self):
         with tempfile.TemporaryDirectory() as t:
             home = Path(t)

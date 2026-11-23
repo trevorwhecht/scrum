@@ -1,7 +1,9 @@
 # First-run setup (once per repo)
 
+**No git.** In a folder with no `.git` (the `edit` project, `~/Developer/vid-img-editing`), `REPO` is the current folder (`pwd`), and Setup skips the main-checkout test, the exclude step (step 2) and the `git remote` prerequisite; `B register "$REPO"` still runs, and so do steps 1, 3, 4 and 5. Step 4 writes `- Git: none` in project.md: serve.py and board.py then skip every git and gh pass for the project (`board.no_git`), the shop never runs its jobs, and each job runs the **Edit lane** (`lanes/edit.md`). Setup must never run `git init` there, nor add a remote to make itself pass.
+
 1. Run `mkdir -p "$F/jobs"`.
-2. Add `scrum/` and `.claude/worktrees/` to `$(git rev-parse --git-common-dir)/info/exclude` unless they're already there.
+2. Add `scrum/` and `.claude/worktrees/` to `$(git rev-parse --git-common-dir)/info/exclude` unless they're already there (no git: skipped, **No git** above).
 3. If `$F/backlog.md` is missing, create it containing `# Backlog` plus one blank line.
 4. Detect the project and write `$F/project.md`:
    - Read the repo `CLAUDE.md`/`AGENTS.md`, every `CLAUDE.md` in parent folders up to `$HOME`, and `.claude/rules/*.md` at each of those levels.
@@ -27,6 +29,8 @@
 ```
 
    `- Base branch: <branch>` is an optional line Trevor adds by hand to make every job target `<branch>` instead of `origin/HEAD` (see **New job** step 2). First-run setup never writes it.
+
+   `- Git: none` is written by step 4 only when the folder has no `.git` (**No git** above); a git repo never gets it.
 
    `- Deploy: <environment> <https://url>` names the GitHub deployment environment that deploys the default branch to production (Vercel posts `Production`) and the production URL, for **Merge** step 7 **Prod check**. First-run setup writes `- Deploy: none`; Trevor fills it in by hand. A missing line means `none`: no deploy wait and no production URL check.
 

@@ -9,6 +9,7 @@ AGENTS = {
     "scrum-digest-reader": "sonnet", "scrum-digester": "opus", "scrum-triager": "opus",
     "scrum-planner": "opus", "scrum-tracker": "sonnet", "scrum-bigboy-reviewer": "opus",
     "scrum-review-e2e": "sonnet", "scrum-unblocker": "opus",
+    "edit-builder": "opus", "edit-reviewer": "opus", "edit-logger": "sonnet",  # job 1362: the edit project's agents
 }
 DASHBOARD = ROOT / "skills" / "trevskills-scrum" / "dashboard.html"
 BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
@@ -4099,26 +4100,98 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                 referenced.add(name)
         self.assertLessEqual(set(MOVED), referenced)
 
-    def test_video_lane(self):
-        lane = self.lane("video")  # job 1340: motion ads run outside git, with Trevor's OK on storyboard and cuts
-        for phrase in ("Video folder: ", "lane=video", "video.md", "templates/storyboard.html",
-                       "references/style-rules.md", "contact_sheet.py", "VERDICT: FAIL", "review/v<N>.html",
-                       "only his approval ends", "general-purpose", "--title VIDEO_REVIEW", "one-current-version.md",
-                       "Archivve/<project>-archive.zip", "~/Desktop/videos/", "ElevenLabs", "Suno",
-                       "only when Trevor asks", "vid-img-editing/motion/video/", "never reuses a version number",
-                       "3 reviewer FAILs"):
-            self.assertIn(phrase, lane, phrase)
-        spans = [sp for name, sp in self.ask_spans() if name == "video"]
-        self.assertGreaterEqual(len(spans), 3)
+    def test_edit_lane(self):
+        """Job 1362 (was job 1340's video lane): every edit runs in one lane, outside git, with its own agents."""
+        skill = ROOT / "skills" / "trevskills-scrum"
+        self.assertFalse((skill / "lanes" / "video.md").exists())
+        lane = self.lane("edit")
+        self.assertEqual(re.findall(r"^### (.*)$", lane, re.M), ["edit-reel", "edit-animation", "edit-vector", "edit-photo"])
+        at = lane.index("\n### edit-reel\n")
+        shared, kinds = lane[:at], lane[at + 1:]
+        for phrase in ("Kind: ", "lane=edit", "kind=", "edit-builder", "edit-reviewer", "edit-logger", "review-N.md",
+                       "RECUT", "--title VIDEO_REVIEW", "one-current-version.md", "word for word",
+                       "Before anything else in New job, run `B set $ID lane=edit kind=<kind>`",
+                       "no worktree, branch, PR, Check gate, Review or Merge",
+                       "a fresh `edit-reviewer` each round", "After the third `RECUT` in a row",
+                       "the reviewer's notes go to Trevor on the card", "Only Trevor's approval ends the job",
+                       "word for word into the kind's rules file and the job ledger",
+                       "Every block or question is a `B ask`, never a silent stop", "`AGENT_MISSING`"):
+            self.assertIn(phrase, shared, phrase)
+        for name in AGENTS:
+            if name.startswith("scrum-"):
+                self.assertNotIn(name, lane, name)
+        self.assertNotIn("general-purpose", lane)
+        spans = [sp for name, sp in self.ask_spans() if name == "edit"]
+        self.assertGreaterEqual(len(spans), 5)
         for span in spans:
             self.assertRegex(span, r"--title (VIDEO_REVIEW|BUILDER_BLOCKED) --recommend <key> '<why>'$", span)
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        body = [l for l in self.h2(text, "## Video lane").splitlines()[2:] if l.strip()]
+        # No kind: in a no-git project a job with no valid Kind: line starts nothing and asks for the kind.
+        no_kind = self.section(shared, "**No kind:**", "\n")
+        for phrase in ("`- Git: none`", "no valid `Kind:` line", "starts nothing", "stop.md",
+                       "--a \"Send back with a note=rework $ID \\\"Kind: <kind>\\\"\"",
+                       "--b \"Remove this job=abort $ID --cascade\" --title BUILDER_BLOCKED"):
+            self.assertIn(phrase, no_kind, phrase)
+        resume = self.section(shared, "**Resume:**", "\n")
+        for phrase in ("a resume, re-run, rework or approve", "reads the job ledger first",
+                       "continues at its last unfinished step", "never re-asks an approved storyboard"):
+            self.assertIn(phrase, resume, phrase)
+        animation = self.section(kinds, "### edit-animation\n", "\n### edit-vector\n")
+        for phrase in ("Video folder: ", "video.md", "templates/storyboard.html", "references/style-rules.md",
+                       "contact_sheet.py", "review/v<V>.html", "Archivve/<project>-archive.zip", "~/Desktop/videos/",
+                       "ElevenLabs", "Suno", "only when Trevor asks", "vid-img-editing/motion/video/",
+                       "never reuses a version number", "`edit-builder`", "`edit-reviewer`"):
+            self.assertIn(phrase, animation, phrase)
+        for kind, job in (("edit-reel", "1364-edit-project-edit-reel-instagram-print-r"),
+                          ("edit-vector", "1365-edit-project-edit-vector-and-edit-photo"),
+                          ("edit-photo", "1365-edit-project-edit-vector-and-edit-photo")):
+            body = [l for l in self.section(kinds + "\n### ", f"### {kind}\n", "\n### ").splitlines()[1:] if l.strip()]
+            self.assertEqual(len(body), 1, (kind, body))  # a one-line stub until its job lands
+            self.assertIn(job, body[0], kind)
+            self.assertIn("not built yet", body[0], kind)
+        text = (skill / "SKILL.md").read_text()
+        self.assertNotIn("## Video lane", text)
+        body = [l for l in self.h2(text, "## Edit lane").splitlines()[2:] if l.strip()]
         self.assertEqual(len(body), 2, body)
-        self.assertIn("Video folder:", body[0])
-        self.assertEqual(body[1], "Read `$HOME/.claude/skills/trevskills-scrum/lanes/video.md` when this lane runs.")
-        self.assertEqual(text.index("\n## ", text.index("\n## Digest\n") + 1), text.index("\n## Video lane\n"))
-        self.assertEqual(text.index("\n## ", text.index("\n## Video lane\n") + 1), text.index("\n## Final report\n"))
+        self.assertIn("`Kind:`", body[0])
+        self.assertEqual(body[1], "Read `$HOME/.claude/skills/trevskills-scrum/lanes/edit.md` when this lane runs.")
+        self.assertEqual(text.index("\n## ", text.index("\n## Digest\n") + 1), text.index("\n## Edit lane\n"))
+        self.assertEqual(text.index("\n## ", text.index("\n## Edit lane\n") + 1), text.index("\n## Final report\n"))
+
+    def test_edit_agents(self):
+        """Job 1362: the edit project's agents share nothing with scrum-*; the reviewer judges only the files."""
+        read = lambda name: (ROOT / "agents" / f"{name}.md").read_text()
+        reviewer = read("edit-reviewer")
+        for phrase in ("gets the files and never the builder's reasons", "`review-N.md`", "never edits the work"):
+            self.assertIn(phrase, reviewer, phrase)
+        first = reviewer.index("first line is `RECUT` or `PASS`")
+        self.assertLess(first, reviewer.index("`must fix`", first))
+        self.assertLess(reviewer.index("`must fix`", first), reviewer.index("`left out`", first))
+        self.assertLess(reviewer.index("`left out`", first), reviewer.index("`stitch chances`", first))
+        builder = read("edit-builder")
+        for phrase in ("its kind's section of `lanes/edit.md`", "that kind's rules file"):
+            self.assertIn(phrase, builder, phrase)
+        logger = read("edit-logger")
+        for phrase in ("Write `<project>/log/rows/<clip stem>.json`", "Reply with one line per clip: `<clip> <rows> rows`, then `DONE`."):
+            self.assertIn(phrase, logger, phrase)
+        for name in ("edit-builder", "edit-reviewer", "edit-logger"):
+            text = read(name)
+            self.assertNotIn("general-purpose", text, name)
+            for other in AGENTS:
+                if other.startswith("scrum-"):
+                    self.assertNotIn(other, text, f"{other} in {name}")
+
+    def test_setup_without_git(self):
+        """Job 1362: Setup runs in a plain folder with no git (the edit project) and never makes it a repo."""
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        setup = self.section(text, "## Setup", "### First-run setup")
+        self.assertIn('REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; F="$REPO/scrum"', setup)
+        phrases = ("`REPO` is the current folder", "main-checkout test", "exclude step", "`git remote` prerequisite",
+                   "`- Git: none`", "never run `git init`")
+        for where, rule in (("SKILL.md", self.section(setup, "**No git", "\n\n")),
+                            ("setup.md", self.section(self.lane("setup"), "**No git", "\n\n"))):
+            for phrase in phrases:
+                self.assertIn(phrase, rule, f"{where}: {phrase}")
+        self.assertIn('`B register "$REPO"` still runs', self.lane("setup"))
 
     def test_skill_lane_pointers(self):
         text = skill_text()
