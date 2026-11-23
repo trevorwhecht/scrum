@@ -421,7 +421,8 @@ def cmd_new(root, title, job_id=None, unique=False, started_by="hand", refuse=Fa
     """unique: return None, adding nothing, while a job with this exact title is neither done nor aborted. refuse (the
     CLI `new` without --id, job 1414): raise SystemExit naming that open job's id and stage instead, writing nothing."""
     with locked_board(root) as board:
-        twin = next((j for j in board["jobs"] if j["title"] == title and j["stage"] not in ("done", "aborted")), None)
+        twin = (unique or refuse) and next((j for j in board["jobs"] if j.get("title") == title
+                                            and j.get("stage") not in ("done", "aborted")), None)
         if twin and refuse:
             raise SystemExit(f"job {twin['id']} (in {twin['stage']}) already has the title {title!r}: "
                              "work on that job, or give this one a different title")
@@ -611,6 +612,15 @@ def pick(items, index):
     if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(items):
         raise SystemExit(f"no backlog item {index!r}")
     return items[index]
+
+
+FLAG_HINT = 'flags go before -- (backlog-add --priority 3 -- "item text")'
+
+
+def flag_item(text) -> bool:
+    """A backlog item whose cleaned text starts with `--` is a flag passed as the item (job 1414: argparse keeps a quoted
+    "--priority 3" as a positional, and cmd_next claimed that line as a job four times); it is never saved or claimed."""
+    return clean(text, ITEM_MAX).startswith("--")
 
 
 def check_priority(priority):
@@ -885,7 +895,8 @@ def cmd_next(root, index=None, shop=None):
         lines, items = read_backlog(root)
         capped = index is None and shop is None and heavy_cap_reason(root)  # job 1314: heavy lines wait for the shop Mac
         if index is None:
-            item = next((i for i in sorted(items, key=priority_key) if not i["done"] and not i["setup"] and not waiting_on(i, items, board) and not origin_open(i, board)
+            item = next((i for i in sorted(items, key=priority_key) if not i["done"] and not i["setup"] and not flag_item(i["text"])
+                         and not waiting_on(i, items, board) and not origin_open(i, board)
                          and (shop is None or shop(i)) and not (capped and heavy_job(root, i))), None)
             if item is None:
                 return {"id": None, "feature": None}
@@ -893,6 +904,8 @@ def cmd_next(root, index=None, shop=None):
             item = pick(items, index)
             if item["done"]:
                 raise SystemExit(f"backlog item {index} is already claimed")
+            if flag_item(item["text"]):
+                raise SystemExit(f"backlog item {index} is only a flag ({item['text']!r}), not work: {FLAG_HINT}")
             if item["setup"]:
                 raise SystemExit(f"backlog item {index} waits on Human setup")
             if waits := waiting_on(item, items, board):
@@ -1236,11 +1249,14 @@ def cmd_backlog_add(root, items, setup=None, priority=None, top=False, by=None, 
     """Append each non-empty item, each with the Human setup checklist `setup` ("step; step") when given; returns the
     texts as stored. An empty checklist adds nothing. top puts each item first with {p:5}; by and critical set the
     source and priority (see backlog_op). unless_open skips an item while an open item's text contains it (checked
-    under the add's lock); skipped items are left out of the result."""
+    under the add's lock); skipped items are left out of the result. An item that is only a flag (flag_item) refuses
+    the whole call before any write."""
     check_source(by, priority, top, critical)
     if setup is not None:
         setup_steps(setup)
     check_priority(priority)
+    if flags := [clean(item, ITEM_MAX) for item in items if flag_item(item)]:
+        raise SystemExit(f"backlog item {flags[0]!r} is a flag, not work; nothing added: {FLAG_HINT}")
     added = []
     for item in items:
         if clean(item):

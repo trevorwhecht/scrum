@@ -14955,6 +14955,10 @@ class NewSameTitleTest(unittest.TestCase):
         self.assertIn("refuses a title an open job already has", board.__doc__)
         other = self.new("Fix the login page twice")  # an exact match only
         self.assertEqual((other.returncode, other.stdout.strip()), (0, "002-fix-the-login-page-twice"), other.stderr)
+        with board.locked_board(self.root) as b:  # an old entry with no title or stage never breaks the check
+            b["jobs"].append({"id": "003-untitled"})
+        bare = self.new("Fourth")
+        self.assertEqual((bare.returncode, bare.stdout.strip()), (0, "004-fourth"), bare.stderr)
 
     def test_cli_new_allows_done_or_aborted_title(self):
         for stage, title in (("done", "Ship it"), ("aborted", "Drop it")):
