@@ -1660,8 +1660,8 @@ def e2e_full_worktree(repo, root, head) -> Path:
     main checkout never holds its Next dev lock. Created once with `git worktree add --detach`, later moved with
     `git checkout --detach` run inside it. <repo>/.env.local, when present, is copied in on every call. PROJECT's
     Install command runs in it when it was just created or a lockfile differs between its old HEAD and head
-    (`git diff --name-only`); an empty or `none` Install runs nothing. A failed git call or a non-zero install exit
-    raises (ValueError, OSError or RuntimeError)."""
+    (`git diff --name-only`); an empty or `none` Install runs nothing. A failed git call or a failed install
+    (the worktree is removed first, so the next call reinstalls) raises (ValueError, OSError or RuntimeError)."""
     head = str(head)
     if head.startswith("-"):
         raise ValueError(f"bad head {head!r}")
@@ -1682,10 +1682,19 @@ def e2e_full_worktree(repo, root, head) -> Path:
         changed = old is None or any(Path(n).name in E2E_FULL_LOCKFILES
                                      for n in board._git(wt, "diff", "--name-only", old, head, "--").decode().splitlines())
         if changed:
-            r = subprocess.run(install, shell=True, cwd=wt, stdin=subprocess.DEVNULL, capture_output=True, timeout=1800)
-            if r.returncode:
-                tail = (r.stdout + r.stderr).decode(errors="replace").strip()[-200:]
-                raise RuntimeError(f"e2e worktree install exited {r.returncode}: {tail}")
+            try:
+                r = subprocess.run(install, shell=True, cwd=wt, stdin=subprocess.DEVNULL, capture_output=True,
+                                   timeout=1800)
+                err = f"exited {r.returncode}: " + (r.stdout + r.stderr).decode(errors="replace").strip()[-200:] \
+                    if r.returncode else None
+            except subprocess.TimeoutExpired:
+                err = "timed out"
+            if err:  # drop the worktree so the next run creates it again and reinstalls, never runs on a part install
+                try:
+                    board._git(repo, "worktree", "remove", "--force", str(wt))
+                except ValueError:
+                    shutil.rmtree(wt, ignore_errors=True)
+                raise RuntimeError(f"e2e worktree install {err}")
     return wt
 
 

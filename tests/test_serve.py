@@ -13338,6 +13338,10 @@ class E2eFullTest(unittest.TestCase):
             self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", self.base, 123.0, "lg")
         rec = json.loads((self.root / "e2e-full.json").read_text())
         self.assertEqual((rec["result"], rec["exit"]), ("error", None))
+        self.assertFalse(self.wt.exists(), "a failed install drops the worktree")
+        (self.root / "project.md").write_text("- E2E: sh run-e2e.sh\n- Install: echo ok >> installs.txt\n")
+        self.serve.e2e_full_worktree(self.repo, self.root, self.base)  # same head: Install runs again
+        self.assertEqual((self.wt / "installs.txt").read_text(), "ok\n")
 
     def test_run_logs_process(self):
         """Job 976: each full run logs its result, head, exit, failure count and whole seconds since it started."""
