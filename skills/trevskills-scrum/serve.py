@@ -1277,8 +1277,8 @@ def e2e_full_tick(project, repo, root) -> None:
     board.machine_ok passes (without claim=True, so cool-down never stops it). During
     cool down, once no job on this project blocks a restart, any new HEAD is due: the merges bundled into one run.
     With no run in flight here, every project's `running` record is an orphan (a serve reload killed its thread; one
-    serve.py per Mac) and is rewritten as `error` first, keeping its head and lastGreen; then every `error`/exit-null
-    record goes through e2e_full_from_log, so an orphan that finished later is filed. A `running` sweep older than
+    serve.py per Mac) and is rewritten as `error` first, keeping its head and lastGreen, unless e2e_full_stop_orphan
+    finds its buildlock child still running and stops it (`loaded`, job 1397); then every `error`/exit-null record goes through e2e_full_from_log, so an orphan that finished later is filed. A `running` sweep older than
     E2E_FULL_STALE still holds the run while a claude process names its dir. A `busy` record on this HEAD is retried
     once (retried=True). A no-git project (board.no_git, job 1362) never starts one."""
     cmd = e2e_command(root)
@@ -1287,8 +1287,11 @@ def e2e_full_tick(project, repo, root) -> None:
     now = time.time()
     for other in board.projects().values():
         if (rec := e2e_full_record(other / "scrum")) and rec.get("result") == "running":
-            rec = {**rec, "result": "error"}
-            write_e2e_full(other / "scrum", rec)
+            if not (stopped := e2e_full_stop_orphan(other, other / "scrum", rec)):
+                rec = {**rec, "result": "error"}
+                write_e2e_full(other / "scrum", rec)
+            else:
+                rec = stopped
         if rec and rec.get("result") == "error" and rec.get("exit") is None:
             e2e_full_from_log(other, other / "scrum", rec)
     sweep = ui_sweep_record(root)
@@ -1312,6 +1315,48 @@ def e2e_full_tick(project, repo, root) -> None:
     retried = (record or {}).get("result") == "busy" and (record or {}).get("head") == head
     threading.Thread(target=e2e_full_run, args=(repo, root, cmd, head, now, last_green),
                      kwargs={"retried": retried}, daemon=True).start()
+
+
+def e2e_full_stop_orphan(repo, root, rec) -> dict | None:
+    """After a real serve.py restart (job 1397), stop the full run whose `running` record rec has no thread here: the
+    e2e.lock holder (read_holder on each buildlock.slot_paths slot) matches only when its pid is alive and not this
+    process, its live command line (processes()) holds `buildlock.py` and the project's e2e_command(root), its live
+    cwd (proc_cwds) is the holder's cwd, and that cwd is <repo>/.claude/worktrees/e2e-full or repo itself, all checked
+    before any signal, so a reused pid is never signalled. On a match: stop_group(pid) (its descendant tree too, so
+    Playwright's webServer in its own group goes), then SIGTERM then SIGKILL (e2e_full_term_kill) each board.listeners()
+    pid whose cwd is the e2e-full worktree or under it, off board.KEEP_PORTS, never this process; the record becomes
+    `loaded` with the reason and loads + 1, one processes.log line. Returns that record, else None; never raises."""
+    try:
+        cmd = e2e_command(root)
+        if cmd.lower() in ("", "none"):
+            return None
+        wt = os.path.realpath(Path(repo) / ".claude" / "worktrees" / "e2e-full")
+        allowed = {wt, os.path.realpath(repo)}
+        cmds = None
+        for slot in buildlock.slot_paths(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock"):
+            if not (h := read_holder(slot)):
+                continue
+            pid, cwd = h[0], os.path.realpath(h[1])
+            if pid <= 1 or pid == os.getpid() or e2e_full_pid_gone(pid) or cwd not in allowed:
+                continue
+            if cmds is None:
+                cmds = {p: c for p, _, c in processes()}
+            live = cmds.get(pid, "")
+            if "buildlock.py" not in live or cmd not in live or proc_cwds([pid]).get(pid) != cwd:
+                continue  # a reused pid: another command or directory
+            stop_group(pid)
+            listening = board.listeners()
+            keep = {p for p, port, _ in listening if port in board.KEEP_PORTS} | {os.getpid()}
+            e2e_full_term_kill(list(dict.fromkeys(p for p, _, c in listening if p not in keep
+                                                  and (c == wt or c.startswith(wt + os.sep)))), 5.0)
+            why = "serve.py restarted while the full run was in flight"
+            new = {**rec, "result": "loaded", "reason": why, "loads": int(rec.get("loads") or 0) + 1}
+            write_e2e_full(root, new)
+            board.log_process("Full E2E on main", "stopped", repo=str(repo), reason=why)
+            return new
+    except Exception as e:  # the tick's error rewrite runs instead
+        print(f"e2e_full_stop_orphan: {e!r}", file=sys.stderr)
+    return None
 
 
 def e2e_full_from_log(repo, root, rec) -> dict | None:
@@ -1630,25 +1675,39 @@ def e2e_full_lock(repo, output, since):
 def e2e_full_exec(repo, cmd, env, log, loads) -> int:
     """One run of cmd in repo through buildlock.py, output to log; appends board.cpu_load_pct to loads after each
     E2E_FULL_LOAD_SECS of the wait and once at exit. Past E2E_FULL_STALE its process group gets SIGTERM. The child's pid
-    is E2E_FULL["pid"] while it runs (hot_stop_tick, job 1312). Returns the exit code."""
+    is E2E_FULL["pid"] while it runs (hot_stop_tick, job 1312). Returns the exit code (e2e_full_wait)."""
     with open(log, "w") as f:
         proc = subprocess.Popen([sys.executable, str(Path(buildlock.__file__).resolve()), cmd], cwd=repo,
                                 env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
                                 start_new_session=True)
-        E2E_FULL["pid"] = proc.pid  # hot_stop_tick's target while the child runs
-        try:
-            for _ in range(int(E2E_FULL_STALE // E2E_FULL_LOAD_SECS)):
+        return e2e_full_wait(proc, loads, time.time())
+
+
+def e2e_full_wait(proc, loads, started) -> int:
+    """Wait for a full run's child (a Popen, or the ReloadedProc a serve reload handed over, job 1397) until
+    started + E2E_FULL_STALE, so the cap counts from the run's own start. Appends board.cpu_load_pct to loads after
+    each E2E_FULL_LOAD_SECS slice of the wait and once at exit; past the deadline the child's process group gets
+    SIGTERM and is waited for. E2E_FULL["pid"] is the child's pid while it waits (hot_stop_tick). Returns the exit code."""
+    E2E_FULL["pid"] = proc.pid  # hot_stop_tick's target while the child runs
+    try:
+        deadline = started + E2E_FULL_STALE
+        while True:
+            left = deadline - time.time()
+            if left <= 0:  # E2E_FULL_STALE passed
                 try:
-                    code = proc.wait(timeout=E2E_FULL_LOAD_SECS)
-                    break
-                except subprocess.TimeoutExpired:
-                    loads.append(board.cpu_load_pct())
-            else:  # E2E_FULL_STALE passed
-                os.killpg(proc.pid, signal.SIGTERM)
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass  # already exited: wait() reaps it
                 code = proc.wait()
-        finally:
-            E2E_FULL.pop("pid", None)
-        loads.append(board.cpu_load_pct())
+                break
+            try:
+                code = proc.wait(timeout=min(E2E_FULL_LOAD_SECS, left))
+                break
+            except subprocess.TimeoutExpired:
+                loads.append(board.cpu_load_pct())
+    finally:
+        E2E_FULL.pop("pid", None)
+    loads.append(board.cpu_load_pct())
     return code
 
 
@@ -1704,7 +1763,7 @@ def e2e_full_worktree(repo, root, head) -> Path:
     return wt
 
 
-def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
+def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False, attach=None) -> dict:
     """Run cmd in repo through buildlock.py on the E2E lock (output to root/e2e-full.log), record the result in
     root/e2e-full.json. A failing spec no live job names (e2e_full_owned) is run again alone with one worker
     (e2e_full_rerun, root/e2e-full-rerun.log); one that passes is listed in the record's `flaky` and filed nowhere, a
@@ -1724,18 +1783,37 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
     A run hot_stop_tick stopped (E2E_FULL["hot_stop"], the heavy_hold reason) is loaded with that `reason` whatever
     the readings: no retry, re-run, flaky line or backlog item, also when the stop came during the one-worker re-run
     (job 1312).
-    An exception before the result is recorded records error (exit None) and re-raises."""
+    An exception before the result is recorded records error (exit None) and re-raises.
+    Job 1397: E2E_FULL["ctx"] (JSON-able: repo, root, cmd, head, at, last_green, retried, wt, before, started, project)
+    and E2E_FULL["loads"] describe the run in flight, so reload_if_changed can hand it over (RELOAD_E2E_FULL); both
+    go in the finally. attach ({pid, started, loads, wt, before}, from restore_e2e_full) makes the first pass wait for
+    that handed-over child (e2e_full_wait on a ReloadedProc, output in root/e2e-full.log) instead of making the
+    worktree and starting one; everything after is the same path."""
     rec = None
     try:
-        wt = e2e_full_worktree(repo, root, head)  # the run's cwd: no main-checkout dev server holds its Next dev lock
+        if attach:  # the old process made the worktree and took the listeners snapshot
+            wt, before = Path(attach["wt"]), [tuple(b) for b in attach.get("before") or []]
+        else:
+            wt = e2e_full_worktree(repo, root, head)  # the run's cwd: no main-checkout dev server holds its Next dev lock
+            before = board.listeners()
         env = {**os.environ, "SCRUM_BUILD_LOCK": str(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock")}
         log = root / "e2e-full.log"
-        before = board.listeners()
         lock = stopped = None
         try:
-            for _ in range(2):  # the second run only after stopping a stale E2E dev server
-                loads, started = [], time.time()
-                code = e2e_full_exec(wt, cmd, env, log, loads)
+            for i in range(2):  # the second run only after stopping a stale E2E dev server
+                if attach and i == 0:
+                    loads, started = list(attach.get("loads") or []), float(attach["started"])
+                else:
+                    loads, started = [], time.time()
+                E2E_FULL["loads"] = loads
+                E2E_FULL["ctx"] = {"repo": str(repo), "root": str(root), "cmd": cmd, "head": head, "at": at,
+                                   "last_green": last_green, "retried": retried, "wt": str(wt),
+                                   "before": [list(b) for b in before], "started": started,
+                                   "project": E2E_FULL.get("running")}
+                if attach and i == 0:
+                    code = e2e_full_wait(ReloadedProc(int(attach["pid"])), loads, started)
+                else:
+                    code = e2e_full_exec(wt, cmd, env, log, loads)
                 output = log.read_text(errors="replace")
                 if E2E_FULL.get("hot_stop"):  # hot_stop_tick ended it: no lock-block retry
                     lock = None
@@ -1792,6 +1870,8 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
     finally:
         E2E_FULL["running"] = None
         E2E_FULL.pop("hot_stop", None)
+        E2E_FULL.pop("ctx", None)
+        E2E_FULL.pop("loads", None)
 
 
 def e2e_full_owned(root, specs) -> set:
@@ -4575,6 +4655,7 @@ def code_stamp() -> tuple:
 CODE_STAMP = code_stamp()
 RELOAD_REFUSED = None  # the stamp whose pre-flight failed: no retry until the files change again
 RELOAD_RUNS = "SCRUM_RELOAD_RUNS"  # env var carrying RUNS across reload_if_changed's execv
+RELOAD_E2E_FULL = "SCRUM_RELOAD_E2E_FULL"  # env var carrying the full E2E run in flight across that execv (job 1397)
 
 
 class ReloadedProc:
@@ -4597,6 +4678,16 @@ class ReloadedProc:
                         self.returncode = os.waitstatus_to_exitcode(status)
         return self.returncode
 
+    def wait(self, timeout=None):
+        """Popen.wait for a handed-over child (e2e_full_wait, job 1397): poll every 0.25 s; past timeout seconds
+        raise subprocess.TimeoutExpired. Returns the exit code."""
+        deadline = None if timeout is None else time.time() + timeout
+        while (code := self.poll()) is None:
+            if deadline is not None and time.time() >= deadline:
+                raise subprocess.TimeoutExpired(str(self.pid), timeout)
+            time.sleep(0.25 if deadline is None else max(0.0, min(0.25, deadline - time.time())))
+        return code
+
 
 def restore_runs():
     """Rebuild RUNS from the RELOAD_RUNS env var the old process left before its execv, then drop the var so no spawned
@@ -4614,13 +4705,43 @@ def restore_runs():
         RUNS.update(runs)
 
 
+def restore_e2e_full():
+    """Re-attach the full E2E run the old process handed over in RELOAD_E2E_FULL before its execv (job 1397): pop the
+    var, set E2E_FULL running, pid and ctx, and start a daemon thread running e2e_full_run with attach, which waits
+    for that child (still this pid's child) and records the result by the normal path. With E2E_FULL["running"] set,
+    e2e_full_tick skips its orphan rewrite, hot_stop_tick sees the pid, and the E2E_FULL_STALE cap counts from the
+    run's own `started`. A malformed var is logged and ignored. Returns the thread, else None."""
+    data = os.environ.pop(RELOAD_E2E_FULL, None)
+    if data is None:
+        return None
+    try:
+        got = json.loads(data)
+        pid, ctx, running = int(got["pid"]), got["ctx"], str(got["running"])
+        args = (Path(ctx["repo"]), Path(ctx["root"]), str(ctx["cmd"]), str(ctx["head"]), ctx["at"], ctx["last_green"])
+        attach = {"pid": pid, "started": float(ctx["started"]), "loads": list(got.get("loads") or []),
+                  "wt": str(ctx["wt"]), "before": [list(b) for b in ctx.get("before") or []]}
+        retried = bool(ctx.get("retried"))
+        if pid <= 1:
+            raise ValueError(f"bad pid {pid}")
+    except (ValueError, TypeError, KeyError, AttributeError) as e:
+        print(f"serve.py: full E2E hand-over ignored: {e!r}", file=sys.stderr, flush=True)
+        return None
+    E2E_FULL.update(running=running, pid=pid, ctx=ctx)
+    t = threading.Thread(target=e2e_full_run, args=args, kwargs={"retried": retried, "attach": attach}, daemon=True)
+    t.start()
+    return t
+
+
 restore_runs()
+restore_e2e_full()
 
 
 def reload_if_changed(execv=os.execv, check=subprocess.run) -> bool:
     """Re-exec this server in place when serve.py, board.py or route.py changed on disk since it started and the new
     code imports (a --help pre-flight), whatever runs are live: RUNS goes to the new process in RELOAD_RUNS
-    (restore_runs), so live sessions stay tracked and are never killed. Returns False whenever it does not exec."""
+    (restore_runs), so live sessions stay tracked and are never killed, and a full E2E run in flight (E2E_FULL pid,
+    running and ctx set, no hot_stop) goes in RELOAD_E2E_FULL (restore_e2e_full, job 1397), never waited for or
+    stopped. Returns False whenever it does not exec."""
     global RELOAD_REFUSED
     try:
         stamp = code_stamp()
@@ -4644,10 +4765,15 @@ def reload_if_changed(execv=os.execv, check=subprocess.run) -> bool:
             os.environ[RELOAD_RUNS] = json.dumps(
                 {key: {**{k: v for k, v in r.items() if k != "proc"}, "pid": r["proc"].pid, "exit": r["proc"].poll()}
                  for key, r in RUNS.items()}, default=str)
+            if E2E_FULL.get("pid") and E2E_FULL.get("running") and E2E_FULL.get("ctx") and "hot_stop" not in E2E_FULL:
+                os.environ[RELOAD_E2E_FULL] = json.dumps(  # restore_e2e_full keeps watching it; never waited for here
+                    {"running": E2E_FULL["running"], "pid": E2E_FULL["pid"], "ctx": E2E_FULL["ctx"],
+                     "loads": list(E2E_FULL.get("loads") or [])}, default=str)
             try:
                 execv(sys.executable, [*argv, *sys.argv[1:]])
             finally:  # reached only when execv fails or is a test double: no later spawn inherits the snapshot
                 os.environ.pop(RELOAD_RUNS, None)
+                os.environ.pop(RELOAD_E2E_FULL, None)
         return True  # only reached when execv is a test double
     except Exception as e:  # the watchdog loop must go on whatever happens here
         print(f"serve.py: reload check: {e}", file=sys.stderr, flush=True)
