@@ -15859,14 +15859,14 @@ class JobStatesTest(_OwnServer, unittest.TestCase):
             {"id": "004-d", "title": "D", "stage": "aborted"},
             {"id": "005-e", "title": "E", "stage": "waiting", "paused": True, "play_queued": "2026-11-18T00:00:00+00:00"}]
     A = {"id": "001-a", "title": "A", "stage": "build", "reason": None, "pr": 12, "lane": "fast", "paused": False,
-         "stalled": False, "play_queued": False, "question": None, "options": None}
+         "stalled": False, "play_queued": False, "question": None, "options": None, "heldBy": None}
     B = {"id": "002-b", "title": "B", "stage": "done", "reason": "merged", "pr": None, "lane": None, "paused": False,
-         "stalled": False, "play_queued": False, "question": None, "options": None}
+         "stalled": False, "play_queued": False, "question": None, "options": None, "heldBy": None}
     C = {"id": "003-c", "title": "C", "stage": "needs-human", "reason": "stalled in build: no output", "pr": None,
          "lane": None, "paused": False, "stalled": True,
-         "play_queued": False, "question": "Fix it?", "options": [{"label": "Resume", "command": "resume 003-c"}]}
+         "play_queued": False, "question": "Fix it?", "options": [{"label": "Resume", "command": "resume 003-c"}], "heldBy": None}
     E = {"id": "005-e", "title": "E", "stage": "waiting", "reason": None, "pr": None, "lane": None, "paused": True,
-         "stalled": False, "play_queued": True, "question": None, "options": None}
+         "stalled": False, "play_queued": True, "question": None, "options": None, "heldBy": None}
 
     def setUp(self):
         self.start_server(self.JOBS)
