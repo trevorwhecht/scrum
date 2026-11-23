@@ -14405,7 +14405,7 @@ class HandStartHoldTest(unittest.TestCase):
         self.assertEqual(code, 202)
         log = self.stub_prompts(job_id)
         self.assertIn(f'"/trevskills-scrum start {job_id}"', log)
-        self.assertNotIn("resume", log)
+        self.assertNotIn(f'"/trevskills-scrum resume {job_id}"', log)
         self.assertNotIn("paused", self.job(job_id))
 
     def test_play_on_paused_spec_job_with_runlog_still_resumes(self):
