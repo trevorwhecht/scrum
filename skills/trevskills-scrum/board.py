@@ -9602,6 +9602,33 @@ def queue_start(root, job_id: str, prompt: str | None = None) -> bool:
         return True
 
 
+EDIT_MCP = {"edit-vector": ("vectorcraft", "~/.local/bin/vectorcraft-cli", ["mcp"]),
+            "edit-photo": ("photocraft", "/Applications/PhotoCraft.app/Contents/MacOS/photocraft-cli", ["mcp"])}
+
+
+def edit_mcp_config(root: Path, kind: str) -> Path | None:
+    """Job 1365: write `<root>/runs/mcp-<kind>.json` with the one MCP server an edit-vector or edit-photo job needs and
+    return its path; None for any other kind. The entry is `mcpServers.<name>` of the primary account's
+    `Path.home()/.claude.json` (never CLAUDE_CONFIG_DIR), else the default command; only type, command and args are
+    copied, never `env`, so no secret reaches the file."""
+    if kind not in EDIT_MCP:
+        return None
+    name, command, args = EDIT_MCP[kind]
+    command = os.path.expanduser(command)
+    server = {"type": "stdio", "command": command, "args": list(args)}
+    try:
+        entry = json.loads((Path.home() / ".claude.json").read_text())["mcpServers"][name]
+        if isinstance(entry.get("command"), str) and entry["command"] and isinstance(entry.get("args", []), list) \
+                and all(isinstance(a, str) for a in entry.get("args", [])):
+            server = {"type": "stdio", "command": entry["command"], "args": list(entry.get("args", []))}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    path = Path(root) / "runs" / f"mcp-{kind}.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({"mcpServers": {name: server}}, indent=2) + "\n")
+    return path
+
+
 def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags=("--permission-mode", "acceptEdits"),
           model: str | None = None, account: str | None = None, nice: int = SESSION_NICE,
           caller: int | None = None, hot_hold: bool = True) -> tuple[subprocess.Popen, str]:
@@ -9662,8 +9689,16 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     logs = root / "runs"
     logs.mkdir(exist_ok=True)
     log = logs / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{action}-{job_id}.log"
+    mcp = None  # job 1365: edit-vector and edit-photo jobs load their one MCP server
+    if "--mcp-config" not in flags:
+        try:
+            kind = job.get("kind") or edit_kind((root / "jobs" / job_id / "feature.md").read_text(errors="replace"))
+        except OSError:
+            kind = None
+        mcp = edit_mcp_config(root, kind) if kind else None
     argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags,
             *(() if "--strict-mcp-config" in flags else ("--strict-mcp-config",)),  # job 1253: no MCP server loads
+            *(("--mcp-config", str(mcp)) if mcp else ()),
             *(() if "--settings" in flags else ("--settings", spawn_settings(acc.dir, root.parent)))]
     try:
         with open(log, "w") as fh:
