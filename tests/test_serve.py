@@ -15895,3 +15895,82 @@ class RaiseFdLimitTest(unittest.TestCase):
         import serve
         src = inspect.getsource(serve.main)
         self.assertLess(src.index("raise_fd_limit()"), src.index("add_argument"))
+
+
+class ProjectNotesTickTest(unittest.TestCase):
+    """Job 1369: the watchdog appends each done job's spec.md `Project note:` lines (under ## Scope) to project.md."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        serve.PROJECT_NOTES_SEEN.clear()
+        self.addCleanup(serve.PROJECT_NOTES_SEEN.clear)
+        self.root = Path(tempfile.mkdtemp()) / "scrum"
+
+    def spec(self, job_id, text):
+        d = self.root / "jobs" / job_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "spec.md").write_text(text)
+
+    def tick(self, jobs, side_effect=None):
+        held = []
+        calls = []
+
+        def note(root, line):
+            held.append(self.serve.PROJECT_MD_LOCK.locked())
+            calls.append((root, line))
+            if side_effect:
+                side_effect(line)
+            return {"added": True}
+
+        with mock.patch.object(self.serve.board, "cmd_project_note", side_effect=note):
+            self.serve.project_notes_tick("p", self.root, jobs)
+        self.assertTrue(all(held))
+        return calls
+
+    def test_applies_done_job_notes_only(self):
+        scope = "## Scope\nIn:\n- a thing\nOut:\n- Project note: Use X for Y.\nProject note:   Run Z first.  \n"
+        self.spec("001-done", "# T\n## Problem\nProject note: not this one.\n" + scope + "## Acceptance criteria\n"
+                  "Project note: nor this.\n")
+        self.spec("002-aborted", scope)
+        self.spec("003-cloud", scope)
+        self.spec("004-human", scope)
+        self.spec("005-plain", "## Scope\n- Follow-up: a backlog line\n")
+        jobs = [{"id": "001-done", "stage": "done"}, {"id": "002-aborted", "stage": "aborted"},
+                {"id": "003-cloud", "stage": "cloud"}, {"id": "004-human", "stage": "needs-human"},
+                {"id": "005-plain", "stage": "done"}]
+        self.assertEqual(self.tick(jobs), [(self.root, "Use X for Y."), (self.root, "Run Z first.")])
+
+    def test_waits_for_spec_and_reads_once(self):
+        jobs = [{"id": "001-shop", "stage": "done"}]
+        self.assertEqual(self.tick(jobs), [])
+        self.assertEqual(self.serve.PROJECT_NOTES_SEEN, set())
+        self.spec("001-shop", "## Scope\n- Project note: Use X for Y.\n")
+        self.assertEqual(self.tick(jobs), [(self.root, "Use X for Y.")])
+        self.assertEqual(self.serve.PROJECT_NOTES_SEEN, {"p/001-shop"})
+        self.assertEqual(self.tick(jobs), [])
+
+    def test_error_prints_and_continues(self):
+        self.spec("001-a", "## Scope\n- Project note: bad.\n- Project note: good.\n")
+        self.spec("002-b", "## Scope\n- Project note: io.\n")
+
+        def fail(line):
+            if line == "bad.":
+                raise SystemExit("project-note: scrum/project.md is missing")
+            if line == "io.":
+                raise OSError("disk full")
+
+        jobs = [{"id": "001-a", "stage": "done"}, {"id": "002-b", "stage": "done"}]
+        with mock.patch("sys.stderr", new=io.StringIO()) as err:
+            calls = self.tick(jobs, side_effect=fail)
+        self.assertEqual([c[1] for c in calls], ["bad.", "good.", "io."])
+        self.assertEqual(err.getvalue().splitlines(), [
+            "project-notes: p: 001-a: project-note: scrum/project.md is missing",
+            "project-notes: p: 002-b: disk full"])
+
+    def test_watchdog_runs_it_guarded_between_cloud_and_shop(self):
+        src = inspect.getsource(self.serve.watchdog_tick)
+        at = src.index("project_notes_tick(project, root, jobs)")
+        self.assertLess(src.index("cloud_tick(project, root, jobs)"), at)
+        self.assertLess(at, src.index("shop_tick(project, repo, root)"))
+        self.assertTrue(src[:at].rstrip().endswith("try:  # its own guard: a project note failure must not skip shop_tick"))

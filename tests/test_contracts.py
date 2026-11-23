@@ -2407,7 +2407,9 @@ class ContractTest(unittest.TestCase):
         head = "- **`scrum/` is never in the diff.**"
         for phrase in (head, "never an acceptance criterion or a Likely file",
                        "Write each new line under `## Scope` Out as `Follow-up: <one-line backlog text>`.",
-                       "A line the request only ticks stays open for the Run all triager, which retires done items."):
+                       "A line the request only ticks stays open for the Run all triager, which retires done items.",
+                       "A line to add to `scrum/project.md` goes under Out as `Project note: <the line to append to its "
+                       "Notes>` in place of `Follow-up:`; the main Mac adds it after the merge."):
             self.assertEqual(text.count(phrase), 1, phrase)
         start = text.index(head)
         end = text.index("- Write no code and touch no file")
