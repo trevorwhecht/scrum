@@ -6451,11 +6451,40 @@ def heavy_ids(root, skip=None) -> list[str]:
     return ids
 
 
-def heavy_count(root, skip=None) -> int:
-    """How many heavy jobs run on this Mac: len(heavy_ids(root, skip)), at most live_sessions() (job 1381: a job in a
-    WATCHED stage with no running session runs nothing, so it never fills HEAVY_PER_MAC)."""
+def heavy_interactive(root, ids) -> int:
+    """How many of the heavy job `ids` run in an interactive session (job 1392): the job has a non-empty `tty` (a
+    headless spawn clears it) and session_alive_fn() says its session is alive. live_sessions() counts headless only."""
+    want = set(ids)
+    if not want:
+        return 0
+    roots = {Path(root).resolve(): Path(root)}
+    for repo in projects().values():
+        roots.setdefault((repo / "scrum").resolve(), repo / "scrum")
+    cands = {}
+    for r in roots.values():
+        try:
+            jobs = read_board(r)["jobs"]
+        except (SystemExit, OSError):
+            continue
+        cands.update({j["id"]: j for j in jobs if j["id"] in want and j.get("tty")})
+    if not cands:  # no interactive job: no ps scan (the watchdog tests count scans)
+        return 0
+    alive = session_alive_fn()
+    return sum(1 for j in cands.values() if alive(j))
+
+
+def heavy_counted(root, skip=None) -> tuple[list[str], int]:
+    """(heavy_ids(root, skip), how many of them count): at most live_sessions() headless sessions plus the alive
+    interactive ones, never more than the ids (jobs 1381, 1392: a WATCHED job with no running session fills no slot)."""
     ids = heavy_ids(root, skip)
-    return min(len(ids), live_sessions()) if ids else 0
+    if not ids:
+        return ids, 0
+    return ids, min(len(ids), live_sessions() + heavy_interactive(root, ids))
+
+
+def heavy_count(root, skip=None) -> int:
+    """How many heavy jobs run on this Mac: heavy_counted(root, skip)'s count."""
+    return heavy_counted(root, skip)[1]
 
 
 def heavy_cap_reason(root, job=None) -> str | None:
@@ -6464,8 +6493,7 @@ def heavy_cap_reason(root, job=None) -> str | None:
     item) that is not heavy, None. Soft cool down counts both Macs together; this only places work."""
     if job is not None and not heavy_job(root, job):
         return None
-    ids = heavy_ids(root, skip=(job or {}).get("id") if job is not None and "stage" in job else None)
-    n = min(len(ids), live_sessions()) if ids else 0
+    ids, n = heavy_counted(root, skip=(job or {}).get("id") if job is not None and "stage" in job else None)
     return f"heavy_cap({n}/{HEAVY_PER_MAC}): {n} heavy jobs on this Mac ({', '.join(ids[:n])})" if n >= HEAVY_PER_MAC else None
 
 
