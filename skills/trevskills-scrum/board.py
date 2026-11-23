@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
-  board.py new "<title>" [--id ID] [--by <serve|runall|wake|hand>] create jobs/<id>/ and a board entry, print the id (--id keeps a given id; --by records who started it, default hand);
-                                   without --id it refuses a title an open job already has (neither done nor aborted), naming that job
+  board.py new "<title>" [--id ID] [--by <serve|runall|wake|hand>] create jobs/<id>/ and a board entry, print the id (--id keeps a given id; --by records who started it, default hand; without --id it refuses a title an open job already has, naming that job)
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/runlog/lane/setup/waiting/specwriter/cloud/outcome/account/shop/worker (empty = null);
                                    stage=needs-human is refused: park a job with ask
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only); with stage= it
@@ -7731,12 +7730,16 @@ def _login(item):
 
 
 def _cloud_trusted(pr, job_id):
-    """Whether pr is this job's: its head is this repo's own scrum/<id> (or scrum/<number>) branch, and a leading
-    `[scrum <tag>]` names the id or its number. An untagged title is matched by its head; a fork PR, another branch or
-    another job's tag steers nothing."""
+    """Whether pr is this job's: its head is this repo's own scrum/<id> (or scrum/<number>, or scrum/<number>-<one or
+    more chars> for this job's own number: a session's own slug, job 1414) branch, and a leading `[scrum <tag>]` names
+    the id or its number. An untagged title is matched by its head; a fork PR, another branch or another job's tag
+    steers nothing."""
     head, base = pr.get("head"), pr.get("base")
-    names = {job_id, job_id.split("-", 1)[0]}
-    if not isinstance(head, dict) or not isinstance(base, dict) or head.get("ref") not in {f"scrum/{n}" for n in names}:
+    number = job_id.split("-", 1)[0]
+    names = {job_id, number}
+    ref = head.get("ref") if isinstance(head, dict) else None
+    if not isinstance(base, dict) or not isinstance(ref, str) or not (
+            ref in {f"scrum/{n}" for n in names} or re.fullmatch(rf"scrum/{re.escape(number)}-.+", ref)):
         return False
     tag = re.match(r"\[scrum ([^\]]*)\]", str(pr.get("title") or ""))
     if tag and tag[1] not in names:

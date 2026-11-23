@@ -8618,6 +8618,41 @@ class CloudSyncTest(unittest.TestCase):
         self.assertEqual([(m["state"], m["pr"]) for m in out["moved"]], [("MERGED", "https://github.com/o/r/pull/9")])
         self.assertEqual(self.get()["stage"], "done")
 
+    J1390 = "1390-a-cloud-job-that-requeues-for-an-unmerge"
+
+    def pr978(self, head="scrum/1390-requeue-after", title=f"[scrum {J1390}] requeue adds after markers", fork=False):
+        """PR #978's real head and title (job 1414), or a variant."""
+        return {"number": 978, "html_url": "https://github.com/o/r/pull/978", "title": title, "state": "open",
+                "merged_at": None, "labels": [], "head": {"ref": head, "repo": {"full_name": "evil/r" if fork else "o/r"}},
+                "base": {"ref": "main", "repo": {"full_name": "o/r"}}, "user": {"login": "trev"}}
+
+    def test_cloud_trusted_number_slug_head(self):
+        self.assertIs(board._cloud_trusted(self.pr978(), self.J1390), True)
+        for head in (f"scrum/{self.J1390}", "scrum/1390", "scrum/1390-x"):
+            self.assertIs(board._cloud_trusted(self.pr978(head=head), self.J1390), True, head)
+        self.assertIs(board._cloud_trusted(self.pr978(title="requeue adds after markers"), self.J1390), True)
+        merged = self.pr(state="closed", merged_at="2026-10-01T00:00:00Z",
+                         head={"ref": "scrum/001-cloud-fix", "repo": {"full_name": "o/r"}})
+        with self.gh([merged]):
+            out = board.cmd_cloud_sync(self.root)
+        self.assertEqual([(m["state"], m["pr"]) for m in out["moved"]], [("MERGED", self.URL)])
+        self.assertEqual(self.get()["stage"], "done")
+
+    def test_cloud_trusted_number_prefix_never_crosses_numbers(self):
+        untagged = "requeue adds after markers"
+        self.assertIs(board._cloud_trusted(self.pr978(title=untagged), "139-x"), False)
+        self.assertIs(board._cloud_trusted(self.pr978(), "139-x"), False)
+        for head in ("scrum/1390-x", "scrum/13900-x", "scrum/139-", "scrum/1390", "scrum/x139-y", "139-requeue-after",
+                     "scrum/139-x\nmain"):
+            self.assertIs(board._cloud_trusted(self.pr978(head=head, title=untagged), "139-x"), False, head)
+        for head in ("scrum/139-x", "scrum/13900-x", "scrum/1390-", "scrum/1390-x\nmain", "other/1390-x"):
+            self.assertIs(board._cloud_trusted(self.pr978(head=head, title=untagged), self.J1390), False, head)
+
+    def test_cloud_trusted_odd_head_fork_or_other_tag_refused(self):
+        self.assertIs(board._cloud_trusted(self.pr978(fork=True), self.J1390), False)
+        self.assertIs(board._cloud_trusted(self.pr978(title="[scrum 1391] requeue adds after markers"), self.J1390), False)
+        self.assertIs(board._cloud_trusted(self.pr978(title="[scrum 1391-other] x"), self.J1390), False)
+
     def test_cloud_sync_ignores_outsider_needs_human_comment(self):
         mark = "\n<!-- scrum needs-human -->"
         comments = [{"user": self.TREV, "body": "Hard stop: money in checkout" + mark},
