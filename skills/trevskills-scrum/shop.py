@@ -15,7 +15,8 @@ run() never raises: a timeout comes back as exit 124, ssh that cannot start (or 
 ssh's own failure as 255.
 probe() is one cached round trip that prints nothing when the shop Mac sleeps. setup(), ready(), env_copy(),
 profile_copy() and md_sync() never print a secret or remote output. Dispatch (serve.py's shop_tick and cloud_tick) uses
-clone() to clone or fast-forward a project in ~/scrum-work, profile_copy() to give that clone this Mac's project.md and
+clone() to clone or fast-forward a project in ~/scrum-work (with git's error when it cannot), stash_dirty() to set
+that clone's modified tracked files aside when they block it, profile_copy() to give that clone this Mac's project.md and
 Render auth file (and the shop's home the out-of-repo Conventions files that project.md names), start() to launch a
 headless cloud-job session there (the prompt only on stdin) and ended() to read a finished session's log tail. See
 lanes/shop.md.
@@ -198,10 +199,16 @@ for f in (os.path.expanduser("~/.claude-owa/.claude.json"), os.path.expanduser("
 TRUST = "python3 -c '" + TRUST_PY + "' \"$d\""
 # An existing clone is put back on origin's default branch first (a lilguy shop job leaves it on scrum/<id>).
 # The raw origin URL (config, not `remote get-url`, which expands insteadOf) must equal the one asked for. Never resets.
+# fetch -q: a failure's stderr (clone()'s why) starts with git's error, not fetch's ref lines.
 CLONE = ('d="$HOME/scrum-work/{p}"; if [ -d "$d/.git" ]; then [ "$(git -C "$d" config --get remote.origin.url)" = {u} ]'
-         ' || exit 3; git -C "$d" fetch origin && git -C "$d" checkout -q "$(git -C "$d" symbolic-ref --short refs/remotes/origin/HEAD'
+         ' || exit 3; git -C "$d" fetch -q origin && git -C "$d" checkout -q "$(git -C "$d" symbolic-ref --short refs/remotes/origin/HEAD'
          ' | sed "s,^origin/,,")" && git -C "$d" merge --ff-only refs/remotes/origin/HEAD;'
          ' else mkdir -p "$HOME/scrum-work" && git clone -- {u} "$d"; fi && ' + TRUST)
+WHY_MAX = 300  # clone()'s why: git's stderr on one line, cut here so a shop line stays one line
+# The clone's modified or staged tracked files go into one named stash (git diff HEAD); untracked files stay. Never
+# resets, cleans, checks files out, pops or drops. Paths follow the STASHED marker, so shell startup output is skipped.
+STASH = ('d="$HOME/scrum-work/{p}"; [ -d "$d/.git" ] || exit 3; f=$(git -C "$d" diff --name-only HEAD) || exit 1;'
+         ' if [ -n "$f" ]; then git -C "$d" stash push -q -m {m} || exit 1; fi; echo STASHED; printf "%s\\n" "$f"')
 SHOP_LOGS = ".git/scrum-shop"  # a session's prompt and log, inside the clone's .git so its worktree stays clean
 SHOP_ENV = (f'export SCRUM_PW_CHANNEL=chrome SCRUM_CHROME="{CFT_BIN}" SCRUM_SHOP=1 CLAUDE_NOTIFIER_DISABLE=1'
             " CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0; ")  # no braces: START is a str.format template
@@ -568,13 +575,36 @@ def profile_copy(project: str, repo: str, alias: str = ALIAS) -> str:
     return "copied"
 
 
-def clone(project: str, url: str, alias: str = ALIAS) -> bool:
+def clone(project: str, url: str, alias: str = ALIAS) -> tuple[bool, str]:
     """Clone `url` into the shop's ~/scrum-work/<project>, or fetch and fast-forward that clone to origin's HEAD when
-    its origin is `url`. False with no ssh for a name off PROJECT_RE or a URL off REPO_URL_RE (https GitHub only), and
-    False for another origin, a merge that is not a fast-forward or a failed call. Never resets or deletes."""
+    its origin is `url`: (True, "") or (False, why). why is "bad project or URL" with no ssh for a name off PROJECT_RE
+    or a URL off REPO_URL_RE (https GitHub only), `origin is not <url>` for another origin, else the call's stderr on
+    one line (whitespace runs collapsed, cut to WHY_MAX), or `exit <code>` with none (a merge that is not a
+    fast-forward, local changes it would overwrite, a failed call). Never resets or deletes."""
     if not PROJECT_RE.fullmatch(project) or not REPO_URL_RE.fullmatch(url):
-        return False
-    return run(CLONE.format(p=project, u=shlex.quote(url)), INSTALL_TIMEOUT, alias=alias).returncode == 0
+        return False, "bad project or URL"
+    r = run(CLONE.format(p=project, u=shlex.quote(url)), INSTALL_TIMEOUT, alias=alias)
+    if r.returncode == 0:
+        return True, ""
+    if r.returncode == 3:
+        return False, f"origin is not {url}"
+    return False, " ".join(r.stderr.split())[:WHY_MAX] or f"exit {r.returncode}"
+
+
+def stash_dirty(project: str, job_id: str, alias: str = ALIAS) -> list[str] | None:
+    """Set the modified or staged tracked files of the shop's ~/scrum-work/<project> aside with one `git stash push`
+    named `scrum <job_id>: set aside by shop dispatch <UTC time>`, so a blocked clone() can fast-forward: the paths
+    set aside, [] (no stash) when there were none, or None (no .git there, a failed call). None with no ssh for a
+    project off PROJECT_RE or a job id off JOB_RE. Untracked files stay; never resets, cleans, checks files out, pops
+    or drops a stash: Trevor or a later session decides what happens to it."""
+    if not PROJECT_RE.fullmatch(project) or not JOB_RE.fullmatch(job_id):
+        return None
+    msg = f"scrum {job_id}: set aside by shop dispatch {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}"
+    r = run(STASH.format(p=project, m=shlex.quote(msg)), STEP_TIMEOUT, alias=alias)
+    lines = r.stdout.splitlines()
+    if r.returncode or "STASHED" not in lines:
+        return None
+    return [ln for ln in lines[lines.index("STASHED") + 1:] if ln]
 
 
 def start(project: str, job_id: str, prompt: str, account: str, model: str | None = None,

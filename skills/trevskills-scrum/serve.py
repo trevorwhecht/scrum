@@ -2490,6 +2490,9 @@ def cloud_tick(project, root, jobs, now=None):
 SHOP_RETRY_EVERY = 600  # seconds shop_tick calls a worker no shop function after a failed dispatch step there
 # ponytail: per-worker backoff; make it per-step or per-project if one project's clone failure stalls the others
 SHOP_RETRY_AT = {}  # worker alias -> time.time() before which shop_tick sends that worker nothing
+# worker alias -> its last shop_tick note {"text", "kind": "failed" | "stashed", "at"}; machine_status sends it. Memory only:
+# watchdog_loop runs shop_tick in this process, and a restart clears it.
+SHOP_NOTES = {}
 SHOP_ENDED = "requeue: shop session ended without a PR"
 
 
@@ -2560,7 +2563,11 @@ def shop_tick(project, repo, root) -> bool:
     with one on it, heavy jobs in the pool are skipped, the first light one is sent, and new work claims only a light line.
     A job tagged Runs on main (board.tag_runs_on; Jev is asked, if at all, only here, with a worker free) is never sent: it is skipped and the next one is tried (job 1155). A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
     profile_copy and start run on that worker; a failed step puts a claimed child back to waiting, prints one
-    `shop: <project>: <id>: <step> failed on <alias>` line and holds that worker for SHOP_RETRY_EVERY. With nothing in
+    `shop: <project>: <id>: <step> failed on <alias>` line (clone adds `: <git's error>`) and holds that worker for
+    SHOP_RETRY_EVERY. A failed clone on a worker with no shop job (board.shop_jobs_by_worker) first has shop.stash_dirty
+    set the clone's modified tracked files aside, prints a `set aside <paths> on <alias> (git stash)` line and retries
+    the clone once. Each failure or stash is that worker's SHOP_NOTES note; a dispatch that worked clears it unless the
+    same tick stashed. With nothing in
     that pool but main jobs (job 1141), new work goes instead, by auto_continue_tick's rules: a project with an `- Auto continue:`
     line, its run-all not running, a claimable backlog line (finish_first never holds it: this Mac's queue waits are not the shop's, and shop work runs on its own CPU and e2e.lock); board.cmd_next(shop=) claims the
     top item under the board lock (cool-down never refuses it) that is not lilguy (`Lane: lilguy` in its text or its
@@ -2640,7 +2647,11 @@ def shop_tick(project, repo, root) -> bool:
             return False
     job_id, claimed = job["id"], "spec" if child else job["stage"]
 
-    def fail(step):
+    def note(text, kind):
+        print(f"shop: {text}", file=sys.stderr, flush=True)
+        SHOP_NOTES[alias] = {"text": text, "kind": kind, "at": time.time()}
+
+    def fail(step, why=""):
         if child:
             try:
                 board.cmd_set(root, job_id, ["stage=waiting"], expect="spec")
@@ -2649,7 +2660,7 @@ def shop_tick(project, repo, root) -> bool:
                 pass  # moved meanwhile: its new owner keeps it
         elif new:
             hold_start(root, job_id)
-        print(f"shop: {project}: {job_id}: {step} failed on {alias}", file=sys.stderr, flush=True)
+        note(f"{project}: {job_id}: {step} failed on {alias}" + (f": {why}" if why else ""), "failed")
         SHOP_RETRY_AT[alias] = time.time() + SHOP_RETRY_EVERY
         return False
 
@@ -2663,8 +2674,19 @@ def shop_tick(project, repo, root) -> bool:
         url = board._git(repo, "remote", "get-url", "origin").decode().strip()
     except (ValueError, OSError, subprocess.SubprocessError):
         url = ""
-    if not shop.clone(repo.name, url, alias=alias):
-        return fail("clone")
+    ok, why = shop.clone(repo.name, url, alias=alias)
+    stashed = False
+    try:
+        idle = not ok and board.shop_jobs_by_worker()[alias] == 0  # no shop session there: its clone's edits are no one's work
+    except SystemExit:  # a bad board.json hides its shop jobs: never stash then
+        idle = False
+    if idle:
+        if paths := shop.stash_dirty(repo.name, job_id, alias=alias):
+            note(f"{project}: {job_id}: set aside {', '.join(paths)} on {alias} (git stash)", "stashed")
+            stashed = True
+            ok, why = shop.clone(repo.name, url, alias=alias)  # once: a second failure is final
+    if not ok:
+        return fail("clone", why)
     if shop.env_copy(repo.name, str(repo), alias=alias) == "failed":
         return fail("env copy")
     if shop.profile_copy(repo.name, str(repo), alias=alias) == "failed":
@@ -2693,6 +2715,8 @@ def shop_tick(project, repo, root) -> bool:
         pass
     if not child:
         unqueue(root, job)
+    if not stashed:
+        SHOP_NOTES.pop(alias, None)
     print(f"shop: {project}: {job_id}: started on {alias} (pid {pid}, account {account})", flush=True)
     return True
 
@@ -5103,7 +5127,8 @@ def machine_status():
     """The dashboard's machine-health meter: board.machine_ok's readings, thresholds and verdict. Disk is read on this
     file's volume (the dashboard spans every project, and they share one disk). machine_ok re-reads each value (a few
     ms each) so its verdict is exactly the gate's, whatever checks it grows. "history" and each shop entry's are
-    machine_history's sparkline readings, and each shop entry's "cooldown" is that worker's own flag (job 1185).
+    machine_history's sparkline readings, and each shop entry's "cooldown" is that worker's own flag (job 1185); an
+    entry gets "note" (SHOP_NOTES: its last failed or stashed dispatch) only when it has one.
     "hogs" is the list the watchdog's last report_hogs stored (no scan here)."""
     r = lambda v: None if v is None else round(v, 1)
     now, ram, cpu = time.time(), r(board.free_ram_pct()), r(board.cpu_load_pct())
@@ -5117,7 +5142,8 @@ def machine_status():
             "cpu_cores": os.cpu_count(), "max_cpu_load_pct": board.MAX_CPU_LOAD_PCT,
             "restart_waiting": restart_blockers(), "history": machine_history("mac", ram, cpu, now),
             "shop": [{**s, "cooldown": board.cooling_down(s["name"]),
-                      "history": machine_history(("shop", s["name"]), s["free_ram_pct"], s["cpu_load_pct"], now)}
+                      "history": machine_history(("shop", s["name"]), s["free_ram_pct"], s["cpu_load_pct"], now),
+                      **({"note": n} if (n := SHOP_NOTES.get(s["name"])) else {})}
                      for s in shop_stats()], "hogs": HOGS}
 
 

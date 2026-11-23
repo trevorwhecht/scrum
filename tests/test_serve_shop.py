@@ -1,6 +1,6 @@
 """Job 964: serve.py's shop_tick sends one held job to the shop Mac whenever a worker has room, and
 cloud_tick requeues a shop session that ended without a PR. Every shop.py function is a mock: no test reaches ssh."""
-import contextlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
+import collections, contextlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
 from unittest import mock
 from pathlib import Path
 
@@ -25,7 +25,8 @@ SPEC = "# Spec\n## Likely files\n- `src/a.py`\n"
 READY = {"ready": True, "up": True, "gh": True, "node": True, "claude": True, "accounts": {"main": True, "owa": True}}
 SETUP = {"node": "ok", "gh": "ok", "gh login": "ok", "gh git": "ok", "owa links": "ok", "permissions": "ok",
          "account main": "ok", "account owa": "ok", "jev key": "ok"}
-SHOP_FNS = ("probe", "ready", "md_sync", "setup", "clone", "env_copy", "profile_copy", "start", "run", "ended")
+SHOP_FNS = ("probe", "ready", "md_sync", "setup", "clone", "stash_dirty", "env_copy", "profile_copy", "start", "run",
+            "ended")
 PAR = "041-run-all"
 AUTO = "# Project\n- Test: x\n- Auto continue: 1\n"
 
@@ -49,6 +50,8 @@ class ShopTickTest(unittest.TestCase):
         self.week(self.owa, 3600)  # owa's week resets first: pick_account's order puts it first unless a test says otherwise
         serve.SHOP_RETRY_AT.clear()
         self.addCleanup(serve.SHOP_RETRY_AT.clear)
+        serve.SHOP_NOTES.clear()
+        self.addCleanup(serve.SHOP_NOTES.clear)
         for s in (serve.CLOUD_LAST, serve.SHOP_PROBE_LAST, serve.RUNS, serve.IDLE_SINCE):
             s.clear()
             self.addCleanup(s.clear)
@@ -58,7 +61,8 @@ class ShopTickTest(unittest.TestCase):
         self.sh.ready.return_value = READY
         self.sh.md_sync.return_value = True
         self.sh.setup.return_value = dict(SETUP)
-        self.sh.clone.return_value = True
+        self.sh.clone.return_value = (True, "")
+        self.sh.stash_dirty.return_value = []
         self.sh.env_copy.return_value = "copied"
         self.sh.profile_copy.return_value = "copied"
         self.sh.start.return_value = 4242
@@ -346,7 +350,7 @@ class ShopTickTest(unittest.TestCase):
 
     def test_backoff_per_worker(self):
         self.workers("shopmac 2 owa,main\nnewmac 1 main\n")
-        self.sh.clone.side_effect = lambda project, url, alias: alias == "newmac"  # clone fails on shopmac only
+        self.sh.clone.side_effect = lambda project, url, alias: (alias == "newmac", "")  # clone fails on shopmac only
         root = self.project("mm", self.runall({"id": "043-a"}))
         t0 = time.time()
         self.assertEqual(self.tick(), (False, "", "shop: mm: 043-a: clone failed on shopmac\n"))
@@ -533,7 +537,7 @@ class ShopTickTest(unittest.TestCase):
     def test_failed_step_leaves_job_held(self):
         cases = {"md-sync": ("md_sync", False), "setup": ("setup", dict(SETUP, gh="failed")),
                  "setup account": ("setup", dict(SETUP, **{"account owa": "not ready"})),
-                 "clone": ("clone", False), "env copy": ("env_copy", "failed"),
+                 "clone": ("clone", (False, "")), "env copy": ("env_copy", "failed"),
                  "profile copy": ("profile_copy", "failed"), "feature.md": (None, None), "start": ("start", None)}
         for why, (fn, value) in cases.items():
             for kind in ("child", "launch"):
@@ -541,7 +545,7 @@ class ShopTickTest(unittest.TestCase):
                     self.serve.SHOP_RETRY_AT.clear()
                     self.sh.reset_mock()
                     self.sh.configure_mock(**{"md_sync.return_value": True, "setup.return_value": dict(SETUP),
-                                              "clone.return_value": True, "env_copy.return_value": "copied",
+                                              "clone.return_value": (True, ""), "env_copy.return_value": "copied",
                                               "profile_copy.return_value": "copied",
                                               "start.return_value": 4242})
                     if fn:
@@ -570,6 +574,136 @@ class ShopTickTest(unittest.TestCase):
                     self.assertEqual(self.calls(), [], "backoff: no shop call")
                     self.assertGreaterEqual(self.serve.SHOP_RETRY_AT["shopmac"], t0 + 600)
                     self.assertLessEqual(self.serve.SHOP_RETRY_AT["shopmac"], time.time() + 600)
+
+    # --- job 1415: a clone blocked by dirty tracked files ---
+    GIT_ERR = ("error: Your local changes to the following files would be overwritten by merge: "
+               "e2e/admin-dashboard-url-state.spec.ts Please commit your changes or stash them before you merge. Aborting")
+
+    def backed_off(self, t0, alias="shopmac"):
+        self.assertGreaterEqual(self.serve.SHOP_RETRY_AT[alias], t0 + 600)
+        self.assertLessEqual(self.serve.SHOP_RETRY_AT[alias], time.time() + 600)
+
+    def test_dirty_clone_stashed_and_retried_once(self):
+        root = self.project("mm", self.runall({"id": "043-a"}))
+        self.sh.clone.side_effect = [(False, self.GIT_ERR), (True, "")]
+        self.sh.stash_dirty.return_value = ["e2e/admin-dashboard-url-state.spec.ts", "src/b.ts"]
+        got, out, err = self.tick()
+        self.assertEqual((got, out), (True, "shop: mm: 043-a: started on shopmac (pid 4242, account owa)\n"))
+        self.assertEqual(err, "shop: mm: 043-a: set aside e2e/admin-dashboard-url-state.spec.ts, src/b.ts on shopmac"
+                              " (git stash)\n")
+        self.assertEqual(self.calls(), ["ready", "md_sync", "setup", "clone", "stash_dirty", "clone", "env_copy",
+                                        "profile_copy", "start"])
+        self.assertEqual(self.sh.stash_dirty.call_args, mock.call("mm", "043-a", alias="shopmac"))
+        self.assertEqual(self.sh.clone.call_args_list,
+                         [mock.call("mm", "https://github.com/trevorwhecht/mm.git", alias="shopmac")] * 2)
+        self.assertEqual(self.job(root, "043-a")["stage"], "cloud")
+        self.assertEqual(self.serve.SHOP_RETRY_AT, {}, "a retry that worked is no failure: no backoff")
+
+    def test_dirty_clone_not_stashed_while_worker_busy(self):
+        for busy in ({"worker": "shopmac"}, {}):  # no worker field: shopmac
+            with self.subTest(busy=busy):
+                self.serve.SHOP_RETRY_AT.clear()
+                self.sh.reset_mock()
+                self.sh.clone.side_effect = [(False, self.GIT_ERR), (True, "")]
+                self.project("aa", [{"id": "010-x", "stage": "cloud", "shop": "11", "account": "main", "lane": "fast",
+                                     **busy}])
+                root = self.project("mm", self.runall({"id": "043-a", "lane": "fast"}))
+                t0 = time.time()
+                self.assertEqual(self.tick(), (False, "", f"shop: mm: 043-a: clone failed on shopmac: {self.GIT_ERR}\n"))
+                self.assertEqual(self.calls(), ["ready", "md_sync", "setup", "clone"], "a session there: never stashed")
+                self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
+                self.backed_off(t0)
+        with self.subTest("a bad board hides its shop jobs: never stashed"):
+            self.serve.SHOP_RETRY_AT.clear()
+            self.sh.reset_mock()
+            self.sh.clone.side_effect = [(False, self.GIT_ERR), (True, "")]
+            self.project("aa", [])
+            root = self.project("mm", self.runall({"id": "043-a"}))
+            with mock.patch.object(self.board, "shop_jobs_by_worker", side_effect=[collections.Counter(), SystemExit("bad")]):
+                self.assertEqual(self.tick(), (False, "", f"shop: mm: 043-a: clone failed on shopmac: {self.GIT_ERR}\n"))
+            self.assertEqual(self.calls(), ["ready", "md_sync", "setup", "clone"])
+            self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
+        self.project("aa", [{"id": "010-x", "stage": "cloud", "shop": "11", "account": "main", "worker": "newmac"}])
+        for stashed in ([], None):
+            with self.subTest(stashed=stashed):
+                self.serve.SHOP_RETRY_AT.clear()
+                self.sh.reset_mock()
+                self.sh.clone.side_effect = [(False, self.GIT_ERR), (True, "")]
+                self.sh.stash_dirty.return_value = stashed
+                root = self.project("mm", self.runall({"id": "043-a"}))
+                t0 = time.time()
+                self.assertEqual(self.tick(), (False, "", f"shop: mm: 043-a: clone failed on shopmac: {self.GIT_ERR}\n"))
+                self.assertEqual(self.calls(), ["ready", "md_sync", "setup", "clone", "stash_dirty"],
+                                 "nothing set aside: no retry")
+                self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
+                self.backed_off(t0)
+
+    def test_clone_retry_failure_is_final(self):
+        for kind in ("child", "launch"):
+            with self.subTest(kind=kind):
+                self.serve.SHOP_RETRY_AT.clear()
+                self.sh.reset_mock()
+                self.sh.clone.side_effect = [(False, self.GIT_ERR), (False, "fatal: not a fast-forward"), (True, "")]
+                self.sh.stash_dirty.return_value = ["a.ts"]
+                job_id = "043-a" if kind == "child" else "050-q"
+                root = self.project("mm", self.runall({"id": "043-a"}) if kind == "child" else [self.queued()])
+                t0 = time.time()
+                self.assertEqual(self.tick(), (False, "", f"shop: mm: {job_id}: set aside a.ts on shopmac (git stash)\n"
+                                               f"shop: mm: {job_id}: clone failed on shopmac: fatal: not a fast-forward\n"))
+                self.assertEqual(self.calls(), ["ready", "md_sync", "setup", "clone", "stash_dirty", "clone"])
+                job = self.job(root, job_id)
+                if kind == "child":
+                    self.assertEqual(job["stage"], "waiting")
+                    self.assertFalse((root / "jobs" / job_id / "claimed-at.txt").exists())
+                else:
+                    self.assertEqual((job["stage"], job["queued_launch"]["action"]), ("spec", "start"))
+                self.assertNotIn("shop", job)
+                self.backed_off(t0)
+                self.assertEqual(self.serve.SHOP_NOTES["shopmac"]["kind"], "failed")
+
+    def test_clone_failure_line_carries_git_error(self):
+        for why, line in ((self.GIT_ERR, f"shop: mm: 043-a: clone failed on shopmac: {self.GIT_ERR}\n"),
+                          ("fatal: repository not found", "shop: mm: 043-a: clone failed on shopmac: fatal: repository not found\n"),
+                          ("", "shop: mm: 043-a: clone failed on shopmac\n")):
+            with self.subTest(why=why):
+                self.serve.SHOP_RETRY_AT.clear()
+                self.sh.clone.side_effect = None
+                self.sh.clone.return_value = (False, why)
+                self.project("mm", self.runall({"id": "043-a"}))
+                self.assertEqual(self.tick(), (False, "", line))
+
+    def test_shop_note_set_and_cleared(self):
+        self.workers("shopmac 2 owa,main\nnewmac 1 main\n")
+        self.sh.ready.side_effect = lambda alias: READY if alias == "shopmac" else dict(READY, ready=False)
+        self.sh.md_sync.return_value = False
+        self.project("mm", self.runall({"id": "043-a"}))
+        t0 = time.time()
+        self.tick()
+        note = self.serve.SHOP_NOTES["shopmac"]
+        self.assertEqual((note["text"], note["kind"]), ("mm: 043-a: md-sync failed on shopmac", "failed"))
+        self.assertTrue(t0 <= note["at"] <= time.time())
+        self.assertEqual(list(self.serve.SHOP_NOTES), ["shopmac"])
+        stats = [{"name": "shopmac", "free_ram_pct": 40.0, "cpu_load_pct": 10.0, "cpu_cores": 4, "at": 1000.0},
+                 {"name": "newmac", "free_ram_pct": None, "cpu_load_pct": None, "cpu_cores": None, "at": 1000.0}]
+        with mock.patch.object(self.serve, "shop_stats", return_value=stats), \
+                mock.patch.object(self.serve, "machine_history", return_value={}):
+            status = self.serve.machine_status()
+        self.assertEqual(status["shop"][0]["note"], {"text": "mm: 043-a: md-sync failed on shopmac", "kind": "failed",
+                                                     "at": note["at"]})
+        self.assertNotIn("note", status["shop"][1], "no note: the entry keeps its keys")
+        self.serve.SHOP_RETRY_AT.clear()
+        self.sh.md_sync.return_value = True
+        self.assertIs(self.tick()[0], True)
+        self.assertEqual(self.serve.SHOP_NOTES, {}, "a dispatch that worked clears the worker's note")
+        self.serve.SHOP_RETRY_AT.clear()
+        self.sh.clone.side_effect = [(False, self.GIT_ERR), (True, "")]
+        self.sh.stash_dirty.return_value = ["a.ts"]
+        self.project("aa", [])
+        self.project("mm", self.runall({"id": "043-a"}))
+        self.assertIs(self.tick()[0], True)
+        note = self.serve.SHOP_NOTES["shopmac"]
+        self.assertEqual((note["text"], note["kind"]), ("mm: 043-a: set aside a.ts on shopmac (git stash)", "stashed"),
+                         "the same tick stashed: its note stays")
 
     def test_ruff_failure_does_not_block_dispatch(self):
         """Job 1160: ruff only feeds edit-check.py, which skips when ruff is missing, so `ruff: failed` never holds the
@@ -1112,11 +1246,11 @@ class ShopTickTest(unittest.TestCase):
             self.assertEqual(self.tick()[1], "shop: mm: 061-touch-a: started on shopmac (pid 4242, account owa)\n")
 
     def test_failed_new_work_dispatch_becomes_held_launch(self):
-        for fn, value, step in (("clone", False, "clone"), ("start", None, "start")):
+        for fn, value, step in (("clone", (False, ""), "clone"), ("start", None, "start")):
             with self.subTest(step):
                 self.serve.SHOP_RETRY_AT.clear()
                 self.sh.reset_mock()
-                self.sh.configure_mock(**{"clone.return_value": True, "start.return_value": 4242})
+                self.sh.configure_mock(**{"clone.return_value": (True, ""), "start.return_value": 4242})
                 getattr(self.sh, fn).return_value = value
                 root = self.project("mm", [], AUTO)
                 self.backlog(root, "Polish the knob")
@@ -1132,7 +1266,7 @@ class ShopTickTest(unittest.TestCase):
                 self.assertEqual([j["id"] for j in self.serve.held_work("mm", self.board.read_board(root)["jobs"])],
                                  ["001-polish-the-knob"])
                 self.serve.SHOP_RETRY_AT.clear()  # the backoff is over: the shop sends it as held work
-                self.sh.configure_mock(**{"clone.return_value": True, "start.return_value": 4242})
+                self.sh.configure_mock(**{"clone.return_value": (True, ""), "start.return_value": 4242})
                 self.assertEqual(self.tick(), (True, "shop: mm: 001-polish-the-knob: started on shopmac (pid 4242, account owa)\n", ""))
                 job = self.job(root, "001-polish-the-knob")
                 self.assertEqual(job["stage"], "cloud")
