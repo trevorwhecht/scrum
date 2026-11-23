@@ -65,6 +65,21 @@ A round `r<R>` is one run of step 3, counted from 1, one more than the highest i
    least one real pull from the log, from more than one angle. Write <JOB_DIR>/review-<N>.md.
    ```
    Record it in the ledger. A `RECUT` sends its notes back to step 3 (next round). A `PASS` goes to step 6; so does the third `RECUT` in a row, carrying the reviewer's notes to Trevor's card.
-6. **Edits build.** 
-7. **Final approval.** 
-8. **His notes.** 
+6. **Edits build.** `B set $ID stage=build`. It starts straight after a `PASS` (or the third `RECUT` in a row), with no storyboard and no rough cut approval. Every round is a new Edits project (File, New Project): never empty, reuse or delete an Edits project, never open an older one, and keep every round's export until Trevor approves one. The method is `motion/notes/video-edit.md` "What worked": the song started exactly on `<first beat>`, the numbered selects imported as separate clips (never rough.mov), then export.
+   - First write the exact Edits steps for doing it himself to stop.md in the job folder:
+     ```
+     Edits, reel <project> round r<R>. Never press "Share to Instagram"; Trevor posts.
+     1. File > New Project. Never open, empty or delete an older project.
+     2. Cmd+I, Cmd+Shift+G, paste <folder>/selects/<hash>/, Cmd+A, import. Select every clip in Media, then "Add <count>".
+     3. Audio > search "<title>" > click its row > "+". Drag the song right, drag its left edge out to the song's start,
+        park the playhead on <mm:ss.ff> (ff in 60ths; arrow keys step 1/60 s), press Q, drag the song back to 0. The
+        timecode readout then shows the song's length minus <mm:ss.ff>.
+     4. Playhead at the video's end, select the song, press W.
+     5. Export (no dialog; it saves to ~/Movies/Edits/Exports/). Then answer the card.
+     ```
+7. **Final approval.** Run `ffmpeg -i "<export>" -vf blackdetect=d=0.01:pix_th=0.10 -an -f null -` on the round's export: any `black_start` line sends it back to step 6 (a new Edits project, the black spans in stop.md), since Edits plays stale cached lengths as black. Compare a frame from the middle of each shot in the export with the same time in rough.mov; a shot that differs goes back to step 6 too. Draft the caption the way trevskills-email `captions.md` says (`~/.claude/skills/trevskills-email/captions.md`: long, the process and the ink, his wording) into `<folder>/caption.md`, replacing any older one. Write the export path, its Edits project name and the caption path to stop.md in the job folder (when capped, the latest review's notes too), write `$F/jobs/$ID/view.md` as one line `View: Edits`, replacing any older view.md (Edits takes no file; the dashboard's View button brings it forward), and ask Trevor:
+   - Passed: `B ask $ID 'reel final: the finished reel is exported from Edits with no black frames, and a caption draft is ready. View opens Edits on this Mac; the export path is in the stop.md tab. Approve it, or send notes?' --a "Approve the reel=approve $ID" --b "Send back with a note=rework $ID \"<your notes on the reel>\"" --c "Remove this job=abort $ID --cascade" --title EDIT_APPROVE --recommend <key> '<why>'` and stop.
+   - Capped: `B ask $ID 'reel final: the reviewer sent this cut back 3 times, so it was built in Edits as it stands. Its notes, the export and the caption are in the stop.md tab. Approve it anyway, or send notes?' --a "Approve the reel anyway=approve $ID" --b "Send back with a note=rework $ID \"<your notes on the reel>\"" --c "Remove this job=abort $ID --cascade" --title EDIT_APPROVE --recommend <key> '<why>'` and stop.
+
+   On approve: `mkdir -p ~/Desktop/videos`, move that reel's previous Desktop copy (`~/Desktop/videos/<project>.mp4`) to the Trash with `trash`, `cp -c "<export>" ~/Desktop/videos/<project>.mp4`, run `ls -R ~/Desktop/videos`, record the copy on the round's Edits line, move this job's older exports of the reel (earlier rounds' Edits lines) to the Trash, then run `B set $ID stage=done`. Until then every round's export, project and Desktop copy stay as they are; Edits projects and `selects/` are never touched. Never press Share (`Share to Instagram`): Trevor posts the reel himself.
+8. **His notes.** Each of Trevor's notes (a rework note, or a note with his approval) goes word for word, with its date and round, under the matching heading of `~/Developer/vid-img-editing/motion/notes/print-reels.md` and into the ledger's "Trevor's notes", the same day. When it can be measured (a length, a speed, an order, a count), spawn `edit-builder` with `KIND: edit-reel. Step: rule. FOLDER: <folder>. JOB_DIR: <JOB_DIR>. Note: <his note>. Add it to reel.py check as a measured rule, with a case in test_reel.py, then run <py> <instaReels>/test_reel.py until it passes. Last line: the rule's check line, or BLOCKED: <reason>.` and wait for it. Then a rework note starts the next round at step 3.

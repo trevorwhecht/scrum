@@ -4201,6 +4201,24 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             for phrase in phrases:
                 self.assertIn(phrase, steps[name], (name, phrase))
         self.assertLess(reel.index("reel.py check"), reel.index("edit-reviewer"))
+        for name, phrases in (("Edits build", ("straight after a `PASS` (or the third `RECUT` in a row)",
+                                               "no storyboard and no rough cut approval", "a new Edits project",
+                                               "never empty, reuse or delete an Edits project",
+                                               "`motion/notes/video-edit.md` \"What worked\"", "selects/<hash>/")),
+                              ("Final approval", ("blackdetect", "sends it back to step 6", "`<folder>/caption.md`",
+                                                  "trevskills-email `captions.md`", "`View: Edits`", "`$F/jobs/$ID/view.md`",
+                                                  "--a \"Approve the reel=approve $ID\"", "--title EDIT_APPROVE",
+                                                  "`mkdir -p ~/Desktop/videos`", "~/Desktop/videos/",
+                                                  "previous Desktop copy", "to the Trash", "`cp -c",
+                                                  "record the copy", "`B set $ID stage=done`", "Never press Share",
+                                                  "Trevor posts")),
+                              ("His notes", ("word for word", "print-reels.md", "the ledger", "the same day",
+                                             "reel.py check", "test_reel.py"))):
+            for phrase in phrases:
+                self.assertIn(phrase, steps[name], (name, phrase))
+        approval = steps["Final approval"]
+        self.assertLess(approval.index("blackdetect"), approval.index("View: Edits"))
+        self.assertLess(approval.index("View: Edits"), approval.index("B ask $ID"))
         for kind, job in (("edit-vector", "1365-edit-project-edit-vector-and-edit-photo"),
                           ("edit-photo", "1365-edit-project-edit-vector-and-edit-photo")):
             body = [l for l in kind_files[kind].splitlines()[1:] if l.strip()]
