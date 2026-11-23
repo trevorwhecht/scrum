@@ -55,6 +55,7 @@ main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
   border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer}
 .card:hover,.card:focus-visible{border-color:var(--accent);outline:none}
 .card.human{border:2px solid var(--human);box-shadow:0 0 0 3px color-mix(in srgb,var(--human) 15%,transparent)}
+.card.human.approve{border-color:var(--pass);box-shadow:0 0 0 3px color-mix(in srgb,var(--pass) 15%,transparent)}
 .card.paused{border:2px solid var(--human)}
 .card.shop{border:2px solid var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 15%,transparent)}
 .card.shop .lanechip{color:var(--accent);border-color:var(--accent)}
@@ -75,7 +76,7 @@ main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
 .bar{display:block;height:3px;margin-top:6px;border-radius:99px;background:var(--line);overflow:hidden}
 .bar>span{display:block;height:100%;background:var(--accent)}.bar.done>span{background:var(--pass)}.bar.human>span{background:var(--human)}
 .reason{display:block;font-size:12px;color:var(--human);margin-top:6px}
-.card .status{display:block;font-size:12px;color:var(--muted);margin-top:6px;overflow-wrap:anywhere}.card.human .status{color:var(--human)}
+.card .status{display:block;font-size:12px;color:var(--muted);margin-top:6px;overflow-wrap:anywhere}.card.human .status{color:var(--human)}.card.human.approve .status{color:var(--pass)}.card.human.approve .bar.human>span{background:var(--pass)}
 .stale{color:var(--changes)}
 .meta.kid{margin-top:0;font-family:ui-monospace,monospace;overflow-wrap:anywhere}
 .empty{color:var(--muted);font-size:12px}
@@ -130,6 +131,9 @@ header{flex-wrap:wrap}header .btn,#filter,#laneFilter{min-height:44px}  /* every
 #actions{display:grid;gap:10px;padding:12px 20px;border-bottom:1px solid var(--line)}
 .stop{border:1px solid var(--human);border-radius:8px;padding:8px 12px;background:color-mix(in srgb,var(--human) 8%,var(--card));min-width:0}
 .stop b{color:var(--human)}.stop p{margin:4px 0 0;overflow-wrap:anywhere}
+/* VIDEO_REVIEW asks for an approval, not a fix: green, never red (job 1398) */
+.stop.approve{border-color:var(--pass);background:color-mix(in srgb,var(--pass) 8%,var(--card))}.stop.approve b{color:var(--pass)}
+.stop .preview{display:grid;gap:8px;margin-top:8px}.stop .preview video,.stop .preview img{display:block;width:auto;max-width:100%;height:auto;border-radius:6px}.stop .preview video{width:100%}
 .stop .acts{display:grid;gap:8px;margin-top:8px}.stop .acts .btn{width:100%;font-size:15px;text-align:left;overflow-wrap:anywhere}
 .stop .acts .badge{margin:0 0 0 2px;vertical-align:middle}.stop .acts .note{margin:-4px 0 0}
 .stop .sendback{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
@@ -632,7 +636,7 @@ function card(job) {
   // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), and cloud runs elsewhere, so they never go stale.
   const stale = !human && !hold && !held && !stall && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
-  return `<button class="card${human || setup ? " human" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}${shop ? " shop" : ""}" data-key="${esc(job.key)}">
+  return `<button class="card${human || setup ? " human" : ""}${asked && approveStop(job) ? " approve" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}${shop ? " shop" : ""}" data-key="${esc(job.key)}">
     ${tag(job.project, job.kind)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.account ? `<span class="lanechip">${esc(job.account)}</span>` : ""}${GROUPED[job.stage] && colOf(job) === GROUPED[job.stage] ? `<span class="lanechip">${esc(job.stage)}</span>` : ""}${job.fable ? '<span class="lanechip">Fable</span>' : ""}${runsOn ? `<span class="lanechip" title="Runs on">${runsOn}</span>` : ""}${shop ? `<span class="lanechip">${job.worker ? `Shop · ${esc(job.worker)}` : "Shop"}</span>` : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${titled ? `<span class="badge">${esc(titled)}</span>` : ""}${hold ? '<span class="badge">paused</span>' : ""}${stall || held ? `<span class="badge" data-agent-hint="The session stopped (usage limit, RAM guard, crash or the 30-minute watchdog). serve.py resumes it by itself at the retry time; Resume in its panel starts it now.">${job.nextRetryAt ? `stalled · retry ${esc(when(job.nextRetryAt))}` : "stalled"}</span>` : ""}
     ${bigboyLines(job)}
     ${waitingNote(job, "meta")}
@@ -1268,6 +1272,18 @@ const setActionError = (key, stage, msg) => {
 // Recommended option first, then key order.
 const stopOptions = job => [...(job.options || [])].sort((a, b) =>
   (b.key === job.recommend?.key) - (a.key === job.recommend?.key) || String(a.key).localeCompare(String(b.key)));
+// A VIDEO_REVIEW stop asks Trevor to approve work, not to fix a failure: its box and card are green (job 1398).
+const approveStop = job => job.stopTitle === "VIDEO_REVIEW";
+// An edit job's clip and pictures (serve.py edit_preview), above the option buttons; data-sig names the files shown.
+const previewHtml = job => !job.preview?.length ? "" : `<div class="preview" data-sig="${esc(JSON.stringify(job.preview))}">${job.preview.map(p => {
+  const src = `api/p/${enc(job.project)}/jobs/${enc(job.id)}/preview/${enc(p.n)}`;
+  return p.type === "video" ? `<video controls playsinline preload="metadata" src="${esc(src)}"></video>` : `<img alt="${esc(p.name)}" src="${esc(src)}">`;
+}).join("")}</div>`;
+// A re-render of the stop box puts the old preview node back when it shows the same files, so a playing clip keeps playing.
+function keepPreview(old, box) {
+  const now = box?.querySelector?.(".stop .preview");
+  if (old && now && old.dataset.sig === now.dataset.sig) now.replaceWith(old);
+}
 // The one renderer of a stop: the issue once, then one large button per option (A/B/C), the rework option with an
 // optional note. A session paused on a prompt gets the same box with its prompt.
 function stopBox(job) {
@@ -1286,9 +1302,9 @@ function stopBox(job) {
   const fix = buttons ? "" : (job.reason || "").split(" Fix: ").slice(1).join(" Fix: ");
   const note = !st.noteOpen ? "" : `<div class="sendback"><textarea name="note" maxlength="2000" placeholder="Anything the builder should know? (optional)" aria-label="Note for the builder"${dis}>${esc(st.note || "")}</textarea>
     <button class="btn primary tall" type="button" data-send="${esc(st.noteOpen)}"${dis}>${st.pending ? "Sending…" : "Send back"}</button></div>`;
-  return `<div class="stop" role="status"
+  return `<div class="stop${approveStop(job) ? " approve" : ""}" role="status"
     data-agent-hint="This job stopped and needs Trevor. The first line is the agent's question in full, or what went wrong; then either the exact fix or the buttons for the ways forward, the recommended one first.">
-    <b>${esc(stopTitleText(job) || "Waiting on you")}</b><p>${esc(job.question || stopIssue(job.reason))}</p>${fix ? `<p>${esc(fix.charAt(0).toUpperCase() + fix.slice(1))}</p>` : ""}${buttons ? `<div class="acts">${buttons}</div>` : ""}${note}</div>`;
+    <b>${esc(stopTitleText(job) || "Waiting on you")}</b><p>${esc(job.question || stopIssue(job.reason))}</p>${fix ? `<p>${esc(fix.charAt(0).toUpperCase() + fix.slice(1))}</p>` : ""}${previewHtml(job)}${buttons ? `<div class="acts">${buttons}</div>` : ""}${note}</div>`;
 }
 
 function renderActions(job) {
@@ -1297,7 +1313,9 @@ function renderActions(job) {
   if (actionError[job.key] && actionError[job.key].stage !== job.stage) delete actionError[job.key];
   const fail = actionError[job.key], queued = job.play_queued ? '<p class="note" role="status">queued, starts next</p>' : "";  // not an error: muted, no alert
   const err = queued + (fail ? `<p class="error" role="alert">${esc(fail.msg)}</p>` : '<p class="error" role="alert"></p>');
+  const media = el.querySelector?.(".stop .preview");
   el.innerHTML = actionsHtml(job, err);
+  keepPreview(media, el);
   if (more) { const d = el.querySelector("details.more"); if (d) d.open = true; }
 }
 // The modal's actions for job; err is the error line: right under the Play/Resume part when there is one, else last, under the buttons.
@@ -1366,7 +1384,9 @@ function redrawAnswer(key, k) {
   const stop = job && $("viewer").open && $("viewer").dataset.key === key && box.querySelector(".stop");
   if (!stop) return;
   const refocus = stop.contains(document.activeElement) || document.activeElement === document.body;
+  const media = stop.querySelector?.(".preview");
   stop.outerHTML = stopBox(job);
+  keepPreview(media, box);
   const note = answerState[key]?.noteOpen && box.querySelector('.stop textarea[name="note"]');
   if (note && !note.disabled) note.focus();
   else if (refocus) [...box.querySelectorAll(".stop button[data-answer]")].find(b => b.dataset.answer === k)?.focus();
