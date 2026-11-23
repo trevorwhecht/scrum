@@ -2651,6 +2651,10 @@ def shop_tick(project, repo, root) -> bool:
         shop.run(f"kill {pid}", shop.STEP_TIMEOUT, alias=alias)
         print(f"shop: {project}: {job_id}: not marked ({e}); stopped shop pid {pid}", file=sys.stderr, flush=True)
         return False
+    try:  # board._timing_row: Spec ends here, the rest is the Cloud column
+        (jobs_dir / job_id / "shop-at.txt").write_text(f"{time.time()}\n", encoding="utf-8")
+    except OSError:
+        pass
     if not child:
         unqueue(root, job)
     print(f"shop: {project}: {job_id}: started on {alias} (pid {pid}, account {account})", flush=True)
