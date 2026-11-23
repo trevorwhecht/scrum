@@ -7633,9 +7633,10 @@ print("stub err", file=sys.stderr)
     def test_heavy_cap_holds_heavy_start(self):
         """Job 1314: a heavy spec-stage start at the cap queues a start launch and raises HeldStart naming heavy_cap."""
         job_id = self.heavy_board()
-        with mock.patch.object(board, "projects", return_value={}), self.assertRaises(board.HeldStart) as cm:
+        with mock.patch.object(board, "projects", return_value={}), mock.patch.object(board, "live_sessions", return_value=2), \
+                self.assertRaises(board.HeldStart) as cm:  # job 1381: heavy_count stops at live_sessions()
             board.spawn(self.root, job_id, "start", "/p start")
-        self.assertIn("heavy_cap(2/2): 2 heavy jobs on this Mac", str(cm.exception))
+        self.assertIn("heavy_cap(2/2): 2 heavy jobs on this Mac (901-a, 902-b)", str(cm.exception))
         row = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
         self.assertEqual(row["queued_launch"], {"action": "start", "prompt": "/p start", "stage": "spec"})
         self.assertFalse(self.out.exists(), "the stub claude never ran")
@@ -14792,6 +14793,11 @@ class HeavyCapBase(unittest.TestCase):
                   mock.patch.object(board, "session_alive_fn", return_value=lambda job: False)):
             p.start()
             self.addCleanup(p.stop)
+        # job 1381: heavy_count stops at live_sessions(); 3 counts every job these fixtures start, under MAX_SESSIONS
+        # and SOFT_COOLDOWN_SESSIONS so no other gate holds
+        live = mock.patch.object(board, "live_sessions", return_value=3)
+        self.live = live.start()
+        self.addCleanup(live.stop)
 
     def jobs(self, *jobs, root=None):
         root = root or self.root
@@ -14808,7 +14814,36 @@ class HeavyCapReasonTest(HeavyCapBase):
         self.jobs({"id": "001-a", "stage": "build", "lane": "standard"})
         self.assertIsNone(board.heavy_cap_reason(self.root))
         self.jobs({"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "check", "lane": "debug"})
-        self.assertEqual(board.heavy_cap_reason(self.root), "heavy_cap(2/2): 2 heavy jobs on this Mac")
+        self.assertEqual(board.heavy_cap_reason(self.root), "heavy_cap(2/2): 2 heavy jobs on this Mac (001-a, 002-b)")
+
+    def test_count_capped_at_live_sessions(self):
+        """Job 1381: a heavy job in a WATCHED stage with no running session never fills HEAVY_PER_MAC."""
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "check", "lane": "debug"},
+                  {"id": "003-c", "stage": "spec", "lane": "standard"})
+        for live, want in ((0, 0), (1, 1), (2, 2), (5, 3)):
+            with self.subTest(live=live):
+                self.live.return_value = live
+                self.assertEqual(board.heavy_count(self.root), want)
+        for live in (0, 1):
+            with self.subTest(reason_live=live):
+                self.live.return_value = live
+                self.assertIsNone(board.heavy_cap_reason(self.root))
+        self.live.return_value = 2
+        self.assertEqual(board.heavy_cap_reason(self.root), "heavy_cap(2/2): 2 heavy jobs on this Mac (001-a, 002-b)")
+        self.assertEqual(board.heavy_cap_reason(self.root, {"id": "001-a", "stage": "build", "lane": "standard"}),
+                         "heavy_cap(2/2): 2 heavy jobs on this Mac (002-b, 003-c)")
+
+    def test_ready_below_cap_when_no_sessions_run(self):
+        """Job 1381: cmd_ready's heavy_n is capped too: two heavy jobs on the board but one live session claims a heavy kid."""
+        self.jobs({"id": "010-p", "stage": "running", "lane": "runall", "children": ["011-h"]},
+                  {"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "check", "lane": "standard"},
+                  {"id": "011-h", "stage": "waiting", "parent": "010-p", "parallel": True})
+        (self.root.parent / "src").mkdir(exist_ok=True)
+        (self.root / "jobs" / "011-h" / "spec.md").write_text("# Spec\n## Likely files\n- `src/011-h.py`\n")
+        self.live.return_value = 1
+        with mock.patch.object(board, "machine_ok", return_value=None), mock.patch.object(board, "ram_room", return_value=5), \
+                mock.patch.object(board, "pick_account", return_value=(None, None)):
+            self.assertEqual(board.cmd_ready(self.root, "010-p")["ready"], ["011-h"])
 
     def test_light_job_never_held(self):
         self.jobs({"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "check", "lane": "standard"},
@@ -14830,7 +14865,7 @@ class HeavyCapReasonTest(HeavyCapBase):
         self.jobs({"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "spec", "lane": "standard"})
         self.jobs({"id": "001-z", "stage": "check", "lane": "standard"}, root=other)
         with mock.patch.object(board, "projects", return_value={"o": other.parent}):
-            self.assertEqual(board.heavy_cap_reason(self.root), "heavy_cap(3/2): 3 heavy jobs on this Mac")
+            self.assertEqual(board.heavy_cap_reason(self.root), "heavy_cap(3/2): 3 heavy jobs on this Mac (001-a, 002-b, 001-z)")
             self.assertEqual(board.heavy_count(self.root), 3)
             self.assertEqual(board.heavy_count(self.root, skip="002-b"), 2)
 
