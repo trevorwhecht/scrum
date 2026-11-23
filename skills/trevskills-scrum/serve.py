@@ -1652,6 +1652,52 @@ def e2e_full_exec(repo, cmd, env, log, loads) -> int:
     return code
 
 
+E2E_FULL_LOCKFILES = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb")
+
+
+def e2e_full_worktree(repo, root, head) -> Path:
+    """The detached worktree <repo>/.claude/worktrees/e2e-full at head, where e2e_full_run runs, so a dev server in the
+    main checkout never holds its Next dev lock. Created once with `git worktree add --detach`, later moved with
+    `git checkout --detach` run inside it. <repo>/.env.local, when present, is copied in on every call. PROJECT's
+    Install command runs in it when it was just created or a lockfile differs between its old HEAD and head
+    (`git diff --name-only`); an empty or `none` Install runs nothing. A failed git call or a failed install
+    (the worktree is removed first, so the next call reinstalls) raises (ValueError, OSError or RuntimeError)."""
+    head = str(head)
+    if head.startswith("-"):
+        raise ValueError(f"bad head {head!r}")
+    wt = Path(repo) / ".claude" / "worktrees" / "e2e-full"
+    old = None
+    if (wt / ".git").exists():
+        old = board._git(wt, "rev-parse", "HEAD").decode().strip()
+        board._git(wt, "checkout", "--detach", head, "--")
+    else:
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        board._git(repo, "worktree", "prune")
+        board._git(repo, "worktree", "add", "--detach", "--force", str(wt), head)
+    env_local = Path(repo) / ".env.local"
+    if env_local.is_file():
+        shutil.copyfile(env_local, wt / ".env.local")
+    install = e2e_command(root, "Install")
+    if install and install.lower() != "none":
+        changed = old is None or any(Path(n).name in E2E_FULL_LOCKFILES
+                                     for n in board._git(wt, "diff", "--name-only", old, head, "--").decode().splitlines())
+        if changed:
+            try:
+                r = subprocess.run(install, shell=True, cwd=wt, stdin=subprocess.DEVNULL, capture_output=True,
+                                   timeout=1800)
+                err = f"exited {r.returncode}: " + (r.stdout + r.stderr).decode(errors="replace").strip()[-200:] \
+                    if r.returncode else None
+            except subprocess.TimeoutExpired:
+                err = "timed out"
+            if err:  # drop the worktree so the next run creates it again and reinstalls, never runs on a part install
+                try:
+                    board._git(repo, "worktree", "remove", "--force", str(wt))
+                except ValueError:
+                    shutil.rmtree(wt, ignore_errors=True)
+                raise RuntimeError(f"e2e worktree install {err}")
+    return wt
+
+
 def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
     """Run cmd in repo through buildlock.py on the E2E lock (output to root/e2e-full.log), record the result in
     root/e2e-full.json. A failing spec no live job names (e2e_full_owned) is run again alone with one worker
@@ -1675,6 +1721,7 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
     An exception before the result is recorded records error (exit None) and re-raises."""
     rec = None
     try:
+        wt = e2e_full_worktree(repo, root, head)  # the run's cwd: no main-checkout dev server holds its Next dev lock
         env = {**os.environ, "SCRUM_BUILD_LOCK": str(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock")}
         log = root / "e2e-full.log"
         before = board.listeners()
@@ -1682,12 +1729,12 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
         try:
             for _ in range(2):  # the second run only after stopping a stale E2E dev server
                 loads, started = [], time.time()
-                code = e2e_full_exec(repo, cmd, env, log, loads)
+                code = e2e_full_exec(wt, cmd, env, log, loads)
                 output = log.read_text(errors="replace")
                 if E2E_FULL.get("hot_stop"):  # hot_stop_tick ended it: no lock-block retry
                     lock = None
                     break
-                lock = e2e_full_lock(repo, output, started) if code else None
+                lock = e2e_full_lock(wt, output, started) if code else None
                 pid, port = lock or (None, None)
                 if retried or stopped or not (pid and port and port not in board.KEEP_PORTS
                                    and os.path.exists(E2E_FULL_DEV_LOG.format(port))):
@@ -1697,8 +1744,8 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
         except OSError as e:
             code, output, lock = -1, str(e), None
         finally:
-            e2e_full_stop_new_servers(repo, before)
-        test_dir = board._e2e_dir(Path(repo))
+            e2e_full_stop_new_servers(wt, before)
+        test_dir = board._e2e_dir(Path(wt))
         hot = E2E_FULL.get("hot_stop")  # hot_stop_tick's reason: stopped under load, whatever the CPU readings
         failed = e2e_full_failures(output, test_dir) if code and not hot else []
         loaded = bool(hot) or (code != 0 and any((load or 0) > board.MAX_CPU_LOAD_PCT for load in loads))
@@ -1717,7 +1764,7 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False) -> dict:
         if failed and not loaded:
             owned = e2e_full_owned(root, {f["spec"] for f in failed})
             mine = [f for f in failed if f["spec"] not in owned]
-            again, output = e2e_full_rerun(repo, root, cmd, env, mine, test_dir) if mine else (None, "")
+            again, output = e2e_full_rerun(wt, root, cmd, env, mine, test_dir) if mine else (None, "")
             if again is None and E2E_FULL.get("hot_stop"):  # stopped during the re-run: loaded, nothing filed
                 rec = {**rec, "result": "loaded", "reason": E2E_FULL["hot_stop"], "loads": prior + 1}
                 write_e2e_full(root, rec)

@@ -12996,6 +12996,8 @@ class E2eFullTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         (base / "projects.json").write_text(json.dumps([str(self.repo)]))
+        # e2e_full_run runs in this detached worktree, so the scripts the tests write go here, never into the checkout
+        self.wt = serve.e2e_full_worktree(self.repo, self.root, self.base)
         serve.E2E_FULL["running"] = None
         self.addCleanup(serve.E2E_FULL.update, running=None)
         p = mock.patch.object(serve.board, "listeners", return_value=[])  # e2e_full_run never signals a real process
@@ -13019,13 +13021,13 @@ class E2eFullTest(unittest.TestCase):
         raised for SIGTERM. Returns (rec, the number of runs, the os.kill calls other than signal 0, the seconds slept
         in 0.25 s polls, the processes.log lines)."""
         for n, (out, code) in enumerate(zip(outs, codes), 1):
-            (self.repo / f"out{n}.txt").write_text(out)
-            (self.repo / f"code{n}.txt").write_text(str(code))
-            (self.repo / f"dev{n}.txt").unlink(missing_ok=True)
+            (self.wt / f"out{n}.txt").write_text(out)
+            (self.wt / f"code{n}.txt").write_text(str(code))
+            (self.wt / f"dev{n}.txt").unlink(missing_ok=True)
             if dev and dev[n - 1] is not None:
-                (self.repo / f"dev{n}.txt").write_text(dev[n - 1])
-        (self.repo / "runs.txt").unlink(missing_ok=True)
-        (self.repo / "run-e2e.sh").write_text(
+                (self.wt / f"dev{n}.txt").write_text(dev[n - 1])
+        (self.wt / "runs.txt").unlink(missing_ok=True)
+        (self.wt / "run-e2e.sh").write_text(
             'echo run >> runs.txt; n=$(wc -l < runs.txt | tr -d " "); cat out$n.txt; '
             f'[ -f dev$n.txt ] && cp dev$n.txt "{self.dev_log(63923)}"; exit $(cat code$n.txt)\n')
         calls, slept = [], []
@@ -13042,7 +13044,7 @@ class E2eFullTest(unittest.TestCase):
                 mock.patch.object(self.serve.time, "sleep", side_effect=slept.append):
             rec, lines = processes_logged(lambda: self.serve.e2e_full_run(
                 self.repo, self.root, "sh run-e2e.sh", self.base, 123.0, None, retried=retried))
-        runs = len((self.repo / "runs.txt").read_text().splitlines())
+        runs = len((self.wt / "runs.txt").read_text().splitlines())
         return rec, runs, calls, sum(s for s in slept if s == 0.25), lines
 
     def test_stale_dev_lock_stops_pid_and_retries(self):
@@ -13138,7 +13140,7 @@ class E2eFullTest(unittest.TestCase):
         """onewitharts tees `next dev 2>&1` to /tmp/e2e-next-dev-<port>.log and Playwright drops a webServer's stdout,
         so its e2e-full.log (2026-11-19 20:09) held only `webServer exited early`: the block is read from the run's dev
         log, one written since the run started whose Dir: is this checkout."""
-        repo = os.path.realpath(self.repo)
+        repo = os.path.realpath(self.wt)
         self.dev_log(61566).write_text("x\n")
         old = self.dev_log(60000)
         old.write_text(next_dev_lock_output(pid="555", repo=repo, early=False))
@@ -13166,12 +13168,12 @@ class E2eFullTest(unittest.TestCase):
         with mock.patch.object(self.serve.board, "listeners", return_value=after), \
                 mock.patch.object(self.serve.os, "kill", side_effect=kill), \
                 mock.patch.object(self.serve.time, "sleep"):
-            self.serve.e2e_full_stop_new_servers(self.repo, before)
+            self.serve.e2e_full_stop_new_servers(self.wt, before)
         return calls
 
     def test_stop_new_servers_term_then_kill(self):
         """Job 1252: a run's leftover `next dev` on the main checkout held its dev lock, so the next run exited early."""
-        repo = os.path.realpath(self.repo)
+        repo = os.path.realpath(self.wt)
         after = [(4242, 3000, repo), (4243, 3002, os.path.join(repo, "app"))]
         calls = self.stop_new([], after)
         self.assertEqual([c for c in calls if c[1] != 0],
@@ -13180,11 +13182,11 @@ class E2eFullTest(unittest.TestCase):
         self.assertEqual([c for c in calls if c[1] != 0], [(4242, signal.SIGTERM), (4243, signal.SIGTERM)])
 
     def test_stop_new_servers_spares_snapshot_pids(self):
-        repo = os.path.realpath(self.repo)
+        repo = os.path.realpath(self.wt)
         self.assertEqual(self.stop_new([(4242, 3000, repo)], [(4242, 3000, repo)]), [])
 
     def test_stop_new_servers_spares_outside_worktrees_keep_ports_and_self(self):
-        repo = os.path.realpath(self.repo)
+        repo = os.path.realpath(self.wt)
         after = [(5001, 3000, os.path.realpath(self.tmp.name)), (5002, 3000, repo + "-other"),
                  (5003, 3000, os.path.join(repo, ".claude", "worktrees", "scrum-1-a")),
                  (5004, 3000, os.path.join(repo, ".claude", "worktrees")),
@@ -13192,8 +13194,8 @@ class E2eFullTest(unittest.TestCase):
         self.assertEqual(self.stop_new([], after), [])
 
     def test_stop_new_servers_runs_on_timeout_and_popen_error(self):
-        repo = os.path.realpath(self.repo)
-        (self.repo / "run-e2e.sh").write_text("sleep 30\n")
+        repo = os.path.realpath(self.wt)
+        (self.wt / "run-e2e.sh").write_text("sleep 30\n")
         seen = []
         with mock.patch.object(self.serve.board, "listeners", side_effect=[[], [(4242, 3000, repo)]]), \
                 mock.patch.object(self.serve, "e2e_full_stop_new_servers",
@@ -13201,18 +13203,19 @@ class E2eFullTest(unittest.TestCase):
                 mock.patch.object(self.serve, "E2E_FULL_STALE", 0.4), \
                 mock.patch.object(self.serve, "E2E_FULL_LOAD_SECS", 0.2):
             rec = self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", self.base, 123.0, None)
-        self.assertEqual(seen, [(self.repo, [])])
+        self.assertEqual(seen, [(self.wt, [])])
         self.assertEqual(rec["result"], "error")
         seen.clear()
         with mock.patch.object(self.serve.subprocess, "Popen", side_effect=OSError("no exec")), \
+                mock.patch.object(self.serve, "e2e_full_worktree", return_value=self.wt), \
                 mock.patch.object(self.serve, "e2e_full_stop_new_servers",
                                   side_effect=lambda r, b: seen.append((r, b))):
             rec = self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", self.base, 123.0, None)
-        self.assertEqual(seen, [(self.repo, [])])
+        self.assertEqual(seen, [(self.wt, [])])
         self.assertEqual((rec["result"], rec["exit"]), ("error", -1))
 
     def test_stop_new_servers_failure_keeps_result(self):
-        repo = os.path.realpath(self.repo)
+        repo = os.path.realpath(self.wt)
         for err in (ProcessLookupError, PermissionError):
             with mock.patch.object(self.serve.board, "listeners", side_effect=[[], [(4242, 3000, repo)]]), \
                     mock.patch.object(self.serve.os, "kill", side_effect=err) as kill, \
@@ -13235,10 +13238,115 @@ class E2eFullTest(unittest.TestCase):
         self.git("commit", "-q", "-am", msg)
         return self.git("rev-parse", "HEAD")
 
+    def fresh_worktree(self):
+        """Remove setUp's e2e worktree so a call creates it again."""
+        self.git("worktree", "remove", "--force", str(self.wt))
+
+    def test_e2e_worktree_created_and_installed(self):
+        """Job 1379: the first run creates a detached worktree of head and runs Install there."""
+        self.fresh_worktree()
+        (self.root / "project.md").write_text("- E2E: sh run-e2e.sh\n- Install: echo ran > installed.txt\n")
+        wt = self.serve.e2e_full_worktree(self.repo, self.root, self.base)
+        self.assertEqual(wt, self.repo / ".claude" / "worktrees" / "e2e-full")
+        self.assertEqual((wt / "a.txt").read_text(), "a\n")
+        self.assertEqual(subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], capture_output=True,
+                                        text=True).stdout.strip(), self.base)
+        self.assertEqual(subprocess.run(["git", "-C", str(wt), "symbolic-ref", "-q", "HEAD"],
+                                        capture_output=True).returncode, 1, "detached")
+        self.assertEqual((wt / "installed.txt").read_text(), "ran\n")
+
+    def test_e2e_worktree_reused_install_only_on_lockfile_change(self):
+        (self.root / "project.md").write_text("- E2E: sh run-e2e.sh\n- Install: echo x >> installs.txt\n")
+        self.fresh_worktree()
+        self.serve.e2e_full_worktree(self.repo, self.root, self.base)
+        head2 = self.merge("two")
+        calls = []
+        real = self.serve.board._git
+
+        def spy(w, *args):
+            calls.append(args[:2])
+            return real(w, *args)
+
+        with mock.patch.object(self.serve.board, "_git", side_effect=spy):
+            wt = self.serve.e2e_full_worktree(self.repo, self.root, head2)
+        self.assertEqual(self.git("-C", str(wt), "rev-parse", "HEAD"), head2)
+        self.assertIn(("checkout", "--detach"), calls)
+        self.assertNotIn(("worktree", "add"), calls)
+        self.assertEqual((wt / "installs.txt").read_text(), "x\n", "no lockfile change: no second install")
+        (self.repo / "pnpm-lock.yaml").write_text("lock\n")
+        self.git("add", "pnpm-lock.yaml")
+        self.git("commit", "-q", "-m", "lock")
+        head3 = self.git("rev-parse", "HEAD")
+        self.serve.e2e_full_worktree(self.repo, self.root, head3)
+        self.assertEqual((wt / "installs.txt").read_text(), "x\nx\n")
+        (self.root / "project.md").write_text("- E2E: sh run-e2e.sh\n- Install: none\n")
+        (self.repo / "yarn.lock").write_text("lock\n")
+        self.git("add", "yarn.lock")
+        self.git("commit", "-q", "-m", "yarn")
+        self.serve.e2e_full_worktree(self.repo, self.root, self.git("rev-parse", "HEAD"))
+        self.assertEqual((wt / "installs.txt").read_text(), "x\nx\n", "Install none runs nothing")
+
+    def test_e2e_worktree_copies_env_local(self):
+        self.serve.e2e_full_worktree(self.repo, self.root, self.base)
+        self.assertFalse((self.wt / ".env.local").exists(), "a missing .env.local is no error")
+        (self.repo / ".env.local").write_text("A=1\n")
+        self.serve.e2e_full_worktree(self.repo, self.root, self.base)
+        self.assertEqual((self.wt / ".env.local").read_text(), "A=1\n")
+        (self.repo / ".env.local").write_text("A=2\n")
+        self.serve.e2e_full_worktree(self.repo, self.root, self.base)
+        self.assertEqual((self.wt / ".env.local").read_text(), "A=2\n", "copied on every run")
+
+    def test_e2e_full_run_cwd_is_worktree(self):
+        """A held .next/dev/lock in the main checkout never changes the result."""
+        (self.repo / ".next" / "dev").mkdir(parents=True)
+        (self.repo / ".next" / "dev" / "lock").write_text("held\n")
+        (self.wt / "run-e2e.sh").write_text("pwd -P > cwd.txt; echo '5 passed (9s)'; exit 0\n")
+        rec = self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", self.base, 123.0, None)
+        self.assertEqual((rec["result"], rec["exit"]), ("pass", 0))
+        self.assertEqual((self.wt / "cwd.txt").read_text().strip(), os.path.realpath(self.wt))
+        self.assertFalse((self.repo / "cwd.txt").exists())
+
+    def test_e2e_full_stops_servers_in_worktree_only(self):
+        main, wt = os.path.realpath(self.repo), os.path.realpath(self.wt)
+        (self.wt / "run-e2e.sh").write_text("exit 0\n")
+        kills = []
+        with mock.patch.object(self.serve.board, "listeners", side_effect=[[], [(4001, 3000, main), (4002, 3000, wt)]]), \
+                mock.patch.object(self.serve.os, "kill", side_effect=lambda pid, sig: kills.append((pid, sig))
+                                  if sig else (_ for _ in ()).throw(ProcessLookupError)), \
+                mock.patch.object(self.serve.time, "sleep"):
+            rec = self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", self.base, 123.0, None)
+        self.assertEqual(rec["result"], "pass")
+        self.assertEqual(kills, [(4002, signal.SIGTERM)])
+        with mock.patch.object(self.serve, "e2e_full_stop_new_servers", return_value=[]) as stop:
+            self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", self.base, 123.0, None)
+        self.assertEqual(stop.call_args.args[0], self.wt)
+
+    def test_e2e_worktree_failure_records_error(self):
+        (self.root / "e2e-full.json").write_text(json.dumps({"at": 123.0, "head": self.base, "result": "running"}))
+        with self.assertRaises(ValueError):  # git checkout --detach of a head that does not exist
+            self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", "f" * 40, 123.0, "lg")
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()),
+                         {"at": 123.0, "head": "f" * 40, "result": "error", "exit": None, "failed": [],
+                          "lastGreen": "lg"})
+        self.fresh_worktree()  # git worktree add fails too
+        with self.assertRaises(ValueError):
+            self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", "f" * 40, 123.0, "lg")
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text())["result"], "error")
+        self.fresh_worktree() if self.wt.exists() else None
+        (self.root / "project.md").write_text("- E2E: sh run-e2e.sh\n- Install: exit 3\n")  # install fails
+        with self.assertRaises(RuntimeError):
+            self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", self.base, 123.0, "lg")
+        rec = json.loads((self.root / "e2e-full.json").read_text())
+        self.assertEqual((rec["result"], rec["exit"]), ("error", None))
+        self.assertFalse(self.wt.exists(), "a failed install drops the worktree")
+        (self.root / "project.md").write_text("- E2E: sh run-e2e.sh\n- Install: echo ok >> installs.txt\n")
+        self.serve.e2e_full_worktree(self.repo, self.root, self.base)  # same head: Install runs again
+        self.assertEqual((self.wt / "installs.txt").read_text(), "ok\n")
+
     def test_run_logs_process(self):
         """Job 976: each full run logs its result, head, exit, failure count and whole seconds since it started."""
-        (self.repo / "out.txt").write_text(E2E_LIST_OUTPUT)
-        (self.repo / "run-e2e.sh").write_text("cat out.txt; exit 1\n")
+        (self.wt / "out.txt").write_text(E2E_LIST_OUTPUT)
+        (self.wt / "run-e2e.sh").write_text("cat out.txt; exit 1\n")
         head = self.git("rev-parse", "HEAD")
         with mock.patch.object(self.serve.time, "time", return_value=1075.6):
             rec, lines = processes_logged(lambda: self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", head, 1000.0, None))
@@ -13526,8 +13634,8 @@ class E2eFullTest(unittest.TestCase):
             self.serve.e2e_full_tick("p", self.repo, self.root)
         self.assertEqual(thread.call_args.kwargs["kwargs"], {"retried": True})
         out = "Error: Process from config.webServer exited early.\n"
-        (self.repo / "out.txt").write_text(out)
-        (self.repo / "run-e2e.sh").write_text("cat out.txt; exit 1\n")
+        (self.wt / "out.txt").write_text(out)
+        (self.wt / "run-e2e.sh").write_text("cat out.txt; exit 1\n")
         rec = self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", head, 123.0, None, retried=True)
         self.assertEqual((rec["result"], rec["exit"]), ("error", 1))
         self.assertFalse(self.serve.e2e_full_due(rec, head, 0, rec["at"] + 60))
@@ -13544,8 +13652,8 @@ class E2eFullTest(unittest.TestCase):
             {"spec": "e2e/admin/orders.spec.ts", "line": 8, "title": "orders list"}])
 
     def run_suite(self, out, code, last_green=None):
-        (self.repo / "out.txt").write_text(out)
-        (self.repo / "run-e2e.sh").write_text(f"cat out.txt; exit {code}\n")
+        (self.wt / "out.txt").write_text(out)
+        (self.wt / "run-e2e.sh").write_text(f"cat out.txt; exit {code}\n")
         head = self.git("rev-parse", "HEAD")
         return self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", head, 123.0, last_green)
 
@@ -13659,8 +13767,8 @@ class E2eFullTest(unittest.TestCase):
 
     def test_run_samples_load_while_waiting(self):
         """A run longer than one E2E_FULL_LOAD_SECS slice is sampled while it waits, not only after it exits."""
-        (self.repo / "out.txt").write_text(E2E_LIST_OUTPUT)
-        (self.repo / "run-e2e.sh").write_text("sleep 1; cat out.txt; exit 1\n")
+        (self.wt / "out.txt").write_text(E2E_LIST_OUTPUT)
+        (self.wt / "run-e2e.sh").write_text("sleep 1; cat out.txt; exit 1\n")
         loads = [400.0]  # the first sample, taken during the wait; every later one, the after-exit one too, reads 1
         with mock.patch.object(self.serve, "E2E_FULL_LOAD_SECS", 0.2), \
                 mock.patch.object(self.serve.board, "cpu_load_pct", side_effect=lambda: loads.pop() if loads else 1.0):
@@ -13706,12 +13814,13 @@ class HotStopTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         base = Path(self.tmp.name)
-        self.repo = Path(os.path.realpath(base / "repo"))
+        self.repo = self.wt = Path(os.path.realpath(base / "repo"))
         self.root = self.repo / "scrum"
         self.root.mkdir(parents=True)
         (base / "projects.json").write_text(json.dumps([str(self.repo)]))
         for p in (mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "projects.json")}),
                   mock.patch.object(serve, "HOT_STOP_WAIT", 1),
+                  mock.patch.object(serve, "e2e_full_worktree", return_value=self.repo),  # a plain dir: no git here
                   mock.patch.object(serve.board, "listeners", return_value=[])):
             p.start()
             self.addCleanup(p.stop)
@@ -13869,7 +13978,7 @@ class HotStopTest(unittest.TestCase):
 
     def test_full_run_records_loaded_when_stopped(self):
         """e2e_full_run on a hot stop: loaded with the reason, whatever the CPU readings, and nothing retried or filed."""
-        (self.repo / "run-e2e.sh").write_text("echo run >> runs.txt; sleep 60\n")
+        (self.wt / "run-e2e.sh").write_text("echo run >> runs.txt; sleep 60\n")
         (self.root / "project.md").write_text("# Project\n- E2E: sh run-e2e.sh\n")
         result = {}
 
@@ -13880,7 +13989,7 @@ class HotStopTest(unittest.TestCase):
             t = threading.Thread(target=run)
             t.start()
             for _ in range(200):
-                if self.serve.E2E_FULL.get("pid") and (self.repo / "runs.txt").exists():
+                if self.serve.E2E_FULL.get("pid") and (self.wt / "runs.txt").exists():
                     break
                 time.sleep(0.05)
             self.assertTrue(self.serve.E2E_FULL.get("pid"), "e2e_full_exec keeps its child's pid")
@@ -13891,7 +14000,7 @@ class HotStopTest(unittest.TestCase):
         self.assertEqual((rec["result"], rec["reason"], rec["lastGreen"], rec["failed"]),
                          ("loaded", "memory pressure warn (kernel level 3)", "lg", []))
         self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
-        self.assertEqual((self.repo / "runs.txt").read_text(), "run\n", "no lock-block retry")
+        self.assertEqual((self.wt / "runs.txt").read_text(), "run\n", "no lock-block retry")
         self.assertFalse((self.root / "backlog.md").exists())
         self.assertNotIn("pid", self.serve.E2E_FULL)
         self.assertNotIn("hot_stop", self.serve.E2E_FULL)
