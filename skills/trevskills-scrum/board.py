@@ -2876,8 +2876,14 @@ def _flag_weekly(weekly, flagged):
     """Append to flagged the names of the seven_day cards that overburned. With one account that is _burned_early; with
     several, pick_account drains one on purpose while another carries the work, so a card counts only for the time every
     account sat at its cap at once before its reset (cap_idle_secs back from its resets_at). Returns {name: hours} for
-    those multi-account flags."""
+    those multi-account flags. Once a card names an account, every configured account (accounts()) counts too, so an
+    account with no card in this digest (staggered resets) counts as never held."""
     accounts_seen = {a for _, a, *_ in weekly}
+    if any(accounts_seen):
+        try:
+            accounts_seen |= {a.name for a in accounts()}
+        except SystemExit:  # a bad SCRUM_ACCOUNTS: the cards' own accounts only
+            pass
     if len(accounts_seen) < 2:
         flagged += [n for n, _, reset, b, span in weekly if _burned_early(b, span, reset)]
         return {}
