@@ -4349,7 +4349,8 @@ class BoardTest(unittest.TestCase):
 
     def test_requeue_reason_without_jobs_or_other_reason_adds_no_marker(self):
         dep = board.cmd_new(self.root, "dep")
-        for reason in ("requeue: spec writer produced nothing", f"obsolete: depends on {dep.split('-')[0]}"):
+        n = dep.split("-")[0]
+        for reason in ("requeue: spec writer produced nothing", f"obsolete: depends on jobs {n}", f"requeue: check timed out after {n} minutes"):
             job_id = board.cmd_new(self.root, "plain")
             (self.root / "jobs" / job_id / "feature.md").write_text("plain\n")
             board.cmd_abort(self.root, job_id, requeue=True, reason=reason)

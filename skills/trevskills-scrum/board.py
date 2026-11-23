@@ -992,13 +992,15 @@ def abort_job(root, job, requeue, reason):
 
 def requeue_after(root, job):
     """{after <repo>:<job>} refs for a `requeue: depends on jobs 1362-1365, not merged` reason: one per job on this board
-    (not job itself) that is not done and whose number or full id the reason names; a `1362-1365` range names every number
+    (not job itself) that is not done and whose number or full id the reason names after `job` or `jobs` (a comma or `and` list); a `1362-1365` range names every number
     from 1362 to 1365 (at most 20 apart). [] for any other reason. Caller holds the lock."""
     reason = str(job.get("reason") or "")
     if not reason.startswith("requeue:"):
         return []
     named = set()
-    for tok in re.findall(r"\d+(?:-[a-z0-9-]*[a-z0-9])?", reason):
+    ref = r"\d+(?:-[a-z0-9-]*[a-z0-9])?"
+    cued = re.findall(rf"\bjobs?\s+({ref}(?:(?:,\s*|\s+and\s+){ref})*)", reason)  # numbers only after "job(s)", never "after 5 minutes"
+    for tok in re.findall(ref, " ".join(cued)):
         if m := re.fullmatch(r"(\d+)-(\d+)", tok):
             lo, hi = int(m[1]), int(m[2])
             named.update(range(lo, hi + 1) if lo <= hi <= lo + 20 else (lo, hi))
