@@ -4834,6 +4834,12 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("run its `read` command", start)
         self.assertNotIn("awk '", start)
 
+    # --- job 1373: a fast or standard session reads only the lane parts it runs ---
+    def test_fast_standard_reads_only_its_lane_parts(self):
+        start = next(l for l in (SKILL_DIR / "lanes" / "commands.md").read_text().splitlines() if l.startswith("- **`/trevskills-scrum start <id>`**"))
+        for phrase in ("when `fit` is false, run its `read` command", "from step 2", "carry no other lane text", "or with no `read` read the whole `lanes/newjob.md`"):
+            self.assertIn(phrase, start)
+
 
 if __name__ == "__main__":
     unittest.main()

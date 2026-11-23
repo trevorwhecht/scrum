@@ -10565,7 +10565,7 @@ class LilguyFitTest(unittest.TestCase):
         whole = sum(len((board.LANE_DIR / n).read_text()) for n in ("newjob.md", "merge.md"))
         self.assertLess(len(res.stdout), whole * 2 / 3)
 
-    def test_lilguy_fit_false_prints_no_read(self):
+    def test_lilguy_fit_false_prints_standard_read(self):
         for setup in (lambda: self.points(2), lambda: (self.points(1), (self.jd / "feature.md").write_text("Lane: fast\n"))):
             setup()
             out = io.StringIO()
@@ -10573,7 +10573,33 @@ class LilguyFitTest(unittest.TestCase):
                 board.main(["--dir", str(self.root), "lilguy-fit", self.job])
             got = json.loads(out.getvalue())
             self.assertIs(got["fit"], False)
-            self.assertNotIn("read", got)
+            self.assertEqual(got["read"], board.standard_read())
+
+    def test_standard_read_ranges_start_at_headings(self):
+        want = [("newjob.md", r"2\. \*\*Base:\*\*"), ("review.md", r"# Review"), ("merge.md", r"3\. \*\*PR\.\*\*")]
+        parts = self._parts(board.standard_read())
+        self.assertEqual(len(parts), 3)
+        for (name, a, b), (wname, ws) in zip(parts, want):
+            lines = (board.LANE_DIR / name).read_text().splitlines()
+            self.assertEqual(name, wname)
+            self.assertRegex(lines[a - 1], "^" + ws)
+            self.assertEqual(b, len(lines))
+        res = subprocess.run(board.standard_read(), shell=True, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0)
+        for want_text in ("2. **Base:**", "## Fast lane", "## Check gate", "## Approve", "3. **PR.**", "## Resuming the builder"):
+            self.assertIn(want_text, res.stdout)
+        for bad in ("1c. **Askme**", "# New job\n"):
+            self.assertNotIn(bad, res.stdout)
+
+    def test_standard_read_missing_heading_prints_none(self):
+        tmp = Path(self.tmp.name) / "lanes2"
+        tmp.mkdir()
+        self.assertIsNone(board.standard_read(tmp))
+        for n in ("newjob.md", "review.md", "merge.md"):
+            shutil.copy(board.LANE_DIR / n, tmp / n)
+        self.assertIsNotNone(board.standard_read(tmp))
+        (tmp / "review.md").write_text((tmp / "review.md").read_text().replace("# Review", "# Look", 1))
+        self.assertIsNone(board.standard_read(tmp))
 
     def test_lilguy_read_missing_heading_prints_none(self):
         tmp = Path(self.tmp.name) / "lanes"
