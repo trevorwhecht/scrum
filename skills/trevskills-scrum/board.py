@@ -120,6 +120,8 @@
                                    round-(n-1)/head.txt, else null (Check gate step 1)
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
                                    git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
+  board.py lane-read               print one line `read: <sed -n commands>` for the lane parts a fast or standard job runs
+                                   (lanes/newjob.md from step 2, review.md, merge.md from step 3), or `read: none`
   board.py lilguy-fit <id>         print {"fit","why"} (+ "read": a sed command for the lane parts a lilguy job runs, when fit): whether the job is tiny (backlog points 1, or jev.log's last model
                                    answer score < 1.5 at confidence >= 0.7, or feature.md names a file path) with no
                                    hard-stop word in feature.md and an estimate (10 lines per named path) within 30
@@ -4532,11 +4534,28 @@ LILGUY_READ_PARTS = (
 )
 
 
+# Same shape for a fast or standard job; an end of None reads to the file's last line
+PIPELINE_READ_PARTS = (
+    ("newjob.md", r"2\. \*\*Base:\*\*", None),
+    ("review.md", r"# Review", None),
+    ("merge.md", r"3\. \*\*PR\.\*\*", None),
+)
+
+
 def lilguy_read(lane_dir: Path | None = None) -> str | None:
     """One `sed -n` shell command per lane file for the lines a lilguy job runs, or None when a file or anchor is missing."""
+    return _read_parts(LILGUY_READ_PARTS, lane_dir)
+
+
+def pipeline_read(lane_dir: Path | None = None) -> str | None:
+    """The same for the lane parts a fast or standard job runs, or None when a file or anchor is missing."""
+    return _read_parts(PIPELINE_READ_PARTS, lane_dir)
+
+
+def _read_parts(parts, lane_dir: Path | None) -> str | None:
     lane_dir = Path(lane_dir) if lane_dir is not None else LANE_DIR
     ranges: dict[str, list[str]] = {}
-    for name, start, end in LILGUY_READ_PARTS:
+    for name, start, end in parts:
         try:
             lines = (lane_dir / name).read_text(encoding="utf-8").splitlines()
         except OSError:
@@ -4544,7 +4563,8 @@ def lilguy_read(lane_dir: Path | None = None) -> str | None:
         starts = [i for i, ln in enumerate(lines) if re.match(start, ln)]
         if len(starts) != 1:
             return None
-        stop = next((i for i in range(starts[0] + 1, len(lines)) if re.match(end, lines[i])), None)
+        stop = len(lines) if end is None else \
+            next((i for i in range(starts[0] + 1, len(lines)) if re.match(end, lines[i])), None)
         if stop is None:
             return None
         ranges.setdefault(name, []).append(f"{starts[0] + 1},{stop}p")
@@ -8914,6 +8934,7 @@ def main(argv=None):
     sub.add_parser("window-report")
     sub.add_parser("move-ratio").add_argument("id")
     sub.add_parser("lilguy-fit").add_argument("id")
+    sub.add_parser("lane-read")
     sub.add_parser("claude-paths").add_argument("id")
     sub.add_parser("claude-batch").add_argument("id")
     sub.add_parser("claude-migrate").add_argument("--dry-run", action="store_true")
@@ -9080,6 +9101,8 @@ def main(argv=None):
         if read:
             out = {**out, "read": read}
         print(json.dumps(out))
+    elif a.cmd == "lane-read":
+        print(f"read: {pipeline_read() or 'none'}")
     elif a.cmd == "claude-paths":
         print(json.dumps(cmd_claude_paths(a.dir, a.id)))
     elif a.cmd == "claude-batch":
