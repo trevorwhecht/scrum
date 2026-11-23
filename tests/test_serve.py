@@ -13295,6 +13295,30 @@ class E2eFullTest(unittest.TestCase):
         (self.repo / ".env.local").write_text("A=2\n")
         self.serve.e2e_full_worktree(self.repo, self.root, self.base)
         self.assertEqual((self.wt / ".env.local").read_text(), "A=2\n", "copied on every run")
+        (self.repo / ".env").write_text("DB=one\n")
+        self.serve.e2e_full_worktree(self.repo, self.root, self.base)
+        (self.repo / ".env").write_text("DB=two\n")
+        self.serve.e2e_full_worktree(self.repo, self.root, self.base)
+        self.assertEqual((self.wt / ".env").read_text(), "DB=two\n", ".env refreshed on every run")
+
+    def test_e2e_worktree_copies_every_untracked_env_file(self):
+        for name, body in ((".env", "DB=x\n"), (".env.local", "L=1\n"), (".env.test", "T=1\n")):
+            (self.repo / name).write_text(body)
+        self.serve.e2e_full_worktree(self.repo, self.root, self.base)
+        self.assertEqual([(self.wt / n).read_text() for n in (".env", ".env.local", ".env.test")],
+                         ["DB=x\n", "L=1\n", "T=1\n"])
+
+    def test_e2e_worktree_skips_tracked_env_file_and_env_dir(self):
+        (self.repo / ".env.example").write_text("EXAMPLE=committed\n")
+        self.git("add", ".env.example")
+        self.git("commit", "-q", "-m", "example")
+        head = self.git("rev-parse", "HEAD")
+        (self.repo / ".env.example").write_text("EXAMPLE=local edit\n")
+        (self.repo / ".envdir").mkdir()
+        (self.repo / ".envdir" / "x").write_text("nested\n")
+        self.serve.e2e_full_worktree(self.repo, self.root, head)
+        self.assertEqual((self.wt / ".env.example").read_text(), "EXAMPLE=committed\n", "a tracked .env* is not copied")
+        self.assertFalse((self.wt / ".envdir").exists(), "a .env* directory is skipped")
 
     def test_e2e_full_run_cwd_is_worktree(self):
         """A held .next/dev/lock in the main checkout never changes the result."""
