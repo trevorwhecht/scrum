@@ -5113,9 +5113,9 @@ class BoardTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             self.assertEqual(self.cli("digest-start")["id"], "001")
         text = (self.root / "digests" / "001" / "timing.md").read_text()
-        self.assertIn("| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls |\n"
-                      "|---|---|---|---|---|---|---|---|---|---|---|\n", text)
-        self.assertIn(f"| {job} | 3h20m | 10m | 10m | - | 3 | 50m, 1h00m, 1h00m | 0m, 0m, 0m | 2 (rounds 2,3) | 1 | ? |\n", text)
+        self.assertIn("| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls | Cloud |\n"
+                      "|---|---|---|---|---|---|---|---|---|---|---|---|\n", text)
+        self.assertIn(f"| {job} | 3h20m | 10m | 10m | - | 3 | 50m, 1h00m, 1h00m | 0m, 0m, 0m | 2 (rounds 2,3) | 1 | ? | - |\n", text)
         self.assertIn("Jobs: 1 · wall 3h20m · rounds 3 · no-change rounds 2 in 1 jobs · E2E lock waits 1 in 1 jobs"
                       " · stalls 1 (0m to resume)\n", text)
         self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{waiting}: 1h30m\n\n"
@@ -5129,7 +5129,7 @@ class BoardTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             self.assertEqual(self.cli("digest-start")["id"], "001")
         text = (self.root / "digests" / "001" / "timing.md").read_text()
-        self.assertIn("| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls |\n", text)
+        self.assertIn("| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls | Cloud |\n", text)
         self.assertIn(f"## RAM holds\n- {held}: 2 holds, free RAM 8%-12%, sessions 13-14\n"
                       f"- {unknown}: 1 holds, free RAM unknown, sessions 3-3\n", text)
         self.assertNotIn(f"- {plain}:", text.split("## RAM holds")[1])
@@ -5747,6 +5747,34 @@ class BoardTest(unittest.TestCase):
         (self.root / "jobs/j/claimed-at.txt").write_text(f"{t0 + 2400}\n")  # a later claim wins
         self.assertEqual((row()[3], row()[6]), ("40m", "20m"))
 
+    def test_timing_shop_run_ends_spec_at_dispatch(self):
+        t0 = 1_700_000_000
+        for at, rel in ((0, "feature.md"), (7200, "spec.md"), (7200, "round-1/head.txt")):  # the artifacts came home at 2h
+            p = self.write(f"j/{rel}", "x\n")
+            os.utime(p, (t0 + at, t0 + at))
+        job = {"worker": "shopmac", "updatedAt": datetime.fromtimestamp(t0 + 7200, timezone.utc).isoformat()}
+        cells = board._timing_row(self.root, "j", job, {})[0]
+        self.assertEqual((cells[1], cells[2], cells[3], cells[11]), ("2h00m", "0m", "0m", "2h00m"))  # no shop-at.txt: feature.md stands in
+        (self.root / "jobs/j/shop-at.txt").write_text(f"{t0 + 600}\n")
+        cells = board._timing_row(self.root, "j", job, {})[0]
+        self.assertEqual((cells[1], cells[2], cells[3], cells[11]), ("2h00m", "10m", "0m", "1h50m"))
+        cells = board._timing_row(self.root, "j", {"updatedAt": job["updatedAt"]}, {})[0]  # a local job has no Cloud
+        self.assertEqual(cells[11], "-")
+
+    def test_timing_no_spec_counts_feature_to_first_run_as_queue(self):
+        t0 = 1_700_000_000
+        p = self.write("j/feature.md", "x\n")
+        os.utime(p, (t0, t0))
+        runs = self.root / "runs"
+        runs.mkdir()
+        stamp = datetime.fromtimestamp(t0 + 1800, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        (runs / f"{stamp}-resume-j.log").write_text("x")  # a resume starts nothing
+        self.assertEqual(board._timing_row(self.root, "j", {}, {})[0][2:4], ["-", "-"])
+        (runs / f"{stamp}-start-j.log").write_text("x")
+        job = {"depends_on": ["a"], "updatedAt": datetime.fromtimestamp(t0 + 3600, timezone.utc).isoformat()}
+        cells = board._timing_row(self.root, "j", job, {})[0]
+        self.assertEqual((cells[1], cells[2], cells[3], cells[4]), ("1h00m", "-", "30m", "depends_on:a"))
+
     def timing_cell(self, waits, files=((6600, "round-1/a.md"), (7200, "round-1/head.txt"))):
         """Round-1 time cell for a 2h round (spec.md at t0) with the given wait starts (secs after t0)."""
         t0 = 1_700_000_000
@@ -5798,7 +5826,7 @@ class BoardTest(unittest.TestCase):
         (self.root / "digests" / "001").mkdir(parents=True)
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             board.write_timing(self.root, "001", ["j"])
-        self.assertIn("| j | - | 0m | 0m | - | 1 | 2h00m | 0m | 0 | 0 | open, open |", (self.root / "digests" / "001" / "timing.md").read_text())
+        self.assertIn("| j | - | 0m | 0m | - | 1 | 2h00m | 0m | 0 | 0 | open, open | - |", (self.root / "digests" / "001" / "timing.md").read_text())
 
     def test_timing_counts_queue_wait(self):
         t0 = 1_700_000_000
@@ -5817,7 +5845,7 @@ class BoardTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             board.write_timing(self.root, "001", ["j"])
         text = (self.root / "digests" / "001" / "timing.md").read_text()
-        self.assertIn("| j | - | 0m | 0m | - | 1 | 1h30m | 0m | 0 | 1 | 0 |", text)
+        self.assertIn("| j | - | 0m | 0m | - | 1 | 1h30m | 0m | 0 | 1 | 0 | - |", text)
         self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{held}: 1h30m\n", text)
 
     def human_log(self, t0, rows):
@@ -5912,8 +5940,8 @@ class BoardTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             board.write_timing(self.root, "001", ["j", "k"])
         text = (self.root / "digests" / "001" / "timing.md").read_text()
-        self.assertIn(" | 34m, open, ? |\n", text)
-        self.assertTrue(text.split("| k |")[1].split("\n")[0].endswith(" | 0 |"))
+        self.assertIn(" | 34m, open, ? | - |\n", text)
+        self.assertTrue(text.split("| k |")[1].split("\n")[0].endswith(" | 0 | - |"))
         self.assertIn(" · stalls 3 (34m to resume)\n", text)
 
     def test_timing_wait_clamped_and_merged(self):
@@ -5944,13 +5972,13 @@ class BoardTest(unittest.TestCase):
         self.write("j/spec.md", "s\n")
         stalls = {"j": [None]}
         row = lambda: board._timing_row(self.root, "j", {}, stalls)[0]
-        self.assertEqual(row()[-1], "?")  # no file
+        self.assertEqual(row()[10], "?")  # no file
         holds = self.root / "jobs/j/stall-holds.txt"
         holds.write_text("")
-        self.assertEqual(row()[-1], "?")  # empty file
+        self.assertEqual(row()[10], "?")  # empty file
         holds.write_text("cpu_load(212%)\ne2e_queue\n")
-        self.assertEqual(row()[-1], "? (held: cpu_load(212%), e2e_queue)")
-        self.assertEqual(len(row()), 11)  # one cell more would break the table header
+        self.assertEqual(row()[10], "? (held: cpu_load(212%), e2e_queue)")
+        self.assertEqual(len(row()), 12)  # one cell more would break the table header
 
     def test_timing_row_claim_clock(self):
         t0 = 1_700_000_000
@@ -6061,7 +6089,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(row(dep, blocker(updatedAt=at(-600)))[3], "3h05m (3h05m after depends_on)")  # before feature.md
         self.assertEqual(row(dep, blocker(), "none")[3], "-")  # no spec.md: no Queue
         cells = row(dep, blocker())
-        self.assertEqual((cells[4], len(cells)), ("depends_on:1-a", 11))  # one cell more would break the table header
+        self.assertEqual((cells[4], len(cells)), ("depends_on:1-a", 12))  # one cell more would break the table header
         self.write("j/queue-gates.txt", "ram_room\n")
         self.assertEqual(row(dep, blocker())[3:5], ["3h05m (35m after depends_on)", "ram_room"])
 

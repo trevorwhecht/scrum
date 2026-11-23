@@ -3206,7 +3206,7 @@ def _deps_done_at(job, by_id):
 def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=None):
     """(row cells, wall secs, rounds, no-change rounds, E2E lock waits, stall secs to resume) for one claimed job. The no-change cell is the count and the later round of each
     equal pair, e.g. `2 (rounds 2,3)`. Created is feature.md's
-    mtime (else spec.md's), Spec starts at claimed-at.txt (cmd_ready) when sane, the wait before it counting as Queue; done is the board updatedAt; each round's time runs from the previous round's last file
+    mtime (else spec.md's), Spec starts at claimed-at.txt (cmd_ready) when sane, the wait before it counting as Queue; a shop run (board `worker`/`shop`) ends Spec at shop-at.txt (serve.py shop_tick; else the claim, else feature.md) and shows done minus that as Cloud, the last cell; with no spec.md (a lilguy job) feature.md to the first run log is Queue; done is the board updatedAt; each round's time runs from the previous round's last file
     (round 1: the build start, see _build_start) to its own last file, less the queue/machine waits in `waits` (epoch secs) and the needs-human `human` (start, end) spans, shown in Human wait.
     Each dep-waits.txt line (cmd_wait_on: `<epoch> <blocker>`) runs to the job's next run log (_run_starts), else
     spec.md's mtime; clipped to the Spec window, it moves from Spec to Queue. `stalls` maps a job id to its stall
@@ -3222,19 +3222,28 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
     created = _mtime(folder / "feature.md") or _mtime(folder / "spec.md")
     done, spec_at = _epoch(job.get("updatedAt")), _mtime(folder / "spec.md")
     wall = done - created if done and created else None
+    try:  # cmd_ready's claim (a BigBoy child; a hand start has none)
+        claimed = float((folder / "claimed-at.txt").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        claimed = None
+    cloud = None
+    if job.get("worker") or job.get("shop"):  # a shop run: spec.md and every round file are stamped when its artifacts came home, so Spec ends at the dispatch
+        try:
+            cloud = float((folder / "shop-at.txt").read_text(encoding="utf-8").strip())  # serve.py shop_tick, at the stage-cloud mark
+        except (OSError, ValueError):
+            cloud = claimed or created  # jobs dispatched before shop-at.txt: the claim wrote feature.md within minutes of it
+        spec_at = cloud
     rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*") if re.fullmatch(r"round-\d+", p.name) and p.is_dir())
     start = _build_start(root, job_id)
-    if spec_at and start and start >= spec_at:
-        queue = start - spec_at
+    qfrom = spec_at or created  # no spec.md (a lilguy job): feature.md to the first run log is Queue
+    if qfrom and start and start >= qfrom:
+        queue = start - qfrom
     else:  # no start log (a Run all or BigBoy child): round 1 starts at the claim or first run log after spec.md, the gap is Queue
         runs = _run_starts(root, job_id, ("resume",))  # a resume continues a session, it never starts round 1
-        try:
-            claim = float((folder / "claimed-at.txt").read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            claim = None
-        first = None if start or not spec_at else claim if claim and claim > spec_at else next((r for r in runs if r > spec_at), None)
-        start, queue = (first, first - spec_at) if first else (spec_at, 0 if spec_at else None)
-    pieces = [(spec_at, spec_at + queue)] if queue else []  # each (from, to) the Queue adds up, for `after depends_on`
+        claim = claimed
+        first = None if start or not qfrom else claim if claim and claim > qfrom else next((r for r in runs if r > qfrom), None)
+        start, queue = (first, first - qfrom) if first else (spec_at, 0 if spec_at else None)
+    pieces = [(qfrom, qfrom + queue)] if queue else []  # each (from, to) the Queue adds up, for `after depends_on`
     times, hwaits, heads, prev = [], [], [], start or created
     mtimes = sorted(t for q in folder.rglob("*") if (t := _mtime(q))) if waits else []
     runs = _run_starts(root, job_id)
@@ -3255,10 +3264,8 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
     same = [n for n, a, b in zip(rounds[1:], heads, heads[1:]) if a and a == b]
     waits = sum(len(E2E_LOCK_RE.findall(t)) for t in _round_text(folder, "check.md")) + len(queued)
     spec = spec_at - created if spec_at and created else None
-    try:  # cmd_ready's claim: a BigBoy child's dependency wait counts as Queue, not Spec
-        claim = float((folder / "claimed-at.txt").read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):  # no claim (a hand start): the first run log before spec.md stands in
-        claim = next((r for r in runs if created and spec_at and created <= r <= spec_at), None)
+    # cmd_ready's claim: a BigBoy child's dependency wait counts as Queue, not Spec; with no claim (a hand start) the first run log before spec.md stands in
+    claim = claimed if claimed is not None else next((r for r in runs if created and spec_at and created <= r <= spec_at), None)
     spec_from = created
     if claim and spec_at and created and created <= claim <= spec_at:
         spec, queue, spec_from = spec_at - claim, queue + claim - created, claim
@@ -3295,13 +3302,14 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
         after = min(sum(max(b - max(a, blocked), 0) for a, b in pieces), queue)
         queue_cell += f" ({_mins(after)} after depends_on)"
     cells = [job_id, _mins(wall), _mins(spec), queue_cell, gates, str(len(rounds)), paused + ", ".join(times) or "-",
-             ", ".join(hwaits) or "-", f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0"]
+             ", ".join(hwaits) or "-", f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0",
+             _mins(done - cloud if cloud and done and done >= cloud else None)]
     try:  # serve.py note_stall_hold: what held its stalls
         held = (folder / "stall-holds.txt").read_text(encoding="utf-8", errors="replace").split()
     except OSError:
         held = []
     if held:
-        cells[-1] += f" (held: {', '.join(held)})"
+        cells[10] += f" (held: {', '.join(held)})"
     return cells, wall, len(rounds), len(same), waits, resume
 
 
@@ -3340,8 +3348,8 @@ def write_timing(root, digest_id, jobs):
     rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ()), human.get(j, ()), queue.get(j, ()), board)
             for j in jobs]
     lines = [f"# Timing: digest {digest_id}", "",
-             "| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls | Cloud |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     lines += ["| " + " | ".join(r[0]) + " |" for r in rows]
     lines += ["", "## Totals",
               f"Jobs: {len(rows)} · wall {_mins(sum(r[1] for r in rows if r[1]))} · rounds {sum(r[2] for r in rows)}"
