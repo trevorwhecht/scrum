@@ -97,6 +97,17 @@ def runs_on(text, terms, asked):
     return q, raw, "main" if v >= high else "any" if v <= low else "unsure"
 
 
+def bigboy_child(job):
+    """True when the board entry of job (a jobs/<id> folder) has a `parent` whose lane is `bigboy`: its planner ticket
+    already names its files. False on any read problem."""
+    try:
+        jobs = board.read_board(job.parent.parent).get("jobs", [])
+        me = next(j for j in jobs if j.get("id") == job.name)
+        return any(j.get("id") == me.get("parent") and j.get("lane") == "bigboy" for j in jobs)
+    except (Exception, SystemExit):
+        return False
+
+
 def decide(step, job, asked):
     """(question, raw answer, decision); question and raw are '-' when no Jev call was made.
     asked gets the question appended just before each Jev call, so main() can tell if one started."""
@@ -106,6 +117,8 @@ def decide(step, job, asked):
         text = f.read_text() if f.exists() else ""
         if not text.strip():
             return "-", "-", "opus"
+        if step == "spec-model" and bigboy_child(job):  # the planner ticket already names the files: no Jev call
+            return "-", "BigBoy child", "sonnet"
         if step == "model":  # same order as board.job_complex: feature.md's header first, else spec.md's
             for name in ("feature.md", "spec.md"):
                 v = board.header_value(job / name, "Complex", ("yes", "no"))

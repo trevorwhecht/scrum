@@ -1,4 +1,4 @@
-import importlib.util, io, os, sys, tempfile, unittest
+import importlib.util, io, json, os, sys, tempfile, unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -155,6 +155,19 @@ class JevGateTest(unittest.TestCase):
             with self.subTest(score=score):
                 out, f = self.gate("spec-model", ask=lambda s, q, *a, v=score: {"q": {"type": "score", "score": v}})
                 self.assertEqual((out, f[1], f[4]), (want, "spec-model", want))
+
+    def test_spec_model_bigboy_child_skips_jev(self):
+        (self.job / "feature.md").write_text("# Feature\nAdd a button")
+        for parent_lane, want in (("bigboy", "sonnet"), ("runall", "opus")):
+            with self.subTest(parent_lane=parent_lane):
+                (self.root / "board.json").write_text(json.dumps({"jobs": [
+                    {"id": "000-p", "lane": parent_lane}, {"id": "001-x", "parent": "000-p"}]}))
+                if want == "sonnet":
+                    out, f = self.gate("spec-model")
+                    self.assertEqual((out, f[2], f[3], f[4]), ("sonnet", "-", "BigBoy child", "sonnet"))
+                else:
+                    out, f = self.gate("spec-model", ask=lambda s, q, *a: {"q": {"type": "score", "score": 3}})
+                    self.assertEqual(out, "opus")
 
     def test_spec_model_missing_feature(self):
         out, f = self.gate("spec-model")
