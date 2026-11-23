@@ -13810,12 +13810,13 @@ class HotStopTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         base = Path(self.tmp.name)
-        self.repo = Path(os.path.realpath(base / "repo"))
+        self.repo = self.wt = Path(os.path.realpath(base / "repo"))
         self.root = self.repo / "scrum"
         self.root.mkdir(parents=True)
         (base / "projects.json").write_text(json.dumps([str(self.repo)]))
         for p in (mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "projects.json")}),
                   mock.patch.object(serve, "HOT_STOP_WAIT", 1),
+                  mock.patch.object(serve, "e2e_full_worktree", return_value=self.repo),  # a plain dir: no git here
                   mock.patch.object(serve.board, "listeners", return_value=[])):
             p.start()
             self.addCleanup(p.stop)
