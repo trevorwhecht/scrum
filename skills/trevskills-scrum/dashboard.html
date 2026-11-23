@@ -1238,6 +1238,7 @@ const statusLine = job => !job.waitingOn && job.play_queued && job.ram_hold && !
   : !job.waitingOn && job.play_queued && !playQueued(job) && !job.shopWait && !["done", "aborted"].includes(job.stage)
   ? String(job.resumeRefusal || "").startsWith("waiting: ") ? "Queued: starts when CPU/RAM frees up" : "Queued, starts next"
   : noPaths(job.stage === "done" ? "Done" : job.stage === "aborted" ? "Aborted"
+  : job.heldBy ? `Held by ${job.heldBy.replace(/_/g, " ")}`
   : job.waitingOn ? `Waiting on ${(job.waitingOn.ids || []).map((id, i) => job.waitingOn.titles?.[i] ? `${id} ${job.waitingOn.titles[i]}` : id).join(", ")} (${job.waitingOn.why})`
   : job.paused ? "Paused by you"
   : job.resumeRefusal ? `${String(job.resumeRefusal).startsWith("lilguy job") ? "Can't resume" : "Waiting"}: ${String(job.resumeRefusal).split(" Fix: ")[0]}`

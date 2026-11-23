@@ -9610,6 +9610,35 @@ class WatchdogIdleParentTest(unittest.TestCase):
             if not woke:
                 self.assertEqual(self.gate_text("002-second"), "cpu_load(501%)\n")
 
+    def test_wake_waiting_notes_heavy_cap_and_cool_down_holds(self):
+        """A ready waiting job passed over by the heavy cap or the cool-down hold has the gate in queue-gates.txt."""
+        for gate, patches in (("heavy_cap", {"heavy_cap_reason": "at cap"}), ("cool_down", {})):
+            self.queue_board({"id": "001-first", "stage": "done"},
+                             {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})
+            (self.root / "jobs" / "002-second").mkdir(parents=True, exist_ok=True)
+            (self.root / "jobs" / "002-second" / "queue-gates.txt").unlink(missing_ok=True)
+            why = self.board.COOLING if gate == "cool_down" else None
+            with mock.patch.object(self.serve, "spawn") as spawn, \
+                    mock.patch.object(self.board, "machine_ok", side_effect=lambda root, claim=False: why if claim else None), \
+                    mock.patch.object(self.board, "ram_room", return_value=1), \
+                    mock.patch.object(self.board, "usage_allowance", return_value=None), \
+                    mock.patch.object(self.board, "heavy_cap_reason", return_value=patches.get("heavy_cap_reason")):
+                self.serve.wake_waiting("idle", self.root)
+            spawn.assert_not_called()
+            self.assertEqual(self.job("002-second")["stage"], "waiting", gate)
+            self.assertEqual(self.gate_text("002-second"), gate + "\n", gate)
+
+    def test_board_feed_held_by_names_the_gate_of_a_ready_waiting_job(self):
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]},
+                         {"id": "003-third", "stage": "waiting", "depends_on": ["002-second"]})
+        (self.root / "jobs" / "002-second").mkdir(parents=True, exist_ok=True)
+        self.serve.note_queue_gate(self.root, "002-second", "heavy_cap")
+        jobs = {j["id"]: j for j in self.serve.board_with_activity(self.root, "idle")["jobs"]}
+        self.assertEqual(jobs["002-second"].get("heldBy"), "heavy_cap")
+        self.assertNotIn("heldBy", jobs["003-third"])
+        self.assertEqual(jobs["003-third"]["waitingOn"]["ids"], ["002-second"])
+
     def test_wake_waiting_holds_without_ram_room(self):
         self.queue_board({"id": "001-first", "stage": "done"},
                          {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})
