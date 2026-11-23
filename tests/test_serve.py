@@ -16032,6 +16032,110 @@ class E2eDevOrphanStopTest(unittest.TestCase):
         self.assertEqual(stop.call_args_list, [mock.call(5001)])
 
 
+class ViewRouteTest(unittest.TestCase):
+    """Job 1363: POST /api/p/<project>/jobs/<id>/view runs `open -a <app> [<path>]` for the job's view.md line, and only
+    for a needs-human edit job asking EDIT_APPROVE with an allowed app and a real file under an allowed folder."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.home = self.base / "home"
+        self.vid = self.home / "Developer" / "vid-img-editing"
+        self.mock = self.home / "Desktop" / "Mockups"
+        for d in (self.vid / "motion", self.mock, self.base / "outside"):
+            d.mkdir(parents=True)
+        self.clip = self.vid / "motion" / "master.mp4"
+        self.clip.write_bytes(b"x")
+        (self.mock / "a.svg").write_text("<svg/>")
+        (self.base / "outside" / "secret.mp4").write_bytes(b"x")
+        self.root = self.vid / "scrum"
+        (self.root / "jobs" / "010-cut").mkdir(parents=True)
+        self.job = {"id": "010-cut", "stage": "needs-human", "lane": "edit", "stopTitle": "EDIT_APPROVE"}
+        env = mock.patch.dict(os.environ, HOME=str(self.home))
+        env.start(); self.addCleanup(env.stop)
+        run = mock.patch.object(serve.subprocess, "run", return_value=mock.Mock(returncode=0, stderr=""))
+        self.run = run.start(); self.addCleanup(run.stop)
+
+    def put(self, job=None, line=None):
+        job = job or self.job
+        (self.root / "board.json").write_text(json.dumps({"jobs": [job]}))
+        if line is not None:
+            (self.root / "jobs" / "010-cut" / "view.md").write_text(line)
+
+    def view(self):
+        return self.serve.Handler.route(None, "edit", self.root, "/jobs/010-cut/view", {})
+
+    def refused(self, why):
+        code, out = self.view()
+        self.assertTrue(400 <= code < 500, (why, code, out))
+        self.assertTrue(out["error"], why)
+        self.run.assert_not_called()
+
+    def test_opens_each_app(self):
+        for line, argv in ((f"View: QuickTime Player {self.clip}\n", ["open", "-a", "QuickTime Player", os.path.realpath(self.clip)]),
+                           ("View: Edits\n", ["open", "-a", "Edits"]),
+                           (f"View: VectorCraft {self.mock / 'a.svg'}\n", ["open", "-a", "VectorCraft", os.path.realpath(self.mock / "a.svg")]),
+                           (f"View: PhotoCraft {self.mock / 'a.svg'}\n", ["open", "-a", "PhotoCraft", os.path.realpath(self.mock / "a.svg")])):
+            with self.subTest(line=line):
+                self.run.reset_mock()
+                self.put(line=line)
+                code, out = self.view()
+                self.assertEqual(code, 200, out)
+                self.assertEqual(self.run.call_args.args[0], argv)
+
+    def test_refusals_run_nothing(self):
+        outside = self.base / "outside" / "secret.mp4"
+        (self.vid / "motion" / "link.mp4").symlink_to(outside)
+        sibling = self.home / "Developer" / "vid-img-editing-x"
+        sibling.mkdir()
+        (sibling / "m.mp4").write_bytes(b"x")
+        for why, line in (("app not allowed", f"View: Terminal {self.clip}\n"),
+                          ("app lookalike", f"View: QuickTimePlayer {self.clip}\n"),
+                          ("dotdot", f"View: QuickTime Player {self.vid}/motion/../../../outside/secret.mp4\n"),
+                          ("symlink out", f"View: QuickTime Player {self.vid}/motion/link.mp4\n"),
+                          ("outside folder", f"View: QuickTime Player {outside}\n"),
+                          ("sibling prefix", f"View: QuickTime Player {sibling}/m.mp4\n"),
+                          ("missing file", f"View: QuickTime Player {self.vid}/motion/nope.mp4\n"),
+                          ("relative", "View: QuickTime Player motion/master.mp4\n"),
+                          ("no path", "View: VectorCraft\n"),
+                          ("edits with path", f"View: Edits {self.clip}\n"),
+                          ("empty", ""), ("malformed", f"QuickTime Player {self.clip}\n")):
+            with self.subTest(why=why):
+                self.put(line=line)
+                self.refused(why)
+
+    def test_missing_view_md_and_wrong_job_refused(self):
+        self.put()
+        self.refused("no view.md")
+        line = f"View: QuickTime Player {self.clip}\n"
+        for why, job in (("other title", {**self.job, "stopTitle": "VIDEO_REVIEW"}),
+                         ("not needs-human", {**self.job, "stage": "build"}),
+                         ("other lane", {**self.job, "lane": "standard"})):
+            with self.subTest(why=why):
+                self.put(job, line)
+                self.refused(why)
+
+    def test_open_failure_returns_stderr(self):
+        self.put(line=f"View: QuickTime Player {self.clip}\n")
+        self.run.return_value = mock.Mock(returncode=1, stderr="Unable to find application\n")
+        code, out = self.view()
+        self.assertEqual((code, out), (502, {"error": "Unable to find application"}))
+
+    def test_board_flags_view_only_when_valid(self):
+        for name in ("checkout_alert", "hog_alert"):  # these shell out; the mocked subprocess.run is only for `open`
+            p = mock.patch.object(self.serve, name, return_value=None)
+            p.start(); self.addCleanup(p.stop)
+        self.put(line=f"View: QuickTime Player {self.clip}\n")
+        self.serve.BOARD_ACTIVITY_CACHE.clear()
+        self.addCleanup(self.serve.BOARD_ACTIVITY_CACHE.clear)
+        self.assertIs(self.serve.board_with_activity(self.root, "edit")["jobs"][0].get("view"), True)
+        self.put(line="View: Terminal /x\n")
+        self.serve.BOARD_ACTIVITY_CACHE.clear()
+        self.assertNotIn("view", self.serve.board_with_activity(self.root, "edit")["jobs"][0])
+
+
 if __name__ == "__main__":
     unittest.main()
 
