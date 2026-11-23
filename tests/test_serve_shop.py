@@ -1347,8 +1347,15 @@ class ShopTickTest(unittest.TestCase):
     # --- job 1314: this Mac's heavy cap and the shop worker's heavy limit ---
     STARTED = [{"id": "001-a", "stage": "build"}, {"id": "002-b", "stage": "check"}]  # two started heavy jobs: this Mac is at its cap
 
+    def started_sessions(self):
+        """Job 1368: STARTED jobs count toward the cap only with a live session each, so give them two."""
+        p = mock.patch.object(self.board, "live_sessions", return_value=2)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_heavy_cap_shop_sends_heavy_before_fast(self):
         """At this Mac's cap shop_tick sends a heavy held job before a fast one; below it, fast goes first."""
+        self.started_sessions()
         for name, started, want in (("at the cap", self.STARTED, "060-h"), ("below the cap", self.STARTED[:1], "070-f")):
             with self.subTest(name):
                 self.sh.reset_mock()
@@ -1359,6 +1366,7 @@ class ShopTickTest(unittest.TestCase):
 
     def test_heavy_cap_worker_with_heavy_job_gets_light_one(self):
         """A worker running one heavy job skips the heavy job in the pool and takes the first light one."""
+        self.started_sessions()
         running = {"id": "010-c", "stage": "cloud", "shop": "11", "worker": "shopmac", "account": "main",
                    "likely": ["src/z.py"]}  # files known: a cloud job with none would hold every launch
         root = self.project("mm", [*self.STARTED, running, self.queued("060-h", likely=["src/a.py"]),
@@ -1374,6 +1382,7 @@ class ShopTickTest(unittest.TestCase):
             self.assertNotIn("start", self.calls())
 
     def test_heavy_cap_serve_launches_hold_heavy_and_start_light(self):
+        self.started_sessions()
         os.environ["SCRUM_FREE_RAM"] = "100"
         serve, board = self.serve, self.board
         with self.subTest("idle_claim"):
@@ -1403,7 +1412,7 @@ class ShopTickTest(unittest.TestCase):
                 root = self.project("mm", list(self.STARTED), AUTO)
                 self.backlog(root, line)
                 with mock.patch.object(serve, "spawn") as spawn, mock.patch.object(board, "machine_ok", return_value=None), \
-                        mock.patch.object(board, "live_sessions", return_value=0), mock.patch.object(serve, "running", return_value=False), \
+                        mock.patch.object(board, "live_sessions", return_value=2), mock.patch.object(serve, "running", return_value=False), \
                         mock.patch.object(board, "pick_account", return_value=(None, None)):
                     serve.auto_continue_tick({"mm": False})
                 self.assertEqual(spawn.call_count, 1 if started else 0)

@@ -7631,9 +7631,10 @@ print("stub err", file=sys.stderr)
     def test_heavy_cap_holds_heavy_start(self):
         """Job 1314: a heavy spec-stage start at the cap queues a start launch and raises HeldStart naming heavy_cap."""
         job_id = self.heavy_board()
-        with mock.patch.object(board, "projects", return_value={}), self.assertRaises(board.HeldStart) as cm:
+        with mock.patch.object(board, "projects", return_value={}), mock.patch.object(board, "live_sessions", return_value=2), \
+                self.assertRaises(board.HeldStart) as cm:
             board.spawn(self.root, job_id, "start", "/p start")
-        self.assertIn("heavy_cap(2/2): 2 heavy jobs on this Mac", str(cm.exception))
+        self.assertIn("heavy_cap(2/2): 2 heavy jobs on this Mac (901-a, 902-b)", str(cm.exception))
         row = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
         self.assertEqual(row["queued_launch"], {"action": "start", "prompt": "/p start", "stage": "spec"})
         self.assertFalse(self.out.exists(), "the stub claude never ran")
@@ -14781,8 +14782,10 @@ class HeavyCapBase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / "repo" / "scrum"
         self.root.mkdir(parents=True)
+        self.sessions = mock.Mock(return_value=9)  # live_sessions(): plenty, so only the stage counts unless a test lowers it
         for p in (mock.patch.object(board, "projects", return_value={}),
-                  mock.patch.object(board, "session_alive_fn", return_value=lambda job: False)):
+                  mock.patch.object(board, "session_alive_fn", return_value=lambda job: False),
+                  mock.patch.object(board, "live_sessions", self.sessions)):
             p.start()
             self.addCleanup(p.stop)
 
@@ -14801,7 +14804,20 @@ class HeavyCapReasonTest(HeavyCapBase):
         self.jobs({"id": "001-a", "stage": "build", "lane": "standard"})
         self.assertIsNone(board.heavy_cap_reason(self.root))
         self.jobs({"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "check", "lane": "debug"})
-        self.assertEqual(board.heavy_cap_reason(self.root), "heavy_cap(2/2): 2 heavy jobs on this Mac")
+        self.assertEqual(board.heavy_cap_reason(self.root), "heavy_cap(2/2): 2 heavy jobs on this Mac (001-a, 002-b)")
+
+    def test_watched_jobs_without_sessions_never_fill_the_cap(self):
+        """Job 1368: heavy_count never exceeds live_sessions(); the reason names the counted job ids."""
+        self.jobs({"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "check", "lane": "standard"},
+                  {"id": "003-c", "stage": "review", "lane": "standard"})
+        self.sessions.return_value = 0
+        self.assertEqual(board.heavy_count(self.root), 0)
+        self.assertIsNone(board.heavy_cap_reason(self.root))
+        self.sessions.return_value = 1
+        self.assertEqual(board.heavy_count(self.root), 1)
+        self.assertIsNone(board.heavy_cap_reason(self.root))
+        self.sessions.return_value = 2
+        self.assertEqual(board.heavy_cap_reason(self.root), "heavy_cap(2/2): 2 heavy jobs on this Mac (001-a, 002-b, 003-c)")
 
     def test_light_job_never_held(self):
         self.jobs({"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "check", "lane": "standard"},
@@ -14823,7 +14839,7 @@ class HeavyCapReasonTest(HeavyCapBase):
         self.jobs({"id": "001-a", "stage": "build", "lane": "standard"}, {"id": "002-b", "stage": "spec", "lane": "standard"})
         self.jobs({"id": "001-z", "stage": "check", "lane": "standard"}, root=other)
         with mock.patch.object(board, "projects", return_value={"o": other.parent}):
-            self.assertEqual(board.heavy_cap_reason(self.root), "heavy_cap(3/2): 3 heavy jobs on this Mac")
+            self.assertEqual(board.heavy_cap_reason(self.root), "heavy_cap(3/2): 3 heavy jobs on this Mac (001-a, 002-b, 001-z)")
             self.assertEqual(board.heavy_count(self.root), 3)
             self.assertEqual(board.heavy_count(self.root, skip="002-b"), 2)
 
