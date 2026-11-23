@@ -119,13 +119,13 @@ def decide(step, job, asked):
             return "-", "-", "opus"
         if step == "spec-model" and bigboy_child(job):  # the planner ticket already names the files: no Jev call
             return "-", "BigBoy child", "sonnet"
-        if step == "model":  # same order as board.job_complex: feature.md's header first, else spec.md's
-            for name in ("feature.md", "spec.md"):
-                v = board.header_value(job / name, "Complex", ("yes", "no"))
-                if v:
-                    if v == "no":  # the header already says not complex: no Jev call
-                        return "-", f"Complex: no ({name})", "sonnet"
-                    break
+        # model: feature.md's header first, else spec.md's (board.job_complex); spec-model: feature.md only, spec.md is not written yet
+        for name in ("feature.md", "spec.md")[:1 if step == "spec-model" else 2]:
+            v = board.header_value(job / name, "Complex", ("yes", "no"))
+            if v:
+                if v == "no":  # the header already says not complex: no Jev call
+                    return "-", f"Complex: no ({name})", "sonnet"
+                break
         asked.append(q)
         v, raw = jev.score(text, q, LEVELS)
         return q, raw, "sonnet" if v < cut else "opus"
