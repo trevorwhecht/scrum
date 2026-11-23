@@ -28,6 +28,7 @@ class ResumeOutcomeTest(unittest.TestCase):
         for patch in (mock.patch.object(board, "merge_refusal", return_value=None),
                       mock.patch.object(board, "projects", return_value={"repo": self.repo}),
                       mock.patch.object(board, "session_alive_fn", return_value=lambda job: False),
+                      mock.patch.object(board, "ram_room", return_value=5),  # live sessions never queue the resume
                       mock.patch.dict(os.environ, {"SCRUM_USAGE": str(Path(self.tmp.name) / "no-usage.json")})):
             patch.start()
             self.addCleanup(patch.stop)
