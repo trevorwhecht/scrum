@@ -551,6 +551,7 @@ def wake_waiting(project, root):
         return
     why = board.machine_ok(root, claim=True) or board.finish_first(root)
     cooling = why == board.COOLING or bool(why and why.startswith((board.FINISH_FIRST, board.SOFT_COOLING)))
+    cool_gate = held_gate(why) if cooling else None  # the gate a plain job held below is noted with
     if cooling:  # only a parked wake job passes; plain waiting jobs stay held (hold below)
         why = board.machine_ok(root) or (None if any(j.get("wake") for j in filter(board.parked_waiting, board.read_board(root)["jobs"])) else why)
     if why:
@@ -569,8 +570,14 @@ def wake_waiting(project, root):
     if cpu_hot():  # re-read right before the claim
         note_held(root, cpu_token(), ready_waiting(root))
         return
-    out = board.wake_waiting(root, room, hold=lambda j: (cooling and not j.get("wake")) or j.get("wake") and board.resume_blocker(
-        root, j["id"], live_ids(project)) or (not j.get("wake") and board.heavy_cap_reason(root, j)))  # job 1314: a heavy start at the cap waits
+    def hold(j):  # runs inside board.wake_waiting's lock: note_queue_gate writes only jobs/<id>/queue-gates.txt
+        if j.get("wake"):
+            return board.resume_blocker(root, j["id"], live_ids(project))
+        gate = cool_gate if cooling else "heavy_cap" if board.heavy_cap_reason(root, j) else None  # job 1314: a heavy start at the cap waits
+        if gate:
+            note_held(root, gate, [j["id"]])  # job 1404: the card and chat name the hold
+        return bool(gate)
+    out = board.wake_waiting(root, room, hold=hold)
     for job_id in out["ready"]:
         spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
     for job_id in out.get("retry", []):
@@ -6144,6 +6151,10 @@ def board_with_activity(root, project):
         if job.get("stage") == "waiting" and (deps := [d for d in job.get("depends_on") or []
                                                        if stage.get(d) not in ("done", "aborted")]):
             job["waitingOn"] = {"ids": deps, "why": "not merged yet"}  # parked by board.py wait-on, or a sibling's wait
+        if job.get("stage") == "waiting" and not job.get("waitingOn") and (deps := job.get("depends_on") or []) \
+                and all(stage.get(d) == "done" for d in deps) \
+                and (gates := sorted(g for g in gate_heads(root, job) if not (g.startswith("depends_on:") and stage.get(g[11:]) == "done"))):
+            job["heldBy"] = ", ".join(gates)  # job 1404: every blocker merged, so name the gate that still holds it
         hold = job.get("overlap_hold") or {}
         if job.get("stage") == "waiting" and not job.get("waitingOn") and (
                 ids := [i for i in hold.get("ids") or [] if stage.get(i) not in ("done", "aborted")]):

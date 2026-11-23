@@ -3049,6 +3049,23 @@ class ServeTest(unittest.TestCase):
         self.edit_job(first, stage="done")
         self.assertNotIn("waitingOn", self.board_jobs()[second])
 
+    def test_board_json_held_by_names_gate_after_blockers_merged(self):
+        """Job 1404: a waiting job whose depends_on are all done gets heldBy from its fresh queue-gates.txt, minus depends_on gates."""
+        b = self.serve.board
+        first, second = (b.cmd_new(self.root, t) for t in ("Blocker", "Parked"))
+        self.addCleanup(lambda: self.edit_job(second, stage="aborted"))
+        self.edit_job(first, stage="merging")
+        self.edit_job(second, stage="waiting", depends_on=[first], reason=f"waiting on {first}")
+        gates = self.root / "jobs" / second / "queue-gates.txt"
+        gates.parent.mkdir(parents=True, exist_ok=True)
+        gates.write_text(f"depends_on:{first}\nheavy_cap\n")
+        self.assertNotIn("heldBy", self.board_jobs()[second], "still waiting on the blocker")
+        self.edit_job(first, stage="done")
+        self.assertEqual(self.board_jobs()[second]["heldBy"], "heavy_cap")
+        old = time.time() - self.serve.GATE_FRESH_SECS - 5
+        os.utime(gates, (old, old))
+        self.assertNotIn("heldBy", self.board_jobs()[second], "a stale gate file names no current hold")
+
     def test_board_json_waiting_on_overlap_hold(self):
         # Job 764: cmd_ready's overlap_hold becomes the waiting card's "Waiting on" line.
         b = self.serve.board
@@ -9641,6 +9658,26 @@ class WatchdogIdleParentTest(unittest.TestCase):
         spawn.assert_not_called()
         self.assertEqual(self.job("002-second")["stage"], "waiting")
         self.assertEqual(self.gate_text("002-second"), "session_cap(14/14)\n")
+
+    def test_wake_waiting_notes_cool_down_and_heavy_cap_holds(self):
+        """Job 1404: a plain waiting job held by cool-down or the heavy cap has that gate in queue-gates.txt."""
+        b = self.board
+        for gate, kw in (("cool_down", dict(machine_ok=lambda root, claim=False: b.COOLING if claim else None)),
+                         ("heavy_cap", dict(heavy_cap_reason=lambda root, job=None: "at the heavy cap"))):
+            self.waiting_pair()
+            (self.root / "jobs" / "002-second" / "queue-gates.txt").unlink(missing_ok=True)
+            patches = [mock.patch.object(self.serve, "spawn"), mock.patch.object(b, "ram_room", return_value=2),
+                       mock.patch.object(b, "usage_allowance", return_value=None),
+                       mock.patch.object(b, "machine_ok", return_value=None), mock.patch.object(b, "finish_first", return_value=None)]
+            patches += [mock.patch.object(b, k, side_effect=v) for k, v in kw.items()]
+            with contextlib.ExitStack() as st:
+                spawn = st.enter_context(patches[0])
+                for p in patches[1:]:
+                    st.enter_context(p)
+                self.serve.wake_waiting("idle", self.root)
+            spawn.assert_not_called()
+            self.assertEqual(self.job("002-second")["stage"], "waiting", gate)
+            self.assertEqual(self.gate_text("002-second"), f"{gate}\n", gate)
 
     def test_held_gate_tokens(self):
         b = self.board
