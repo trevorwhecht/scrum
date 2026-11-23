@@ -4219,6 +4219,20 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         approval = steps["Final approval"]
         self.assertLess(approval.index("blackdetect"), approval.index("View: Edits"))
         self.assertLess(approval.index("View: Edits"), approval.index("B ask $ID"))
+        # Criterion 5: the headless computer-use proof, measured once, decides whether step 6 may drive Edits.
+        proof = re.findall(r"^\*\*Headless computer use \(measured 2026-11-\d\d\):\*\* (works|does not work)", reel, re.M)
+        self.assertEqual(len(proof), 1, proof)
+        config = skill / "edit" / "computer-use.mcp.json"
+        edits = steps["Edits build"]
+        if proof[0] == "works":
+            json.loads(config.read_text())
+            self.assertIn("skills/trevskills-scrum/edit/computer-use.mcp.json", reel)
+        else:
+            self.assertFalse(config.exists())
+            for phrase in ("The driven path is off", "--a \"I exported it=resume $ID\"",
+                           "--b \"Send back with a note=rework $ID", "--c \"Remove this job=abort $ID --cascade\"",
+                           "With no new export, ask the same question again: never a silent stop"):
+                self.assertIn(phrase, edits, phrase)
         for kind, job in (("edit-vector", "1365-edit-project-edit-vector-and-edit-photo"),
                           ("edit-photo", "1365-edit-project-edit-vector-and-edit-photo")):
             body = [l for l in kind_files[kind].splitlines()[1:] if l.strip()]
