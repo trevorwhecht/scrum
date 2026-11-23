@@ -23,11 +23,48 @@ Song: <title> — first beat <k> at <mm:ss.ff>
 ```
 A round `r<R>` is one run of step 3, counted from 1, one more than the highest in the ledger. An `approve` means the newest exported round. A `rework` note goes into the ledger (step 8) and starts the next round at step 3.
 
-1. **Clips.** 
-2. **Log.** 
-3. **Cut.** 
-4. **Check.** 
-5. **Review.** 
+1. **Clips.** `B set $ID stage=build`. Skip this step when `<folder>/footage/` already holds a `.mov` or `.mp4`. Otherwise check the phone with photos.py `pull` into a scratch folder: `W=$(mktemp -d)` then `uv run --with pymobiledevice3 --with pillow python ~/.claude/skills/trevskills-photo-scan-iphone/photos.py pull "$W"`.
+   - A failure (no phone, locked, not trusted) copies nothing: write its last lines to stop.md in the job folder, then run `B ask $ID 'blocked: the phone is not reachable over USB, so no clips were copied. Please plug in and unlock your phone, then try again, or remove the job?' --a "Try again=resume $ID" --b "Send back with a note=rework $ID \"<what to change>\"" --c "Remove this job=abort $ID --cascade" --title BUILDER_BLOCKED --recommend <key> '<why>'` and stop. A resume retries this step from the top.
+   - Success: `mkdir -p <folder>/footage`, then copy each video of the print day (feature.md's date, else today) from the phone into it under its own file name, read from the pulled `Photos.sqlite` (`ZASSET` rows with `ZKIND` 1 and that day's `ZDATECREATED`, at `/<ZDIRECTORY>/<ZFILENAME>`) through the `phone()` AFC connection photos.py opens, the way its `best_copy` reads a file, never re-encoding or renaming it. Then `trash "$W"`.
+2. **Log.** Run `<py> <instaReels>/reel.py log <folder>` (one GPU decode per new clip; its last line is `<n> clips scanned, <m> rows in footage-log.json, no rows yet: <clips | none>`). Spawn `edit-logger` agents in parallel, in batches of about 35 sheets (the `<clip> <s> s, <n> sheets` lines it printed), for the clips after `no rows yet:`, and wait for all of them, each with this prompt:
+   ```
+   KIND: edit-reel. Step: log. FOLDER: <folder>. Clips: <clip> <clip> ... Where <instaReels>/logger.md differs from
+   your instructions it is newer (the spin stage, one word per ink): follow it. Write <folder>/log/rows/<clip stem>.json
+   for each clip, row by row with the Write tool. Reply with one line per clip: <clip> <rows> rows, then DONE.
+   ```
+   Then rerun `reel.py log <folder>` until it exits 0 with `no rows yet: none`; clips still listed get a new batch. A `Bad rows` exit sends the lines it printed back to a new `edit-logger` for the clips it names, with those lines in its prompt, never to a script that fills rows. After 3 tries on the same clips, write the lines to stop.md and take the shared step 4 ask.
+3. **Cut.** `B set $ID stage=build`, then start round `r<R>`. Before a recut overwrites `shots.json`, zip the old one into `~/Developer/vid-img-editing/motion/video/Archivve/<project>-archive.zip` as `r<R>-<date>/shots.json`, where `r<R>` is the round that wrote it (`r0` for one there before the job): `D=$(mktemp -d)`, `mkdir "$D/r<R>-<date>"`, `cp <folder>/shots.json "$D/r<R>-<date>/"`, `(cd "$D" && zip -9 -m <the archive> r<R>-<date>/shots.json)`, `trash "$D"`. Move the old `<folder>/rough.mov` and `<folder>/out/` sheets to the Trash (`trash <path>`, never `rm`). Nothing in `<folder>/selects/` is ever deleted, moved, renamed or overwritten, whatever round it is from: Edits projects link those files in place. Spawn `edit-builder` and wait for it, with this prompt:
+   ```
+   KIND: edit-reel. Step: cut. FOLDER: <folder>. JOB_DIR: <JOB_DIR> (job ledger reel.md). Round: r<R>. Rules:
+   ~/Developer/vid-img-editing/motion/notes/print-reels.md, its "First cut" section first. Read every row of
+   <folder>/footage-log.json, every note in the ledger's "Trevor's notes", every must fix and left out line of the
+   newest review-N.md whose first line is RECUT, and <JOB_DIR>/check-r<R-1>.txt when the last round failed check.
+   Song: <title>. Find its break and restart (video-edit.md "Finding a song's break") and count the beats back to
+   <first beat>. Prove each stroke, lift and spin on a dense sheet before you use it:
+   <py> <instaReels>/sheet.py <clip> <folder>/out/sheets/<name> 4 <in> <out>. Write <folder>/shots.json from
+   footage-log.json in story order, "tripod": true only on still camera shots. Run
+   <py> <instaReels>/reel.py cut <folder> <beats.json> <first beat>. A refusal: fix shots.json (shorter in/out or more
+   beats) and run it again; never mark a moving shot tripod to pass. Join the files of the selects/<hash>/ folder it
+   printed, in shot order, into <folder>/rough.mov with ffmpeg concat -c copy from a list file in <folder>/out/.
+   Never delete, move, rename or overwrite anything in selects/. Never open Edits. Last line of your reply: the selects
+   folder and the rough.mov path, or BLOCKED: <reason>.
+   ```
+   Record the round and the first beat in the ledger. A `BLOCKED:` line takes the shared step 4 ask, except a `reel.py cut` refusal, which goes to step 4's send back.
+4. **Check.** Run `<py> <instaReels>/reel.py check <folder>` and save its whole output to `$F/jobs/$ID/check-r<R>.txt`. Exit 1, or a `reel.py cut` refusal from step 3, goes back to the builder with its lines (step 3, next round): no reviewer is spawned until check exits 0. After 3 rounds in a row that fail check or cut, write the last lines to stop.md and take the shared step 4 ask.
+5. **Review.** `B set $ID stage=review`. Spawn a fresh `edit-reviewer`, never the session that built the cut, and wait for it, with this prompt:
+   ```
+   KIND: edit-reel. FOLDER: <folder>. JOB_DIR: <JOB_DIR> (job ledger reel.md). N: <N>. Round: r<R>. Make sheets of all
+   of <folder>/rough.mov at 4 fps into <folder>/out/review-<N>/ (<py> <instaReels>/sheet.py <folder>/rough.mov
+   <folder>/out/review-<N>/rough 4) and open every one; make denser sheets (15 to 30 fps) of any stitch, stroke start
+   or stroke end you doubt. Read <folder>/shots.json, every row of <folder>/footage-log.json (every clip, not only the
+   ones in the cut), ~/Developer/vid-img-editing/motion/notes/print-reels.md, the saved check output
+   <JOB_DIR>/check-r<R>.txt and every earlier <JOB_DIR>/review-*.md. A check line, and check passing, is a floor: judge
+   every shot by eye against every rule, the ones check cannot measure first: a sped moving camera, his hand mid stroke
+   in each colour's pull, how long each colour's real pulls run, any shot with ink and nobody printing, the first shot
+   that shows the finished print, a lift after every colour, and the end. Under left out, give for each colour at
+   least one real pull from the log, from more than one angle. Write <JOB_DIR>/review-<N>.md.
+   ```
+   Record it in the ledger. A `RECUT` sends its notes back to step 3 (next round). A `PASS` goes to step 6; so does the third `RECUT` in a row, carrying the reviewer's notes to Trevor's card.
 6. **Edits build.** 
 7. **Final approval.** 
 8. **His notes.** 

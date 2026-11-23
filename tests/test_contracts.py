@@ -4181,6 +4181,26 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for phrase in ("`/` or `..`", "starts nothing", "stop.md", "--a \"Send back with a note=rework $ID \\\"Reel project: <name>\\\"\"",
                        "--b \"Remove this job=abort $ID --cascade\" --title BUILDER_BLOCKED"):
             self.assertIn(phrase, bad, phrase)
+        starts = [reel.index(f"\n{n}. **{name}.**") for n, name in enumerate(names, 1)] + [len(reel)]
+        steps = {name: reel[starts[i]:starts[i + 1]] for i, name in enumerate(names)}
+        for name, phrases in (("Clips", ("`<folder>/footage/` already holds a `.mov` or `.mp4`", "photos.py `pull`",
+                                         "plug in and unlock your phone", "--a \"Try again=resume $ID\"",
+                                         "--c \"Remove this job=abort $ID --cascade\" --title BUILDER_BLOCKED",
+                                         "A resume retries this step")),
+                              ("Log", ("reel.py log <folder>", "`edit-logger`", "about 35 sheets", "no rows yet: none",
+                                       "`Bad rows`", "never to a script that fills rows")),
+                              ("Cut", ("`edit-builder`", "Write <folder>/shots.json from", "footage-log.json",
+                                       "reel.py cut <folder> <beats.json> <first beat>", "-c copy", "rough.mov",
+                                       "Archivve/<project>-archive.zip", "`r<R>-<date>/shots.json`",
+                                       "Nothing in `<folder>/selects/` is ever deleted, moved, renamed or overwritten")),
+                              ("Check", ("reel.py check <folder>", "no reviewer is spawned until check exits 0",
+                                         "a `reel.py cut` refusal")),
+                              ("Review", ("a fresh `edit-reviewer`", "4 fps", "sheet.py", "<folder>/shots.json",
+                                          "footage-log.json", "print-reels.md", "check-r<R>.txt",
+                                          "every earlier <JOB_DIR>/review-*.md", "Write <JOB_DIR>/review-<N>.md"))):
+            for phrase in phrases:
+                self.assertIn(phrase, steps[name], (name, phrase))
+        self.assertLess(reel.index("reel.py check"), reel.index("edit-reviewer"))
         for kind, job in (("edit-vector", "1365-edit-project-edit-vector-and-edit-photo"),
                           ("edit-photo", "1365-edit-project-edit-vector-and-edit-photo")):
             body = [l for l in kind_files[kind].splitlines()[1:] if l.strip()]
