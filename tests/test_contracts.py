@@ -4652,6 +4652,30 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "round-N/review-code.md`, decision.md or human-approval.md"):
             self.assertIn(phrase, job, phrase)
         self.assertIn("**Unreviewed merge.**", cloud)  # job 1105: a gh-api merge skips stage=merging
+        # Job 1414: shop sessions 1390, 1399 and 1404 never ran `B new`; they edited and committed in the clone's main checkout.
+        reviewers = next(l for l in job.splitlines() if l.startswith("   - **Reviewers always run:**"))
+        for phrase in ("Its first command is New job step 1's `B new`",
+                       "never edits, commits, pushes or opens a PR from the clone's main checkout, only from `$WT`",
+                       "never skips a step because the change looks small"):
+            self.assertIn(phrase, reviewers, phrase)
+        claude = (ROOT / "CLAUDE.md").read_text()
+        start = claude.index("\n- An edit made in this checkout from a chat") + 1
+        chat = " ".join(l.strip() for l in claude[start:claude.index("\n- ", start)].splitlines())  # the wrapped bullet
+        self.assertIn("A `/trevskills-scrum cloud-job` session (cloud or shop Mac) is not a chat: it runs every "
+                      "**New job** step in `lanes/cloud.md` and edits only inside its job worktree.", chat)
+
+    def test_shop_ended_work_brought_home_documented(self):
+        # Job 1414: an ended shop session's open PR (#980, #985) was closed and its job rebuilt from scratch.
+        shop = next(l for l in self.lane("shop").splitlines() if l.startswith("- **Results come home through GitHub.**"))
+        for phrase in ("brought home", "the PR left open", "`B cloud-sync` HOME"):
+            self.assertIn(phrase, shop, phrase)
+        cloud = self.lane("cloud")
+        sync = cloud[cloud.index("3. **Sync**"):cloud.index("**Cloud-home tail** (")]
+        for phrase in ("scrum/<number>-<anything>", "except for a job whose shop session ended"):
+            self.assertIn(phrase, sync, phrase)
+        resume = next(l for l in self.lane("commands").splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
+        for phrase in ("skips `git worktree add`", "so the builder continues from the shop session's commits"):
+            self.assertIn(phrase, resume, phrase)
 
     def test_skill_cloud_artifacts_come_home(self):
         cloud = self.lane("cloud")

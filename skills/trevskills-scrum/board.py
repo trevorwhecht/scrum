@@ -163,11 +163,14 @@
   board.py cloud-sync              move each stage-cloud job whose [scrum <id>] PR finished (one gh REST pulls call):
                                    MERGED -> done, CLOSED -> aborted + requeued, open + scrum:needs-human -> needs-human with
                                    the PR comment's reason and a fetched worktree (a requeue:/obsolete:/looks already
-                                   fixed: reason aborts it and closes the PR instead); only a same-repo scrum/<id> head PR and
-                                   its author's comments count. A moved job with no scrum-artifacts/<id> branch yet is
+                                   fixed: reason aborts it and closes the PR instead); only a same-repo scrum/<id>,
+                                   scrum/<number> or scrum/<number>-<slug> head PR and its author's comments count. A
+                                   moved job with no scrum-artifacts/<id> branch yet is
                                    re-checked each run and keeps its mark until cloud-home starts, or until 24 h pass
                                    with no branch; print {"moved","arrived","error"}, exit 1 on a gh error (nothing
-                                   changed). serve.py runs it every 10 min while a job is in stage cloud
+                                   changed). serve.py runs it every 10 min while a job is in stage cloud, passing the
+                                   ids whose shop session ended: such a job's open PR or pushed scrum/<id> branch is
+                                   brought home as a spec stall on a local worktree (HOME); this CLI never passes any
   board.py spawn <id> <action> ["<prompt>"] [--model M]  start a detached headless `claude -p <prompt>` (default
                                    "/trevskills-scrum <action> <id>") from the repo, logging to runs/; start/resume get the
                                    Orchestrator model unless --model; set the job's runlog (ignored when <id> is not on the
