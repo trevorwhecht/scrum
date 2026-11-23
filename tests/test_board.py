@@ -14716,6 +14716,73 @@ class StartedByTest(unittest.TestCase):
         self.assertEqual([self.by(j) for j in ("002-second", "003-third", "004-held")], ["wake", "wake", "hand"])
 
 
+class NewSameTitleTest(unittest.TestCase):
+    """Job 1414: the CLI `new` refuses a title an open job already has; `--id` and library callers still add it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        self.root.mkdir()
+        no_claude_pid(self)
+
+    def new(self, *args):
+        return run_board("--dir", str(self.root), "new", *args)
+
+    def folders(self):
+        return sorted(p.name for p in (self.root / "jobs").iterdir())
+
+    def titles(self):
+        return [j["title"] for j in board.read_board(self.root)["jobs"]]
+
+    def test_cli_new_refuses_open_same_title(self):
+        first = self.new("Fix the login page")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(first.stdout.strip(), "001-fix-the-login-page")
+        before, folders = (self.root / "board.json").read_bytes(), self.folders()
+        again = self.new("Fix the login page")
+        self.assertNotEqual(again.returncode, 0)
+        self.assertIn("001-fix-the-login-page", again.stderr)
+        self.assertIn("in spec", again.stderr)
+        self.assertIn("give this one a different title", again.stderr)
+        self.assertEqual(again.stdout, "")
+        self.assertEqual((self.root / "board.json").read_bytes(), before)
+        self.assertEqual(self.folders(), folders)
+        self.assertIn("refuses a title an open job already has", board.__doc__)
+        other = self.new("Fix the login page twice")  # an exact match only
+        self.assertEqual((other.returncode, other.stdout.strip()), (0, "002-fix-the-login-page-twice"), other.stderr)
+
+    def test_cli_new_allows_done_or_aborted_title(self):
+        for stage, title in (("done", "Ship it"), ("aborted", "Drop it")):
+            first = self.new(title)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            with board.locked_board(self.root) as b:
+                board.find(b, first.stdout.strip())["stage"] = stage
+            again = self.new(title)
+            self.assertEqual(again.returncode, 0, again.stderr)
+            self.assertNotEqual(again.stdout.strip(), first.stdout.strip())
+        self.assertEqual(self.titles(), ["Ship it", "Ship it", "Drop it", "Drop it"])
+
+    def test_cli_new_with_id_keeps_same_title(self):
+        first = self.new("Cloud thing")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        again = self.new("Cloud thing", "--id", "050-cloud-thing")
+        self.assertEqual((again.returncode, again.stdout.strip()), (0, "050-cloud-thing"), again.stderr)
+        self.assertEqual(self.titles(), ["Cloud thing", "Cloud thing"])
+        self.assertTrue((self.root / "jobs" / "050-cloud-thing").is_dir())
+
+    def test_library_new_and_next_allow_same_title(self):
+        first = self.new("Weekly ask")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(board.cmd_new(self.root, "Weekly ask"), "002-weekly-ask")
+        long = "Make the export button on the reports page download a CSV of every row in the table"
+        (self.root / "backlog.md").write_text(f"# Backlog\n- [ ] {long} first\n- [ ] {long} second\n")
+        a, b = board.cmd_next(self.root, 0), board.cmd_next(self.root, 1)
+        self.assertNotEqual(a["id"], b["id"])
+        self.assertEqual(self.titles()[2:], ["Make the export button on the reports page download a CSV…"] * 2)
+        self.assertEqual(self.titles()[:2], ["Weekly ask", "Weekly ask"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

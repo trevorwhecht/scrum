@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
-  board.py new "<title>" [--id ID] [--by <serve|runall|wake|hand>] create jobs/<id>/ and a board entry, print the id (--id keeps a given id; --by records who started it, default hand)
+  board.py new "<title>" [--id ID] [--by <serve|runall|wake|hand>] create jobs/<id>/ and a board entry, print the id (--id keeps a given id; --by records who started it, default hand);
+                                   without --id it refuses a title an open job already has (neither done nor aborted), naming that job
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/runlog/lane/setup/waiting/specwriter/cloud/outcome/account/shop/worker (empty = null);
                                    stage=needs-human is refused: park a job with ask
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only); with stage= it
@@ -417,10 +418,15 @@ def add_job(root, board, title, job_id=None, started_by="hand"):
     return job_id
 
 
-def cmd_new(root, title, job_id=None, unique=False, started_by="hand"):
-    """unique: return None, adding nothing, while a job with this exact title is neither done nor aborted."""
+def cmd_new(root, title, job_id=None, unique=False, started_by="hand", refuse=False):
+    """unique: return None, adding nothing, while a job with this exact title is neither done nor aborted. refuse (the
+    CLI `new` without --id, job 1414): raise SystemExit naming that open job's id and stage instead, writing nothing."""
     with locked_board(root) as board:
-        if unique and any(j["title"] == title and j["stage"] not in ("done", "aborted") for j in board["jobs"]):
+        twin = next((j for j in board["jobs"] if j["title"] == title and j["stage"] not in ("done", "aborted")), None)
+        if twin and refuse:
+            raise SystemExit(f"job {twin['id']} (in {twin['stage']}) already has the title {title!r}: "
+                             "work on that job, or give this one a different title")
+        if twin and unique:
             return None
         return add_job(root, board, title, job_id, started_by)
 
@@ -9112,7 +9118,7 @@ def main(argv=None):
         return 1 if out["up"] is False else 0
     require_scrum_dir(a.dir)
     if a.cmd == "new":
-        print(cmd_new(a.dir, a.title, a.id, started_by=a.by))
+        print(cmd_new(a.dir, a.title, a.id, started_by=a.by, refuse=a.id is None))
     elif a.cmd == "set":
         cmd_set(a.dir, a.id, a.pairs, unpause=a.unpause)
     elif a.cmd == "sync":
