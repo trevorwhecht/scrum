@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 tempfile.tempdir = os.path.realpath(tempfile.gettempdir())  # macOS: /var/folders is a symlink to /private/var; code logs resolved paths
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
+os.environ.pop("SCRUM_SHOP", None)  # a shop Mac sets it; cmd_set refuses lane=fast before B lilguy-fit (job 1400)
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
 os.environ["SCRUM_VM_PRESSURE"] = "1"  # kernel memory pressure normal unless a test says so; no test runs sysctl
 os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")  # never Trevor's real cool-down flag
@@ -15143,3 +15144,52 @@ class ProjectNoteTest(unittest.TestCase):
             board.cmd_project_note(self.root, "a\nb")
         self.assertEqual(self.md.read_text(), "- Notes: A.\n")
         self.assertFalse((self.root / "project.md.bak").exists())
+
+
+class ShopLilguyRouteGuardTest(unittest.TestCase):
+    """Digest 113: a shop run (SCRUM_SHOP set) cannot set lane=fast or standard before B lilguy-fit has run."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        self.id = board.cmd_new(self.root, "x")
+        env = mock.patch.dict(os.environ, {"SCRUM_SHOP": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def lane(self, job_id):
+        return next(j for j in board.read_board(self.root)["jobs"] if j["id"] == job_id).get("lane")
+
+    def test_refused_without_fit_file_then_allowed(self):
+        for lane in ("fast", "standard"):
+            with self.assertRaises(SystemExit) as e:
+                board.cmd_set(self.root, self.id, [f"lane={lane}"])
+            self.assertEqual(str(e.exception), f"run B lilguy-fit {self.id} first (New job step 3 Lilguy route)")
+            self.assertIsNone(self.lane(self.id))
+        (self.root / "jobs" / self.id / "lilguy-fit.json").write_text('{"fit": false}')
+        board.cmd_set(self.root, self.id, ["lane=fast"])
+        board.cmd_set(self.root, self.id, ["lane=standard"])
+        self.assertEqual(self.lane(self.id), "standard")
+
+    def test_other_lanes_and_non_shop_runs_pass(self):
+        board.cmd_set(self.root, self.id, ["lane=lilguy"])
+        board.cmd_set(self.root, self.id, ["lane=debug"])
+        with mock.patch.dict(os.environ):
+            os.environ.pop("SCRUM_SHOP")
+            board.cmd_set(self.root, self.id, ["lane=fast"])
+        self.assertEqual(self.lane(self.id), "fast")
+
+    def test_child_of_a_non_runall_parent_passes_runall_child_refused(self):
+        parent = board.cmd_new(self.root, "p")
+        board.cmd_set(self.root, parent, ["lane=bigboy"])
+        child = board.cmd_new(self.root, "c")
+        with board.locked_board(self.root) as b:
+            next(j for j in b["jobs"] if j["id"] == child)["parent"] = parent
+        board.cmd_set(self.root, child, ["lane=fast"])
+        board.cmd_set(self.root, parent, ["lane=runall"])
+        other = board.cmd_new(self.root, "d")
+        with board.locked_board(self.root) as b:
+            next(j for j in b["jobs"] if j["id"] == other)["parent"] = parent
+        with self.assertRaises(SystemExit):
+            board.cmd_set(self.root, other, ["lane=standard"])
