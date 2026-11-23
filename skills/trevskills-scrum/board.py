@@ -6403,15 +6403,16 @@ def heavy_job(root, job: dict, parent_lane=None) -> bool:
     return lane not in LIGHT_LANES
 
 
-def heavy_count(root, skip=None) -> int:
-    """How many heavy_job jobs run on this Mac (job 1314): jobs on any registered board (and root's) in a WATCHED stage
-    with no `shop` field, no queued launch and not paused by Trevor (a paused job runs no session), except the job id
-    `skip` on root's board."""
+def heavy_ids(root, skip=None) -> list:
+    """Ids of the heavy_job jobs that look like they run on this Mac (job 1368): jobs on any registered board (and
+    root's) in a WATCHED stage with no `shop` field, no queued launch and not paused by Trevor (a paused job runs no
+    session), except the job id `skip` on root's board. A job in a WATCHED stage may have no session, so heavy_count
+    caps the count at live_sessions()."""
     here = Path(root).resolve()
     roots = {here: Path(root)}
     for repo in projects().values():
         roots.setdefault((repo / "scrum").resolve(), repo / "scrum")
-    n = 0
+    ids = []
     for key, r in roots.items():
         try:
             jobs = read_board(r)["jobs"]
@@ -6423,18 +6424,30 @@ def heavy_count(root, skip=None) -> int:
                     or (skip == j["id"] and key == here):
                 continue
             pl = job_lane(r, by_id[j["parent"]]) if j.get("parent") in by_id else None
-            n += heavy_job(r, j, parent_lane=pl)
-    return n
+            if heavy_job(r, j, parent_lane=pl):
+                ids.append(j["id"])
+    return ids
+
+
+def _live_capped(ids) -> int:
+    return min(len(ids), live_sessions()) if ids else 0  # ps runs only when a heavy candidate exists
+
+
+def heavy_count(root, skip=None) -> int:
+    """How many heavy jobs run on this Mac (job 1314): len(heavy_ids), capped at live_sessions() (job 1368), so a job in
+    a WATCHED stage with no running session never fills HEAVY_PER_MAC."""
+    return _live_capped(heavy_ids(root, skip))
 
 
 def heavy_cap_reason(root, job=None) -> str | None:
     """None, or why this Mac takes no more heavy work (job 1314): heavy_count(root), leaving out `job` itself, is
-    HEAVY_PER_MAC or more. With `job` (a board job or a backlog item) that is not heavy, None. Soft cool down counts
-    both Macs together; this only places work."""
+    HEAVY_PER_MAC or more; the text names the candidate job ids (job 1368). With `job` (a board job or a backlog item)
+    that is not heavy, None. Soft cool down counts both Macs together; this only places work."""
     if job is not None and not heavy_job(root, job):
         return None
-    n = heavy_count(root, skip=(job or {}).get("id") if job is not None and "stage" in job else None)
-    return f"heavy_cap({n}/{HEAVY_PER_MAC}): {n} heavy jobs on this Mac" if n >= HEAVY_PER_MAC else None
+    ids = heavy_ids(root, skip=(job or {}).get("id") if job is not None and "stage" in job else None)
+    n = _live_capped(ids)
+    return f"heavy_cap({n}/{HEAVY_PER_MAC}): {n} heavy jobs on this Mac ({', '.join(ids)})" if n >= HEAVY_PER_MAC else None
 
 
 def shop_heavy_by_worker():
