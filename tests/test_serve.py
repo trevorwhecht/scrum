@@ -9786,6 +9786,73 @@ class WatchdogIdleParentTest(unittest.TestCase):
         states = {j["id"]: j for j in self.serve.job_states(self.root, None)}
         self.assertEqual((states["002-second"]["heldBy"], states["004-fourth"]["heldBy"]), ("heavy_cap", None))
 
+    def current_gates(self, job_id):
+        return json.loads((self.root / "jobs" / job_id / "current-gates.json").read_text())
+
+    def test_note_queue_gate_records_current_gate(self):
+        """Job 1408: both note_queue_gate writers stamp the gate's head in current-gates.json each call; the log is unchanged."""
+        (self.root / "jobs" / "002-second").mkdir(parents=True)
+        with mock.patch("time.time", return_value=1000.0):
+            self.serve.note_queue_gate(self.root, "002-second", "ram_room(free=10%)")
+            self.board.note_queue_gate(self.root, "002-second", "depends_on:001-first")
+        self.assertEqual(self.current_gates("002-second"), {"ram_room": 1000.0, "depends_on:001-first": 1000.0})
+        with mock.patch("time.time", return_value=2000.0):
+            self.serve.note_queue_gate(self.root, "002-second", "ram_room(free=5%)")
+            self.board.note_queue_gate(self.root, "002-second", "depends_on:001-first")
+        self.assertEqual(self.current_gates("002-second"), {"ram_room": 2000.0, "depends_on:001-first": 2000.0})
+        self.assertEqual(self.gate_text("002-second"), "ram_room(free=10%)\ndepends_on:001-first\n")
+        (self.root / "jobs" / "003-third").mkdir(parents=True)
+        self.serve.note_stall_hold(self.root, "003-third", "ram_room(free=10%)")
+        self.assertFalse((self.root / "jobs" / "003-third" / "current-gates.json").exists())
+
+    def test_held_by_names_only_current_gates(self):
+        """Job 1408: a gate last hit over GATE_FRESH_SECS ago drops out of heldBy while another gate keeps the log fresh."""
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})
+        d = self.root / "jobs" / "002-second"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "queue-gates.txt").write_text("ram_room(free=10%)\nheavy_cap\n")
+        now = time.time()
+        (d / "current-gates.json").write_text(json.dumps({"ram_room": now - 1200, "heavy_cap": now - 10}))
+        jobs = {j["id"]: j for j in self.serve.board_with_activity(self.root, "repo")["jobs"]}
+        self.assertEqual(jobs["002-second"]["heldBy"], "heavy_cap")
+        states = {j["id"]: j for j in self.serve.job_states(self.root, None)}
+        self.assertEqual(states["002-second"]["heldBy"], "heavy_cap")
+
+    def test_cpu_held_ignores_stale_gate_in_current_record(self):
+        """Job 1408: cpu_load last hit 20 min ago is no CPU hold, even with ram_room fresh in the same record."""
+        d = self.root / "jobs" / "002-second"
+        d.mkdir(parents=True)
+        (d / "queue-gates.txt").write_text("cpu_load(600%)\nram_room(free=10%)\n")
+        job = {"id": "002-second", "stage": "needs-human", "play_queued": "2026-01-01T00:00:00Z",
+               "queued_launch": {"action": "start", "prompt": "p", "stage": "needs-human"}}
+        now = time.time()
+        (d / "current-gates.json").write_text(json.dumps({"cpu_load": now - 1200, "ram_room": now - 10}))
+        self.assertFalse(self.serve.cpu_held(self.root, job))
+        (d / "current-gates.json").write_text(json.dumps({"cpu_load": now - 10, "ram_room": now - 10}))
+        self.assertTrue(self.serve.cpu_held(self.root, job))
+
+    def test_current_gates_malformed_or_unwritable(self):
+        """Job 1408: a malformed current-gates.json falls back to the queue-gates.txt mtime rule; a write error never raises."""
+        d = self.root / "jobs" / "002-second"
+        d.mkdir(parents=True)
+        (d / "queue-gates.txt").write_text("cpu_load(600%)\nram_room(free=10%)\n")
+        job = {"id": "002-second"}
+        for bad in ("not json", "[1, 2]", '{"cpu_load": "x"}', '{"cpu_load": true}'):
+            (d / "current-gates.json").write_text(bad)
+            self.assertEqual(self.serve.gate_heads(self.root, job), {"cpu_load", "ram_room"}, bad)
+        old = time.time() - 2000
+        os.utime(d / "queue-gates.txt", (old, old))
+        self.assertEqual(self.serve.gate_heads(self.root, job), set())
+        # the job folder is missing, or current-gates.json is a directory: no raise
+        self.serve.note_queue_gate(self.root, "404-gone", "cpu_load(600%)")
+        self.board.note_queue_gate(self.root, "404-gone", "heavy_cap")
+        (d / "current-gates.json").unlink()
+        (d / "current-gates.json").mkdir()
+        self.serve.note_queue_gate(self.root, "002-second", "heavy_cap")
+        self.board.note_queue_gate(self.root, "002-second", "depends_on:001-first")
+        self.assertTrue((d / "current-gates.json").is_dir())
+
     def test_wake_waiting_cool_down_wake_job_still_needs_ram(self):
         self.queue_board({"id": "001-first", "stage": "done"},
                          {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "wake": "approve 002-second"})
