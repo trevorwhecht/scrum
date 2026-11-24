@@ -13599,6 +13599,68 @@ class E2eFullTest(unittest.TestCase):
         self.serve.e2e_full_worktree(self.repo, self.root, self.git("rev-parse", "HEAD"))
         self.assertEqual((wt / "installs.txt").read_text(), "x\nx\n", "Install none runs nothing")
 
+    def commit_schema(self, body):
+        """Commit prisma/schema.prisma with body; return the new head."""
+        (self.repo / "prisma").mkdir(exist_ok=True)
+        (self.repo / "prisma" / "schema.prisma").write_text(body)
+        self.git("add", "prisma/schema.prisma")
+        self.git("commit", "-q", "-m", "schema")
+        return self.git("rev-parse", "HEAD")
+
+    def generate_patch(self, argv=("sh", "-c", "echo g >> steps.txt")):
+        """Point E2E_FULL_PRISMA at a stand-in, so no test runs the real npx."""
+        return mock.patch.object(self.serve, "E2E_FULL_PRISMA", list(argv))
+
+    def test_e2e_worktree_generates_prisma_client_after_install_when_created(self):
+        """Job 1479: a fresh e2e worktree with prisma/schema.prisma runs prisma generate right after Install."""
+        head = self.commit_schema("model Lead { id Int @id }\n")
+        self.fresh_worktree()
+        (self.root / "project.md").write_text("- E2E: sh run-e2e.sh\n- Install: echo i >> steps.txt\n")
+        with self.generate_patch():
+            wt = self.serve.e2e_full_worktree(self.repo, self.root, head)
+        self.assertEqual((wt / "steps.txt").read_text(), "i\ng\n")
+
+    def test_e2e_worktree_generates_prisma_client_when_schema_changes(self):
+        """Job 1908 repro: a reused worktree whose schema changed between its old HEAD and head regenerates the client."""
+        head1 = self.commit_schema("model Lead { id Int @id }\n")
+        self.fresh_worktree()
+        (self.root / "project.md").write_text("- E2E: sh run-e2e.sh\n- Install: none\n")
+        with self.generate_patch():
+            wt = self.serve.e2e_full_worktree(self.repo, self.root, head1)
+            self.assertEqual((wt / "steps.txt").read_text(), "g\n", "created: generated once")
+            self.serve.e2e_full_worktree(self.repo, self.root, self.merge("no schema change"))
+            self.assertEqual((wt / "steps.txt").read_text(), "g\n", "schema unchanged: no second generate")
+            self.serve.e2e_full_worktree(self.repo, self.root,
+                                         self.commit_schema("model Lead { id Int @id\n  reopenedAt DateTime? }\n"))
+            self.assertEqual((wt / "steps.txt").read_text(), "g\ng\n", "schema changed: generated again")
+
+    def test_e2e_worktree_generates_prisma_client_after_lockfile_install(self):
+        """A lockfile change reinstalls node_modules, which drops the generated client: generate runs after it."""
+        head1 = self.commit_schema("model Lead { id Int @id }\n")
+        self.fresh_worktree()
+        (self.root / "project.md").write_text("- E2E: sh run-e2e.sh\n- Install: echo i >> steps.txt\n")
+        with self.generate_patch():
+            wt = self.serve.e2e_full_worktree(self.repo, self.root, head1)
+            (self.repo / "package-lock.json").write_text("lock\n")
+            self.git("add", "package-lock.json")
+            self.git("commit", "-q", "-m", "lock")
+            self.serve.e2e_full_worktree(self.repo, self.root, self.git("rev-parse", "HEAD"))
+        self.assertEqual((wt / "steps.txt").read_text(), "i\ng\ni\ng\n")
+
+    def test_e2e_worktree_no_prisma_schema_runs_no_generate(self):
+        self.fresh_worktree()
+        with self.generate_patch():
+            wt = self.serve.e2e_full_worktree(self.repo, self.root, self.base)
+        self.assertFalse((wt / "steps.txt").exists(), "no prisma/schema.prisma: no generate")
+
+    def test_e2e_worktree_failed_generate_drops_worktree(self):
+        head = self.commit_schema("model Lead { id Int @id }\n")
+        self.fresh_worktree()
+        with self.generate_patch(("sh", "-c", "echo boom; exit 4")), self.assertRaises(RuntimeError) as e:
+            self.serve.e2e_full_worktree(self.repo, self.root, head)
+        self.assertEqual(str(e.exception), "e2e worktree prisma generate exited 4: boom")
+        self.assertFalse(self.wt.exists(), "a failed generate drops the worktree, so the next run generates again")
+
     def test_e2e_worktree_copies_env_local(self):
         self.serve.e2e_full_worktree(self.repo, self.root, self.base)
         self.assertFalse((self.wt / ".env.local").exists(), "a missing .env.local is no error")

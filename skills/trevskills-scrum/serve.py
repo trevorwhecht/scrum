@@ -1858,6 +1858,8 @@ def e2e_full_wait(proc, loads, started) -> int:
 
 
 E2E_FULL_LOCKFILES = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb")
+E2E_FULL_SCHEMA = "prisma/schema.prisma"
+E2E_FULL_PRISMA = ["npx", "prisma", "generate"]  # run in the e2e worktree after Install, as lanes/newjob.md does
 
 
 def e2e_full_worktree(repo, root, head) -> Path:
@@ -1866,8 +1868,11 @@ def e2e_full_worktree(repo, root, head) -> Path:
     `git checkout --detach` run inside it. Every top-level <repo>/.env* regular file git does not track
     (`git ls-files --error-unmatch`, as lanes/newjob.md links them) is copied in on every call. PROJECT's
     Install command runs in it when it was just created or a lockfile differs between its old HEAD and head
-    (`git diff --name-only`); an empty or `none` Install runs nothing. A failed git call or a failed install
-    (the worktree is removed first, so the next call reinstalls) raises (ValueError, OSError or RuntimeError)."""
+    (`git diff --name-only`); an empty or `none` Install runs nothing. Then, when E2E_FULL_SCHEMA exists in it,
+    E2E_FULL_PRISMA (`npx prisma generate`) runs when it was just created, Install just ran (a fresh node_modules
+    has no client) or that file differs between its old HEAD and head (job 1479: a schema merge left a stale client).
+    A failed git call or a failed install or generate (the worktree is removed first, so the next call reinstalls and
+    regenerates) raises (ValueError, OSError or RuntimeError)."""
     head = str(head)
     if head.startswith("-"):
         raise ValueError(f"bad head {head!r}")
@@ -1888,24 +1893,29 @@ def e2e_full_worktree(repo, root, head) -> Path:
             continue  # tracked: the worktree's checkout already holds the committed copy
         except ValueError:
             shutil.copyfile(env, wt / env.name)
+    names = None if old is None else board._git(wt, "diff", "--name-only", old, head, "--").decode().splitlines()
+    steps = []  # (label, command, shell)
     install = e2e_command(root, "Install")
-    if install and install.lower() != "none":
-        changed = old is None or any(Path(n).name in E2E_FULL_LOCKFILES
-                                     for n in board._git(wt, "diff", "--name-only", old, head, "--").decode().splitlines())
-        if changed:
+    if install and install.lower() != "none" and (names is None or any(Path(n).name in E2E_FULL_LOCKFILES
+                                                                       for n in names)):
+        steps.append(("install", install, True))
+    if (wt / E2E_FULL_SCHEMA).is_file() and (names is None or steps or E2E_FULL_SCHEMA in names):
+        steps.append(("prisma generate", E2E_FULL_PRISMA, False))
+    for label, cmd, shell in steps:
+        try:
+            r = subprocess.run(cmd, shell=shell, cwd=wt, stdin=subprocess.DEVNULL, capture_output=True, timeout=1800)
+            err = f"exited {r.returncode}: " + (r.stdout + r.stderr).decode(errors="replace").strip()[-200:] \
+                if r.returncode else None
+        except subprocess.TimeoutExpired:
+            err = "timed out"
+        except OSError as e:  # npx missing: drop the worktree like a failed step
+            err = f"failed: {e}"
+        if err:  # drop the worktree so the next run creates it again and reinstalls, never runs on a part install
             try:
-                r = subprocess.run(install, shell=True, cwd=wt, stdin=subprocess.DEVNULL, capture_output=True,
-                                   timeout=1800)
-                err = f"exited {r.returncode}: " + (r.stdout + r.stderr).decode(errors="replace").strip()[-200:] \
-                    if r.returncode else None
-            except subprocess.TimeoutExpired:
-                err = "timed out"
-            if err:  # drop the worktree so the next run creates it again and reinstalls, never runs on a part install
-                try:
-                    board._git(repo, "worktree", "remove", "--force", str(wt))
-                except ValueError:
-                    shutil.rmtree(wt, ignore_errors=True)
-                raise RuntimeError(f"e2e worktree install {err}")
+                board._git(repo, "worktree", "remove", "--force", str(wt))
+            except ValueError:
+                shutil.rmtree(wt, ignore_errors=True)
+            raise RuntimeError(f"e2e worktree {label} {err}")
     return wt
 
 
