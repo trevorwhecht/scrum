@@ -105,7 +105,7 @@ class VisualDiffTest(unittest.TestCase):
             ("sharp", "module.exports = () => {};\n"),
         ):
             d = proj / "node_modules" / name
-            d.mkdir(parents=True)
+            d.mkdir(parents=True, exist_ok=True)
             (d / "index.js").write_text(body)
         (proj / "package.json").write_text('{"name": "p"}\n')
         return proj
@@ -113,6 +113,7 @@ class VisualDiffTest(unittest.TestCase):
     def run_stub(self, chrome, **kw):
         proj = self.stub_project(**kw)
         log = self.tmp / "launches.json"
+        log.unlink(missing_ok=True)
         env = {k: v for k, v in os.environ.items() if k not in ("NODE_PATH", "SCRUM_CHROME")}
         env["STUB_LAUNCH_LOG"] = str(log)
         if chrome is not None:
