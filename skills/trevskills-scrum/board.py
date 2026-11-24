@@ -177,6 +177,8 @@
                                    board), print {"log","pid"}; a board job whose session is alive (not this caller's)
                                    starts nothing and exits 1: "job <id> already has a live session (pid N)"
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
+  board.py ops-kind <id>           print ops-data, ops-content or none: feature.md's `Kind:` line, else a stored ops kind, else
+                                   Jev's one cached sort (tag_kind); New job step 1d routes an ops kind to lanes/ops.md
   board.py fable-ok <id> <planner|spec-writer>  print the Agent model override (claude-fable-5-1) or none: the planner, or
                                    the spec-writer on lane standard (or unset), of a complex job (header `Complex: yes`
                                    in feature.md, else spec.md) gets Fable only while fable_state is ok; each such call
@@ -4843,6 +4845,62 @@ def ops_kind(text: str) -> str | None:
     return _kind_match(OPS_KIND_RE, text)
 
 
+OPS_KIND_CUTOFF = 0.7  # jev-gate.py kind: a confident yes
+OTHER_KIND_RE = re.compile(r"^Kind: (?:edit-(?:reel|animation|vector|photo)|knowledge)\s*$", re.M)
+RUN_LINE_RE = re.compile(r"^Run: ", re.M)
+
+
+def jev_ops_kind(text: str, log_path: Path) -> str | None:
+    """`ops-data` or `ops-content` when Jev confidently sorts text (a feature.md) as one, logged to log_path as a `kind`
+    line; None when unsure, on any error or for `code`. The last `kind` line already in log_path answers with no new
+    Jev call. A network call: never under the board lock."""
+    try:
+        for fields in reversed([l.split("\t") for l in log_path.read_text(encoding="utf-8", errors="replace").splitlines()]):
+            if len(fields) > 4 and fields[1] == "kind":
+                return fields[4] if fields[4] in ("ops-data", "ops-content") else None
+    except OSError:
+        pass
+    try:
+        gate = jev_gate()
+        decision = gate.run("kind", lambda asked: gate.kind_of(text, asked), log_path)
+    except (Exception, SystemExit):
+        return None
+    return decision if decision in ("ops-data", "ops-content") else None
+
+
+def tag_kind(root, job_id: str) -> str | None:
+    """The job's ops kind (`ops-data` or `ops-content`), else None (a code job). A feature.md `Kind:` line wins with no
+    Jev call and is stored on the board job when it differs: an ops line returns it; an edit-* or knowledge line returns
+    None. Else a stored ops kind. Else jev_ops_kind over feature.md (cached in jev.log); a Jev-sorted `ops-data` with no
+    `Run: ` line in feature.md is None. A Jev answer is not stored: New job's `B set` does that. Never raises on a Jev
+    problem. Call it outside the board lock."""
+    job = find(read_board(root), check_id(job_id))
+    folder = Path(root) / "jobs" / job_id
+    try:
+        text = (folder / "feature.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    line = ops_kind(text)
+    if line:
+        if job.get("kind") != line:
+            with locked_board(root) as board:
+                find(board, job_id)["kind"] = line
+        return line
+    if OTHER_KIND_RE.search(text):
+        return None
+    if job.get("kind") in ("ops-data", "ops-content"):
+        return job["kind"]
+    if not text.strip():
+        return None
+    kind = jev_ops_kind(text, folder / "jev.log")
+    return None if kind == "ops-data" and not RUN_LINE_RE.search(text) else kind
+
+
+def cmd_ops_kind(root, job_id: str) -> str:
+    """ops-kind: tag_kind as a word, `ops-data`, `ops-content` or `none`."""
+    return tag_kind(root, check_id(job_id)) or "none"
+
+
 def shop_project_excluded(root) -> bool:
     """A project the shop never runs: project.md has a `- Base branch:` line, names docker (any case), or marks a
     no-git project (no_git: `- Git: none`)."""
@@ -9234,6 +9292,7 @@ def main(argv=None):
     sub.add_parser("statusline")
     sm = sub.add_parser("spec-models")
     sm.add_argument("ids", nargs="+")
+    sub.add_parser("ops-kind").add_argument("id")
     fo = sub.add_parser("fable-ok")
     fo.add_argument("id")
     fo.add_argument("role")
@@ -9437,6 +9496,8 @@ def main(argv=None):
         print(json.dumps(cmd_render_paths(a.dir, a.id)))
     elif a.cmd == "ui-sweep-record":
         print(json.dumps(cmd_ui_sweep_record(a.dir, a.review)))
+    elif a.cmd == "ops-kind":
+        print(cmd_ops_kind(a.dir, a.id))
     elif a.cmd == "fable-ok":
         print(cmd_fable_ok(a.dir, a.id, a.role))
     elif a.cmd == "spec-models":

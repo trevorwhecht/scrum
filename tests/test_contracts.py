@@ -4299,7 +4299,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertNotIn("## Video lane", text)
         body = [l for l in self.h2(text, "## Edit lane").splitlines()[2:] if l.strip()]
         self.assertEqual(len(body), 2, body)
-        self.assertIn("`Kind:`", body[0])
+        self.assertIn("`Kind: edit-*`", body[0])  # job 1426: an ops-* kind is not an edit job
         self.assertEqual(body[1], "Read `$HOME/.claude/skills/trevskills-scrum/lanes/edit.md` when this lane runs.")
         self.assertEqual(text.index("\n## ", text.index("\n## Digest\n") + 1), text.index("\n## Edit lane\n"))
         self.assertEqual(text.index("\n## ", text.index("\n## Edit lane\n") + 1), text.index("\n## Final report\n"))
