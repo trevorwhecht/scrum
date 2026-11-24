@@ -4429,7 +4429,7 @@ def timed_step(name, fn, *args, clock=None, **kw):
             print(f"watchdog: slow step {name} {took:.0f}s", file=sys.stderr, flush=True)
 
 
-TIMED_STEPS = ("claude_migrate", "respawn_exited", "record_outcomes", "board_busy", "play_queue_tick", "auto_resume",
+TIMED_STEPS = ("claude_migrate", "respawn_exited", "record_outcomes", "board_busy", "hand_queue_tick", "play_queue_tick", "auto_resume",
                "main_ff_tick", "terminal_batch_tick", "e2e_full_tick", "ui_sweep_tick", "idle_claim", "sweep_parents",
                "cloud_tick", "project_notes_tick", "shop_tick", "prune_worktrees", "prod_errors_tick", "digest_retry_tick",
                "actions_alert", "idle_cleanup", "stop_leftovers", "report_hogs", "auto_continue_tick", "window_tick",
