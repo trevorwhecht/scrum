@@ -15,7 +15,8 @@ import board, jev  # noqa: E402
 # step -> (question, cutoff, fallback)
 STEPS = {
     "model": ("How hard is this feature to implement", 1.5, "opus"),  # score index 0-3 = difficulty 1-4
-    "spec-model": ("How hard is this feature to implement", 2.5, "opus"),  # writing a spec is easier than building
+    "spec-model": ("How much design work does this feature text leave open for the spec writer (which files, which approach, "
+                   "which edge cases)", 2.5, "opus"),  # scores what feature.md leaves open, not how hard the build is
     "promote": (None, None, "opus"),
     "dupe": ("Item {i} is the same task as the query", 0.8, "add"),
     "approver": ("This diff changes payment, pricing, billing, authentication, session, role or permission logic",
@@ -31,6 +32,10 @@ STEPS = {
                 "unsure"),  # prints main, any or unsure (board.tag_runs_on falls back to the term list)
 }
 LEVELS = ["trivial edit", "small contained change", "multi-file change with new logic", "cross-cutting or risky change"]
+SPEC_LEVELS = ["fully specified: names each file, the cause and the fix, so the spec only restates it",
+               "mostly specified: names the files and the approach, a few details left to choose",
+               "partly open: names the goal, but the spec writer must find the files or choose the approach",
+               "wide open: the files, the approach and the edge cases all still have to be worked out"]
 IMPORTANCE = ["Trivial (cosmetic or pedantic, nobody would notice if never done)",
               "Minor (small polish or tidy-up with little real effect)",
               "Moderate (a real improvement users or the developer would notice)",
@@ -127,7 +132,7 @@ def decide(step, job, asked):
                     return "-", f"Complex: no ({name})", "sonnet"
                 break
         asked.append(q)
-        v, raw = jev.score(text, q, LEVELS)
+        v, raw = jev.score(text, q, SPEC_LEVELS if step == "spec-model" else LEVELS)
         return q, raw, "sonnet" if v < cut else "opus"
     if step == "runs-on":
         return runs_on("\n\n".join(f.read_text() for f in (job / "feature.md", job / "spec.md") if f.is_file()),
