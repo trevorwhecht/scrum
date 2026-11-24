@@ -112,7 +112,7 @@ class ProcessesLogTest(unittest.TestCase):
 
 S = 1_700_000_000  # 2023-11-14T22:13:20Z
 SESSION_CODE = ("Code: spawn, auto_continue_tick, play_queue_tick, auto_resume, auto_play, idle_claim, start_ready, "
-                "wake_waiting, sweep_parents, main_ff_tick, terminal_batch_tick, resume_budget\n")
+                "wake_waiting, queue_ready_waiting, sweep_parents, main_ff_tick, terminal_batch_tick, resume_budget\n")
 
 
 class ProcessesDigestTest(unittest.TestCase):
