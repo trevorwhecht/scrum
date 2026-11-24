@@ -507,14 +507,17 @@ def held_gate(why):
     return next((tok for pre, tok in PULSE_GATES if pre in why), "other")
 
 
+PULSE_LOCK = threading.Lock()  # guards PULSE_HOLDS and PULSE_BUSY: the watchdog and spawn paths write them, pulse_loop's thread reads them (job 1447)
 PULSE_HOLDS: dict[Path, dict[str, float]] = {}  # resolved scrum/ root -> {hold token: epoch s}: what skipped a ready job or run-all start
 PULSE_HOLD_TTL_S = 180  # pulse_tick reports a hold this long after it was last seen (a few watchdog ticks)
 
 
 def note_hold(root, reason):
     """Remember `reason` (a held-job token or a run-all start hold) for root's project (keyed by its resolved scrum/ path): pulse_tick adds `held:<reason>`
-    to that project's gates, so write_pulse counts the idle minutes as gated and names the gate."""
-    PULSE_HOLDS.setdefault(Path(root).resolve(), {})[reason] = time.time()
+    to that project's gates, so write_pulse counts the idle minutes as gated and names the gate. Writes under PULSE_LOCK."""
+    key, now = Path(root).resolve(), time.time()
+    with PULSE_LOCK:
+        PULSE_HOLDS.setdefault(key, {})[reason] = now
 
 
 def note_held(root, reason, job_ids):
@@ -4328,12 +4331,22 @@ def time_steps(names=TIMED_STEPS, scope=None):
             scope[name] = wrapper
 
 
+def publish_busy(busy):
+    """Replace PULSE_BUSY's contents with busy in one step under PULSE_LOCK, so pulse_loop's snapshot never sees it
+    empty or half built. The dict object stays the same."""
+    with PULSE_LOCK:
+        PULSE_BUSY.clear()
+        PULSE_BUSY.update(busy)
+
+
 def pulse_loop():
     """Run pulse_tick every 60 s from its own thread, so its stuck_alert never waits on a slow watchdog_tick step.
-    One bad pulse never ends the thread."""
+    One bad pulse never ends the thread. PULSE_BUSY is copied under PULSE_LOCK, so the copy is never a half publish."""
     while True:
         try:
-            pulse_tick(dict(PULSE_BUSY))
+            with PULSE_LOCK:
+                busy = dict(PULSE_BUSY)
+            pulse_tick(busy)
         except (Exception, SystemExit) as e:
             print(f"watchdog: pulse: {e}", file=sys.stderr, flush=True)
         time.sleep(60)
@@ -4543,8 +4556,7 @@ def watchdog_tick():
         weekly_tick()
     except (Exception, SystemExit) as e:
         print(f"watchdog: weekly digest: {e}", file=sys.stderr, flush=True)
-    PULSE_BUSY.clear()  # pulse_loop (its own timer, job 1429) reads this tick's busy map
-    PULSE_BUSY.update(busy)
+    publish_busy(busy)  # pulse_loop (its own timer, job 1429) reads this tick's busy map
     cooldown_chime()
 
 
@@ -4642,7 +4654,7 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     blocks every one of those waiting jobs), and top-level gates: ram_room when board.ram_room(floor=0) < 1, plus a PULSE_GATES token (other when
     unrecognised) for the first project's machine_ok(claim=True) refusal other than COOLING. A gates list that raised
     is null. A hold start_ready or auto_continue_tick noted (note_hold: a child left to the shop, finish_first, a running
-    run-all, SWEEP_HELD, a machine or usage hold; play_queue_tick's queued_launch:<id> for a launch spawn still holds) in the last PULSE_HOLD_TTL_S adds `held:<token>` to that project's gates, which
+    run-all, SWEEP_HELD, a machine or usage hold; play_queue_tick's queued_launch:<id> for a launch spawn still holds) in the last PULSE_HOLD_TTL_S (read from a copy taken under PULSE_LOCK) adds `held:<token>` to that project's gates, which
     board.write_pulse counts as gated even beside claimable work. guard: the first project's machine_ok(claim=False) refusal, else the allowance reason when
     board.pick_account has no account or the live count reaches its allowance (the 5h pace included), else null.
     stuck_alert gets the machine_ok refusal alone (never the allowance reason) and the same sessions count, in its own
@@ -4676,7 +4688,10 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
             gates = []
             for hit in hits if hits and all(hits) else []:  # one resumable job means the project is not gated
                 gates += ["runs_alone"] if hit == "this job runs alone" else [f"overlap:{i}" for i in hit.ids]
-            gates += [f"held:{r}" for r, t in PULSE_HOLDS.get(root.resolve(), {}).items() if now - t <= PULSE_HOLD_TTL_S]
+            key = root.resolve()
+            with PULSE_LOCK:  # note_hold writes from other threads; iterate a copy
+                holds = dict(PULSE_HOLDS.get(key, {}))
+            gates += [f"held:{r}" for r, t in holds.items() if now - t <= PULSE_HOLD_TTL_S]
             projects[project]["gates"] = list(dict.fromkeys(gates))
         except (Exception, SystemExit) as e:
             print(f"watchdog: pulse: {project}: gates: {e}", file=sys.stderr, flush=True)
