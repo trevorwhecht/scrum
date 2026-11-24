@@ -15685,6 +15685,91 @@ class StuckAlertTest(unittest.TestCase):
             self.assertIsNone(self.alert(t, sessions=2))
         self.assertEqual((self.sent, self.ps_calls), ([], []))
 
+    # --- job 1498: the second trigger, nothing running for 15 min with nothing holding it ---
+    WAIT = "Nothing is running and nothing can start: 2 items wait on you: Pick the logo, Hook up Stripe"
+
+    def put_board(self, jobs, project_md=None):
+        (self.base / "app" / "scrum" / "board.json").write_text(json.dumps({"jobs": jobs}))
+        if project_md is not None:
+            (self.base / "app" / "scrum" / "project.md").write_text(project_md)
+
+    def quiet_run(self, minutes, step=1):
+        for m in range(0, minutes + 1, step):
+            self.alert(m * 60, why=None)
+
+    def test_fifteen_minutes_with_nothing_running_texts_once(self):
+        self.put_board([{"id": "001-a", "title": "Pick the logo", "stage": "needs-human"},
+                        {"id": "002-b", "title": "Hook up Stripe", "stage": "waiting", "setup": "pending"}])
+        self.quiet_run(14)
+        self.assertEqual(self.sent, [], "14 minutes: silent")
+        self.alert(15 * 60, why=None)
+        self.assertEqual(self.sent, [[str(self.script), "alert-handle", self.WAIT]])
+        for m in range(16, 31):
+            self.alert(m * 60, why=None)
+        self.assertEqual(len(self.sent), 1, "30 minutes: still one")
+        self.assertEqual(self.ps_calls, [])
+
+    def test_a_session_resets_the_quiet_stretch(self):
+        self.quiet_run(14)
+        self.alert(14 * 60 + 30, why=None, sessions=1)
+        for m in range(15, 29):
+            self.alert(m * 60, why=None)
+        self.assertEqual(self.sent, [])
+        self.alert(30 * 60, why=None)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_idle_text_repeats_after_24_hours_only(self):
+        self.quiet_run(15)
+        self.assertEqual(len(self.sent), 1)
+        self.alert(24 * 3600 + 14 * 60, why=None)
+        self.assertEqual(len(self.sent), 1)
+        self.alert(24 * 3600 + 15 * 60 + 60, why=None)
+        self.assertEqual(len(self.sent), 2)
+
+    def test_cool_down_usage_hold_and_a_shop_job_send_nothing(self):
+        flag = self.base / "cooldown"
+        flag.write_text("")
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
+            self.quiet_run(20)
+        self.assertEqual(self.sent, [], "cool down")
+        hold = (None, self.serve.board.Allowance(0, "no account has room: x"))
+        with mock.patch.object(self.serve.board, "pick_account", lambda *a, **k: hold):
+            self.quiet_run(20)
+        self.assertEqual(self.sent, [], "usage hold")
+        self.put_board([{"id": "003-c", "title": "On the shop", "stage": "cloud", "shop": "123"}])
+        self.quiet_run(20)
+        self.assertEqual(self.sent, [], "a running shop job")
+
+    def test_the_why_text_alone_fires_when_why_is_set(self):
+        self.alert(0), self.alert(150)
+        self.assertEqual(self.sent[0][2], self.LEFTOVER)
+        for m in range(1, 40):
+            self.alert(150 + m * 60)
+        self.assertEqual(len(self.sent), 1, "no idle text while why fires")
+
+    def test_idle_text_with_work_that_could_start_names_the_gates(self):
+        (self.base / "app" / "scrum" / "backlog.md").write_text("# Backlog\n- [ ] One\n- [ ] Two\n")
+        self.put_board([], project_md="- Auto continue: 1\n")
+        self.serve.PULSE_SNAPSHOT = (self.NOW + 15 * 60, {"app": {"gates": ["held:finish_first", "ram_room"]}})
+        self.addCleanup(setattr, self.serve, "PULSE_SNAPSHOT", None)
+        self.quiet_run(15)
+        self.assertEqual(self.sent[0][2], "Nothing is running though 2 items could start: held:finish_first, ram_room")
+
+    def test_idle_text_with_work_and_no_gate_says_so(self):
+        (self.base / "app" / "scrum" / "backlog.md").write_text("# Backlog\n- [ ] One\n")
+        self.put_board([], project_md="- Auto continue: 1\n")
+        self.quiet_run(15)
+        self.assertEqual(self.sent[0][2], "Nothing is running though 1 items could start: no gate shown")
+
+    def test_why_text_gains_nothing_left_to_start_when_every_auto_project_is_empty(self):
+        self.put_board([], project_md="- Auto continue: 1\n")
+        self.alert(0), self.alert(150)
+        self.assertEqual(self.sent[0][2], self.LEFTOVER + " Nothing is left to start either.")
+
+    def test_no_text_starts_with_a_word_and_colon(self):
+        self.quiet_run(15)
+        self.assertNotRegex(self.sent[0][2], r"^\S+:")
+
     def test_protected_biggest_process_is_named_without_kill(self):
         me, uid = os.getpid(), os.getuid()
         other = 601 if uid == 600 else 600
