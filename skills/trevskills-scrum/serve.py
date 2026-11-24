@@ -825,7 +825,7 @@ def hand_queue_tick() -> set[str]:
     """watchdog_tick's first launch pass (job 1454), before any project's play_queue_tick or auto_resume: start every
     registered project's hand-queued starts (board.hand_queued), oldest play_queued first across projects (ties: project,
     then id), each through launch_queued on the tick's resume budget. Before each, board.machine_ok(root): a refusal
-    other than free disk sets RESUME_ROOM to 0 and ends the pass, a free-disk refusal skips that job; a "stop" from
+    other than free disk sets RESUME_ROOM to 0 (inside a tick) and ends the pass, a free-disk refusal skips that job; a "stop" from
     launch_queued ends the pass too. A job solo_only holds is skipped (job 1375). Returns the projects where one started
     ("started"), waits on spawn's gate ("waits") or was left queued by a "stop", so watchdog_tick claims nothing new."""
     global RESUME_ROOM
@@ -845,7 +845,8 @@ def hand_queue_tick() -> set[str]:
         if refused and refused.startswith("free disk"):
             continue  # only this project's volume is full: a later project's start may still go
         if refused:
-            RESUME_ROOM = 0  # no room on this machine: nothing starts or resumes this tick
+            if RESUME_ROOM is not None:
+                RESUME_ROOM = 0  # inside watchdog_tick: no room on this machine, nothing starts or resumes this tick
             break
         result = launch_queued(project, root, job, jobs)
         if result in ("started", "waits", "stop"):
