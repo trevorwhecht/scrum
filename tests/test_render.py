@@ -329,11 +329,18 @@ class RenderChromeTest(unittest.TestCase):
         self.assertIn("/load-skeleton 390 error: ready", lines)
 
     def assert_not_busy(self, path):
-        code, err, took = timed_chrome([self.url, str(self.out), path], LOAD_CAP=20)
+        busy, real = [], render._busy
+
+        def recorder(cdp):
+            busy.append(real(cdp))
+            return busy[-1]
+
+        with mock.patch.object(render, "_busy", recorder):
+            code, err, took = timed_chrome([self.url, str(self.out), path], LOAD_CAP=120)
         self.assertEqual(code, 0, err)
         self.assertEqual(len(took), 2)
-        for t in took:  # a busy page waits the whole 20 s cap
-            self.assertLess(t, 20)
+        self.assertGreaterEqual(len(busy), 2)  # once per width
+        self.assertNotIn(True, busy)  # the page was never treated as busy
         page = json.loads((self.out / "manifest.json").read_text())["pages"][0]
         self.assertEqual(page["status"], "ok")
 
