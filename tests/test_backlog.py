@@ -1013,6 +1013,105 @@ class BacklogTest(unittest.TestCase):
             self.assertEqual(specs[t].read_text(), f"# {t}\n")
         self.assertFalse(self.spec_file("Alpha and Beta").exists())
 
+    # --- job 1511: a retire that cites only aborted jobs (a requeued item) is refused and left open ---
+    def retire_run(self, backlog, jobs, retire, extra=None):
+        """Write board.json jobs and a plan retiring `retire` ({item, reason}); apply it. (result, stderr, Skipped body)."""
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        n = self.triage(backlog, {"retire": [retire], **(extra or {})})["id"]
+        err = io.StringIO()
+        with redirect_stderr(err):
+            res = board.cmd_triage_apply(self.root, n)
+        skipped = (self.root / "triage" / n / "report.md").read_text().split("## Skipped\n", 1)[1]
+        return res, err.getvalue(), skipped
+
+    def test_triage_retire_citing_only_aborted_job_left_open(self):
+        backlog = "# Backlog\n- [ ] Fix the widget {#wdgt}\n"
+        res, err, skipped = self.retire_run(
+            backlog, [{"id": "1400-fix-the-widget", "stage": "aborted", "reason": "requeue: base moved"}],
+            {"item": "Fix the widget", "reason": "repeat of 1400-fix-the-widget"})
+        self.assertEqual(res, {"merged": 0, "retired": 0, "manual": 0, "estimated": 0, "depends": 0, "skipped": 1})
+        self.assertEqual(self.text(), backlog)
+        self.assertEqual(skipped,
+            '- retire "Fix the widget" — cites only aborted job(s) 1400-fix-the-widget; left open\n')
+        self.assertEqual(err, 'triage 001: kept open "Fix the widget" — cites only aborted job(s) 1400-fix-the-widget\n')
+        # by number after "job"
+        res, err, skipped = self.retire_run(
+            backlog, [{"id": "1400-fix-the-widget", "stage": "aborted", "reason": "requeue: base moved"}],
+            {"item": "Fix the widget", "reason": "same as job 1400"})
+        self.assertEqual((res["retired"], res["skipped"]), (0, 1))
+        self.assertEqual(self.text(), backlog)
+
+    def test_triage_retire_matching_closed_line_of_aborted_job_left_open(self):
+        backlog = "# Backlog\n- [x] Fix the widget → 1400-fix-the-widget\n- [ ] Fix the widget\n"
+        res, err, skipped = self.retire_run(
+            backlog, [{"id": "1400-fix-the-widget", "stage": "aborted", "reason": "requeue: base moved"}],
+            {"item": "Fix the widget", "reason": "already built"})
+        self.assertEqual(res, {"merged": 0, "retired": 0, "manual": 0, "estimated": 0, "depends": 0, "skipped": 1})
+        self.assertEqual(self.text(), backlog)
+        self.assertEqual(skipped,
+            '- retire "Fix the widget" — cites only aborted job(s) 1400-fix-the-widget; left open\n')
+        self.assertIn('kept open "Fix the widget"', err)
+
+    def test_triage_retire_requeued_item_of_aborted_job_left_open(self):
+        backlog = "# Backlog\n- [x] Widget fix → 1400-widget\n- [ ] Fix the widget so it spins\n"
+        key = hashlib.sha1(b"Fix the widget so it spins").hexdigest()[:12]
+        res, err, skipped = self.retire_run(
+            backlog, [{"id": "1400-widget", "stage": "aborted", "reason": "requeue: base moved", "requeued": key}],
+            {"item": "Fix the widget so it spins", "reason": "already built"})
+        self.assertEqual(res, {"merged": 0, "retired": 0, "manual": 0, "estimated": 0, "depends": 0, "skipped": 1})
+        self.assertEqual(self.text(), backlog)
+        self.assertEqual(skipped,
+            '- retire "Fix the widget so it spins" — cites only aborted job(s) 1400-widget; left open\n')
+        self.assertEqual(err, 'triage 001: kept open "Fix the widget so it spins" — cites only aborted job(s) 1400-widget\n')
+
+    def test_triage_retire_citing_obsolete_abort_still_retires(self):
+        for why in ("obsolete: the flag is gone", "looks already fixed: main has it"):
+            with self.subTest(why=why):
+                res, err, skipped = self.retire_run(
+                    "# Backlog\n- [ ] Fix the widget\n", [{"id": "1400-fix-the-widget", "stage": "aborted", "reason": why}],
+                    {"item": "Fix the widget", "reason": "see job 1400"})
+                self.assertEqual((res["retired"], res["skipped"]), (1, 0))
+                self.assertEqual(self.text(), "# Backlog\n- [x] Fix the widget <!-- retired: see job 1400 -->\n")
+                self.assertEqual((err, skipped), ("", "None.\n"))
+
+    def test_triage_retire_trevor_self_text_ignores_obsolete_abort(self):
+        for why in ("obsolete: the flag is gone", "looks already fixed: main has it"):
+            with self.subTest(why=why):
+                backlog = "# Backlog\n- [ ] Fix the widget (trevor Self-Text 2026-11-20)\n"
+                res, err, skipped = self.retire_run(
+                    backlog, [{"id": "1400-fix-the-widget", "stage": "aborted", "reason": why}],
+                    {"item": "Fix the widget (trevor Self-Text 2026-11-20)", "reason": "see job 1400"})
+                self.assertEqual((res["retired"], res["skipped"]), (0, 1))
+                self.assertEqual(self.text(), backlog)
+                self.assertIn("cites only aborted job(s) 1400-fix-the-widget; left open", skipped)
+
+    def test_triage_retire_with_done_or_unknown_job_still_retires(self):
+        aborted = {"id": "1400-fix-the-widget", "stage": "aborted", "reason": "requeue: base moved"}
+        cases = [
+            ([aborted, {"id": "1401-widget-two", "stage": "done"}], "jobs 1400 and 1401 built it"),
+            ([aborted, {"id": "1402-widget-three", "stage": "build"}], "1400-fix-the-widget and 1402-widget-three"),
+            ([aborted], "built by 1399-not-here"),
+            ([aborted], "messageManager 087 covers it"),
+            ([aborted], "no longer wanted"),
+        ]
+        for jobs, reason in cases:
+            with self.subTest(reason=reason):
+                res, err, skipped = self.retire_run("# Backlog\n- [ ] Fix the widget\n", jobs,
+                                                    {"item": "Fix the widget", "reason": reason})
+                self.assertEqual((res["retired"], res["skipped"]), (1, 0))
+                self.assertEqual(self.text(), f"# Backlog\n- [x] Fix the widget <!-- retired: {reason} -->\n")
+                self.assertEqual((err, skipped), ("", "None.\n"))
+
+    def test_triage_refused_retire_keeps_item_for_estimate(self):
+        res, err, skipped = self.retire_run(
+            "# Backlog\n- [ ] Fix the widget {#wdgt}\n- [ ] Use the widget {needs #wdgt}\n",
+            [{"id": "1400-fix-the-widget", "stage": "aborted", "reason": "requeue: base moved"}],
+            {"item": "Fix the widget", "reason": "job 1400"},
+            {"estimate": [{"item": "Fix the widget", "points": 3, "why": "one fix"}]})
+        self.assertEqual(res, {"merged": 0, "retired": 0, "manual": 0, "estimated": 1, "depends": 0, "skipped": 1})
+        self.assertEqual(self.text(),
+            "# Backlog\n- [ ] [3] Fix the widget {#wdgt} <!-- one fix -->\n- [ ] Use the widget {needs #wdgt}\n")
+
     # --- Human setup: a " {setup: step; step}" marker parks an item until Trevor clicks Setup done ---
     SETUP_LINE = ("- [ ] [3] Send SMS alerts {#k3f9} {needs #a1b2} {setup: Buy a Twilio number; Add TWILIO_TOKEN to .env}"
                   " → 003-x <!-- why -->")
