@@ -1744,13 +1744,18 @@ def hot_stop_tick() -> list[str]:
     UI sweep session (RUNS `<project>/ui-sweep`, live) and a full E2E in flight (E2E_FULL["pid"], its buildlock child).
     Each group gets TERM, then KILL after HOT_STOP_WAIT (stop_group). The E2E sets E2E_FULL["hot_stop"] to the reason
     first, so e2e_full_run records `loaded` and files nothing; with no job session live (board.live_sessions() is 0) a
-    memory pressure warn (kernel level 2) alone does not stop the E2E, but critical, swap, CPU load and a live job do; the sweep stops the main-checkout listeners started since
+    memory pressure warn (kernel level 2) alone stops neither run (jobs 1359, 1477), but critical, swap, CPU load and a
+    live job do; the sweep stops the main-checkout listeners started since
     UI_SWEEP_BEFORE[project] (e2e_full_stop_new_servers) and, only while ui-sweep.json still holds the same running
     record, rewrites it `loaded` with the reason and no `dir`, so it reruns and files nothing. One processes.log line
     per stop. Job sessions are never signalled. Returns the `<project>/ui-sweep` and `<project>/e2e-full` names stopped."""
     why = board.heavy_hold() or board.vm_pressure_reason()
     if not why:
         return []
+    if board.live_sessions() == 0:
+        why = board.heavy_hold(warn_ok=True)  # a run's own memory warn alone never stops it (jobs 1359, 1477)
+        if not why:
+            return []
     stopped = []
     for project, repo in board.projects().items():
         root = repo / "scrum"
@@ -1769,9 +1774,7 @@ def hot_stop_tick() -> list[str]:
             board.log_process("UI sweep", "stopped", repo=str(repo), reason=why)
             stopped.append(f"{project}/ui-sweep")
     pid, running = E2E_FULL.get("pid"), E2E_FULL.get("running")
-    if pid and running and board.live_sessions() == 0:
-        why = board.heavy_hold(warn_ok=True)  # the full E2E's own run causes a memory warn: it alone never stops it (job 1359)
-    if pid and running and why:
+    if pid and running:
         E2E_FULL["hot_stop"] = why
         if stop_group(pid):
             repo = board.projects().get(running)
@@ -2111,7 +2114,9 @@ def ui_sweep_tick(project, repo, root) -> None:
     """Start one headless sweep session (spawn id ui-sweep, at UI_SWEEP_NICE) on repo's main checkout when project.md
     has UI globs and a Dev command, no sweep runs anywhere, no full E2E run is in flight (E2E_FULL; its next dev holds
     the dev lock), the E2E lock is free (an orphaned full run holds it) and no job waits on the E2E queue
-    (e2e_job_waiting), no solo run holds the Mac or waits for it (board.solo_hold, job 1361), the tracked tree is clean,
+    (e2e_job_waiting), no solo run holds the Mac or waits for it (board.solo_hold, job 1361), no job session is live
+    (board.live_sessions() is 0, the condition under which hot_stop_tick lets a sweep ride out a warn, job 1477), the
+    tracked tree is clean,
     board.machine_ok(claim=True) passes, check.lock and build.lock have no holder or waiter (a job's Check or Build
     goes first; a last record E2E_FULL_EVERY old, or none, starts anyway, job 1244) and e2e_full_due holds. It sweeps
     since the last record's head (its since after a running or error record, so a dead sweep's range is kept; HEAD~5
@@ -2125,7 +2130,7 @@ def ui_sweep_tick(project, repo, root) -> None:
         rec = ui_sweep_record(other / "scrum")
         if rec and rec.get("result") == "running" and now - (rec.get("at") or 0) < E2E_FULL_STALE:
             return
-    if not e2e_queue_free() or e2e_job_waiting() or board.solo_hold() \
+    if not e2e_queue_free() or e2e_job_waiting() or board.solo_hold() or board.live_sessions() \
             or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip() \
             or board.machine_ok(root, claim=True) or board.vm_pressure_reason():
         return
