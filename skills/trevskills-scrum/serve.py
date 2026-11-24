@@ -30,7 +30,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, collections, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, threading, time
+import argparse, base64, collections, errno, fcntl, functools, hashlib, json, os, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, threading, time
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -4289,6 +4289,55 @@ def run_exits(project) -> dict:
                 and r.get("proc") is not None and (code := r["proc"].poll()) is not None}
 
 
+SLOW_STEP_S = 30  # timed_step logs a watchdog step that takes longer than this
+PULSE_BUSY: dict[str, bool] = {}  # the last watchdog_tick's busy map, read by pulse_loop
+
+
+def timed_step(name, fn, *args, clock=None, **kw):
+    """fn(*args, **kw), printing `watchdog: slow step <name> <seconds>s` to stderr when it took over SLOW_STEP_S
+    (nothing otherwise). clock is injectable (default time.monotonic). The result and any exception pass through."""
+    clock = clock or time.monotonic
+    start = clock()
+    try:
+        return fn(*args, **kw)
+    finally:
+        took = clock() - start
+        if took > SLOW_STEP_S:
+            print(f"watchdog: slow step {name} {took:.0f}s", file=sys.stderr, flush=True)
+
+
+TIMED_STEPS = ("claude_migrate", "respawn_exited", "record_outcomes", "board_busy", "play_queue_tick", "auto_resume",
+               "main_ff_tick", "terminal_batch_tick", "e2e_full_tick", "ui_sweep_tick", "idle_claim", "sweep_parents",
+               "cloud_tick", "project_notes_tick", "shop_tick", "prune_worktrees", "prod_errors_tick", "digest_retry_tick",
+               "actions_alert", "idle_cleanup", "stop_leftovers", "report_hogs", "auto_continue_tick", "window_tick",
+               "weekly_tick", "e2e_lock_reap", "hot_stop_tick")  # watchdog_tick steps timed_step names when slow
+
+
+def time_steps(names=TIMED_STEPS, scope=None):
+    """Replace each named function in scope (default: this module) with a wrapper that runs it through timed_step, so
+    watchdog_tick's own calls stay as written. A missing name is skipped."""
+    scope = globals() if scope is None else scope
+    for name in names:
+        fn = scope.get(name)
+        if callable(fn) and not getattr(fn, "timed", False):
+            def wrapper(*args, _fn=fn, _name=name, **kw):
+                return timed_step(_name, _fn, *args, **kw)
+            functools.update_wrapper(wrapper, fn)  # name, docstring and __wrapped__ (inspect.getsource follows it)
+            wrapper.timed = True
+            scope[name] = wrapper
+
+
+def pulse_loop():
+    """Run pulse_tick every 60 s from its own thread, so its stuck_alert never waits on a slow watchdog_tick step.
+    One bad pulse never ends the thread."""
+    while True:
+        try:
+            pulse_tick(dict(PULSE_BUSY))
+        except (Exception, SystemExit) as e:
+            print(f"watchdog: pulse: {e}", file=sys.stderr, flush=True)
+        time.sleep(60)
+
+
 def watchdog_tick():
     """Three passes over every registered project; one project's failure never stops the others.
     1. Resume: per project, move old .claude parks into the Terminal batch (claude_migrate), flag exited and stalled sessions (respawn_exited, cmd_watchdog), then start Trevor's queued
@@ -4315,8 +4364,8 @@ def watchdog_tick():
     Then report_hogs lists, never stops, each process outside the scrum over one core for 10+ minutes, for the meter.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
-    6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard,
-       and its stuck_alert texts Trevor when machine_ok holds every start with nothing running.
+    6. Pulse: pulse_loop runs pulse_tick on its own 60 s timer thread (job 1429, so a slow step here never delays its
+       stuck_alert); this tick only publishes its busy map to PULSE_BUSY. Slow steps are named on stderr by TIMED_STEPS' wrappers.
     Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard, then runs e2e_lock_reap,
     then write_shop_room (shop-room.json, which cmd_ready reads), written again after a shop_tick that dispatched,
     then agent_links_tick (re-runs install.sh when a scrum agent link is bad, in its own guard), then hot_stop_tick once,
@@ -4493,10 +4542,8 @@ def watchdog_tick():
         weekly_tick()
     except (Exception, SystemExit) as e:
         print(f"watchdog: weekly digest: {e}", file=sys.stderr, flush=True)
-    try:
-        pulse_tick(busy)
-    except (Exception, SystemExit) as e:
-        print(f"watchdog: pulse: {e}", file=sys.stderr, flush=True)
+    PULSE_BUSY.clear()  # pulse_loop (its own timer, job 1429) reads this tick's busy map
+    PULSE_BUSY.update(busy)
     cooldown_chime()
 
 
@@ -6300,18 +6347,34 @@ def hog_alert(today: str | None = None) -> str | None:
 
 JOB_COST_TTL = 300  # seconds one board.transcript_tokens read serves every project's job costs
 JOB_COST_CACHE = {}  # "at" -> time.monotonic() of the read; "costs" -> {project: {job: (tokens, usd)}}
-JOB_COST_LOCK = threading.Lock()  # one read at a time; a poll that waits shares the result
+JOB_COST_LOCK = threading.Lock()  # guards JOB_COST_CACHE and JOB_COST_BUSY only, never held across the read
+JOB_COST_BUSY = [False]  # True while one refresh reads; a poll that finds it set serves the last known costs
 REAL_TRANSCRIPT_TOKENS = board.transcript_tokens  # job_costs skips the real read under unittest unless a test replaced it
 
 
 def job_costs(project):
     """{job: (tokens, usd)} for project from board.transcript_tokens over the last board.JOB_COST_DAYS days (summed by
-    board.cost_by_job), one read for every project per JOB_COST_TTL seconds. A failed read logs to stderr and is cached
-    as no costs. Under unittest with the real reader and no SCRUM_TRANSCRIPTS it reads nothing (Trevor's transcripts)."""
+    board.cost_by_job), one read for every project per JOB_COST_TTL seconds. A poll never waits on the read: past the
+    TTL it starts one refresh in a daemon thread (job 1429; under unittest the caller runs it, so tests see the result)
+    and returns the last known costs ({} before the first read). Under unittest with the real reader and no
+    SCRUM_TRANSCRIPTS it reads nothing (Trevor's transcripts)."""
     with JOB_COST_LOCK:
-        if JOB_COST_CACHE and time.monotonic() - JOB_COST_CACHE["at"] < JOB_COST_TTL:
-            return JOB_COST_CACHE["costs"].get(project, {})
-        costs = {}
+        if JOB_COST_CACHE and time.monotonic() - JOB_COST_CACHE["at"] < JOB_COST_TTL or JOB_COST_BUSY[0]:
+            return JOB_COST_CACHE.get("costs", {}).get(project, {})
+        JOB_COST_BUSY[0] = True
+    if "unittest" in sys.modules:
+        refresh_job_costs()
+    else:
+        threading.Thread(target=refresh_job_costs, daemon=True).start()
+    with JOB_COST_LOCK:
+        return JOB_COST_CACHE.get("costs", {}).get(project, {})
+
+
+def refresh_job_costs():
+    """One transcript read (no lock held), then store it. A failed read logs to stderr and keeps the last known costs
+    (no costs when there are none); either way `at` moves on, so a failing read is not retried every poll."""
+    try:
+        costs = None
         if not ("unittest" in sys.modules and board.transcript_tokens is REAL_TRANSCRIPT_TOKENS
                 and not os.environ.get("SCRUM_TRANSCRIPTS")):
             now = time.time()
@@ -6319,9 +6382,11 @@ def job_costs(project):
                 costs = board.cost_by_job(board.transcript_tokens(now - board.JOB_COST_DAYS * 86400, now))
             except Exception as e:  # noqa: BLE001  a bad transcript never breaks the board
                 print(f"job costs: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-                costs = {}
-        JOB_COST_CACHE.update(at=time.monotonic(), costs=costs)
-        return costs.get(project, {})
+        with JOB_COST_LOCK:
+            JOB_COST_CACHE.update(at=time.monotonic(), costs=costs if costs is not None else JOB_COST_CACHE.get("costs", {}))
+    finally:
+        with JOB_COST_LOCK:
+            JOB_COST_BUSY[0] = False
 
 
 PREVIEW_TYPES = {".mp4": ("video", "video/mp4"), ".m4v": ("video", "video/mp4"), ".mov": ("video", "video/quicktime"),
@@ -8514,6 +8579,7 @@ def main():
         print(f"focus migration: {e}", file=sys.stderr, flush=True)
     threading.Thread(target=drain_all_spools, daemon=True).start()  # async backlog adds a restart left in a spool
     threading.Thread(target=watchdog_loop, daemon=True).start()
+    threading.Thread(target=pulse_loop, daemon=True).start()  # stuck_alert on its own timer (job 1429)
     names = ", ".join(board.projects()) or "none yet (run /trevskills-scrum in a repo)"
     print(f"Trevskills Scrum: http://localhost:{a.port}  projects: {names}  claude: {CLAUDE}" + (f"  tailnet: {tn}" if tn else ""), flush=True)
     if fd_limit:
@@ -8522,6 +8588,9 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+time_steps()
 
 
 if __name__ == "__main__":
