@@ -305,7 +305,7 @@ class BacklogTest(unittest.TestCase):
         self.assertEqual(res, {"merged": 0, "retired": 2, "manual": 2, "estimated": 0, "depends": 0, "skipped": 0})
         self.assertIn("- [x] Watch the reel", self.text())
         self.assertIn("<!-- retired: done in 010-x -->", self.text())
-        self.assertEqual((self.root / "manual-checks.md").read_text(), "- [ ] Watch the reel\n- [ ] Other\n")
+        self.assertEqual((self.root / "manual-checks.md").read_text(), "# Manual checks\n- [ ] Watch the reel\n- [ ] Other\n")
 
     def test_triage_retire_agent_item_no_manual_check(self):
         self.triage("# Backlog\n- [ ] Agent item\n", {"retire": [{"item": "Agent item", "reason": "done in 010-x"},
