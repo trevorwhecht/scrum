@@ -86,7 +86,10 @@ class LaunchCpuGate(ServeBase):
         self.assertEqual(spawn.call_count, 1)
 
     def cpu_held_job(self, title, lane, queued_at, gate="cpu_load(600%)", **fields):
-        """A needs-human job spawn's CPU gate queued: play_queued, queued_launch in its stage, `gate` in queue-gates.txt."""
+        """A needs-human job spawn's CPU gate queued: play_queued, queued_launch in its stage, `gate` in queue-gates.txt.
+        started_by "wake" (queue_ready_waiting's launch) unless given: cmd_new's "hand" would make it board.hand_queued,
+        which play_queue_tick leaves to hand_queue_tick (job 1454)."""
+        fields.setdefault("started_by", "wake")
         job_id = self.needs_human(title, reason="approve: ready to merge", lane=lane, play_queued=queued_at,
                                   queued_launch={"action": "start", "prompt": "/trevskills-scrum start x",
                                                  "stage": "needs-human"}, **fields)
