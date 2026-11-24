@@ -6058,6 +6058,22 @@ class BoardTest(unittest.TestCase):
         gates.write_text("ram_room\ncpu_load\n")
         self.assertEqual(cell(), "ram_room, cpu_load")
 
+    def test_timing_row_queue_gate_held_times(self):
+        """Job 1485: each gate shows its head's held time from current-gates.json, longest first; a gate with none
+        keeps its file order after them, and a malformed record falls back to the plain list."""
+        cell = lambda: board._timing_row(self.root, "j", {}, {})[0][4]
+        self.write("j/spec.md", "s\n")
+        self.write("j/queue-gates.txt", "cpu_load(95%)\nswap\nram_room(free=10%)\nvm_pressure\nruns_on_shop\n")
+        current = self.root / "jobs/j/current-gates.json"
+        current.write_text(json.dumps({"swap": {"at": 1.0, "text": "swap", "held": 3720},
+                                       "vm_pressure": {"at": 1.0, "text": "vm_pressure", "held": 22200.0},
+                                       "ram_room": {"at": 1.0, "text": "ram_room", "held": 120},
+                                       "cpu_load": {"at": 1.0, "text": "cpu_load"},
+                                       "runs_on_shop": 5.0}))
+        self.assertEqual(cell(), "vm_pressure 6h10m, swap 1h02m, ram_room(free=10%) 2m, cpu_load(95%), runs_on_shop")
+        current.write_text("not json")
+        self.assertEqual(cell(), "cpu_load(95%), swap, ram_room(free=10%), vm_pressure, runs_on_shop")
+
     def test_timing_row_stall_holds_cell(self):
         """Job 927: stall-holds.txt (serve.py note_stall_hold) names what held the job's stalls in its Stalls cell."""
         self.write("j/spec.md", "s\n")
@@ -7591,8 +7607,38 @@ class CurrentGateTextTest(unittest.TestCase):
                                       "heavy_cap": {"at": 50.0, "text": "heavy_cap(2/2): 2 heavy jobs on this Mac (a, b)"}})
             with mock.patch("time.time", return_value=60.0):
                 board.note_queue_gate(t, "002-x", "ram_room(free=4%)", reason="low RAM")
-            self.assertEqual(read()["ram_room"], {"at": 60.0, "text": "low RAM"})
+            self.assertEqual(read()["ram_room"], {"at": 60.0, "text": "low RAM", "held": 10.0})
             self.assertEqual(read()["heavy_cap"]["at"], 50.0)
+
+    def test_note_current_gate_adds_held_seconds(self):
+        """Job 1485: a hit under 5 min after the head's last one adds the gap to its "held" seconds; a longer gap,
+        a first hit or an old bare-number entry adds nothing, and a malformed "held" starts over."""
+        with tempfile.TemporaryDirectory() as t:
+            folder = Path(t) / "jobs" / "002-x"
+            folder.mkdir(parents=True)
+            read = lambda: json.loads((folder / "current-gates.json").read_text())
+
+            def hit(at, gate="vm_pressure(77%)"):
+                with mock.patch("time.time", return_value=at):
+                    board.note_current_gate(t, "002-x", gate)
+            hit(1000.0)
+            self.assertEqual(read(), {"vm_pressure": {"at": 1000.0, "text": "vm_pressure(77%)"}})
+            hit(1060.0)
+            self.assertEqual(read()["vm_pressure"]["held"], 60.0)
+            hit(1300.0)  # 240 s later: still under 5 min
+            self.assertEqual(read()["vm_pressure"]["held"], 300.0)
+            hit(1600.0)  # exactly 5 min: not under, so not held
+            self.assertEqual(read()["vm_pressure"], {"at": 1600.0, "text": "vm_pressure(77%)", "held": 300.0})
+            hit(9000.0)  # hours later: a new hold, the gap is not counted
+            hit(9100.0)
+            self.assertEqual(read()["vm_pressure"]["held"], 400.0)
+            hit(9150.0, "swap(2GB)")  # another head keeps its own total
+            self.assertEqual((read()["swap"].get("held"), read()["vm_pressure"]["held"]), (None, 400.0))
+            (folder / "current-gates.json").write_text(json.dumps({"cpu_load": 9000.0,
+                                                                  "swap": {"at": 9100.0, "held": "x"}}))
+            hit(9030.0, "cpu_load(95%)")  # old shape: a bare epoch is the last hit
+            hit(9160.0, "swap(2GB)")  # malformed held: starts over from 0
+            self.assertEqual((read()["cpu_load"]["held"], read()["swap"]["held"]), (30.0, 60.0))
 
 
 class SpawnTest(unittest.TestCase):

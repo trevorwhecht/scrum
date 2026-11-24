@@ -3271,7 +3271,9 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
     then ` (held: <tokens>)` from stall-holds.txt (serve.py note_stall_hold: what auto_resume passed it over for).
     Each `queued` epoch (a questions.log queue-wait line) runs to the job's next run log, else the round's end, is
     subtracted like `waits` and adds one to E2E lock waits. An autoPlayed job's Round times start `paused `, and a job
-    whose board entry lists depends_on gets `depends_on:<id>` as its Queue gate when queue-gates.txt gives none.
+    whose board entry lists depends_on gets `depends_on:<id>` as its Queue gate when queue-gates.txt gives none; a
+    gate whose head has "held" seconds in current-gates.json (note_current_gate) shows them, e.g. `vm_pressure 6h10m`,
+    held gates first, longest first, then the rest in file order.
     by_id (write_timing's {id: board job}): when every depends_on blocker is on it at stage done (_deps_done_at), the
     Queue cell is `<total> (<after> after depends_on)`, <after> being the part of each Queue piece (feature.md to the
     claim, each dep-waits.txt span, spec.md to round 1's start) after the latest blocker's updatedAt."""
@@ -3343,9 +3345,18 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
         total = min(total, spec)
         spec, queue = spec - total, queue + total
     try:  # serve.py note_queue_gate: the launch gates that queued it
-        gates = ", ".join((folder / "queue-gates.txt").read_text(encoding="utf-8", errors="replace").split()) or "-"
+        gates = (folder / "queue-gates.txt").read_text(encoding="utf-8", errors="replace").split()
     except OSError:
-        gates = "-"
+        gates = []
+    try:  # note_current_gate's held seconds per head: each gate with its held time, longest first (job 1485)
+        seen = json.loads((folder / CURRENT_GATES).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        seen = None
+    seen = seen if isinstance(seen, dict) else {}
+    held = {g: h for g in gates if isinstance(v := seen.get(g.split("(", 1)[0]), dict)
+            and type(h := v.get("held")) in (int, float) and h > 0}
+    gates = ", ".join([f"{g} {_mins(held[g])}" for g in sorted(held, key=lambda g: -held[g])]
+                      + [g for g in gates if g not in held]) or "-"
     if gates == "-" and isinstance(job.get("depends_on"), list) and job["depends_on"]:  # waited on an earlier job by plan
         gates = ", ".join(f"depends_on:{d}" for d in job["depends_on"])
     stall_cell, resume = [], 0
@@ -3375,7 +3386,7 @@ RAM_HOLD_RE = re.compile(r"^\S+ free=(?:(\d+)%|unknown) sessions=(\d+)$", re.M) 
 
 def write_timing(root, digest_id, jobs):
     """digests/<NNN>/timing.md: one row per claimed job (wall, spec, queue (with the part after a done depends_on
-    blocker's updatedAt: _timing_row's by_id is this board), queue gate = queue-gates.txt, rounds, round times, no-change rounds = a
+    blocker's updatedAt: _timing_row's by_id is this board), queue gate = queue-gates.txt (each gate with its current-gates.json held time, longest first), rounds, round times, no-change rounds = a
     head.txt equal to the previous round's, E2E lock waits = `exit 124` in check.md plus queue-wait lines, questions.log stall lines, each as
     its minutes to the next run log),
     totals, every job on every registered board (and this one) now stalled or held (queue_waiting) on the E2E queue, and per claimed
@@ -6965,13 +6976,16 @@ def overlap_gate(holder, mine, theirs):
     return f"overlap:{holder}:{min(shared)}" if shared else f"overlap:{holder}"
 
 
-CURRENT_GATES = "current-gates.json"  # {gate head: {"at": epoch seconds last hit, "text": why}} (a bare epoch number is the old shape); serve.py gate_heads reads it (job 1408)
+CURRENT_GATES = "current-gates.json"  # {gate head: {"at": epoch seconds last hit, "text": why, "held": secs held}} (a bare epoch number is the old shape); serve.py gate_heads reads it (job 1408)
+GATE_HELD_GAP_SECS = 300  # note_current_gate: a hit this soon after the head's last one adds the gap to its "held" secs (job 1485)
 
 
 def note_current_gate(root, job_id: str, gate: str, reason: str | None = None) -> None:
     """Stamp `gate`'s head (text before `(`) with {"at": time now, "text": reason, else the full gate string} in
     jobs/<id>/current-gates.json, so serve.py gate_heads and held_by name only gates hit lately while queue-gates.txt
-    stays the cumulative log. Read, set and os.replace run under one
+    stays the cumulative log. When the head's last hit was under GATE_HELD_GAP_SECS ago, the gap is added to its
+    "held" seconds (kept only once above 0; a malformed one starts over), which _timing_row's Queue gate cell prints
+    (job 1485). Read, set and os.replace run under one
     flock on jobs/<id>/.current-gates.lock, so a board.py and a serve.py writer never drop each other's entry. A
     malformed record starts over; a write error never blocks the queue."""
     folder = Path(root) / "jobs" / job_id
@@ -6986,7 +7000,14 @@ def note_current_gate(root, job_id: str, gate: str, reason: str | None = None) -
                 seen = {}
             if not isinstance(seen, dict):
                 seen = {}
-            seen[gate.split("(", 1)[0]] = {"at": time.time(), "text": reason or gate}
+            head, now = gate.split("(", 1)[0], time.time()
+            prior = seen.get(head)
+            last = prior.get("at") if isinstance(prior, dict) else prior
+            held = prior.get("held", 0) if isinstance(prior, dict) else 0
+            held = held if type(held) in (int, float) and held > 0 else 0
+            if type(last) in (int, float) and 0 <= now - last < GATE_HELD_GAP_SECS:
+                held += now - last
+            seen[head] = {"at": now, "text": reason or gate, **({"held": held} if held else {})}
             try:
                 tmp.write_text(json.dumps(seen), encoding="utf-8")
                 os.replace(tmp, path)
