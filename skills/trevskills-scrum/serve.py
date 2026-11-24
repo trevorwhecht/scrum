@@ -614,11 +614,10 @@ def wake_waiting(project, root):
 
 
 def queue_ready_waiting(project, root):
-    """Job 1428: a tick that holds the claim (a queued launch waits on a slot, or a Play started one) still queues each parentless
-    plain waiting job whose depends_on are all done (board.parked_waiting, no `wake`): stage -> spec, play_queued = when its last
-    blocker finished (the blockers' latest updatedAt), queued_launch start, never play_queued_manual, so play_queue_tick's order
-    decides and every gate (CPU, RAM, heavy_cap, cool-down) still holds the start. Cool-down and finish_first keep it waiting, as
-    wake_waiting does. An aborted or gone blocker is left to wake_waiting. Returns the queued ids."""
+    """Job 1428: a tick holding the claim (a queued launch waits on a slot) still queues each parentless plain waiting job whose
+    depends_on are all done: stage -> spec, play_queued = its last blocker's updatedAt, queued_launch start, never manual, so
+    play_queue_tick's order decides and every start gate holds. Cool-down, finish_first, heavy_cap and `wake` jobs stay waiting.
+    Returns the queued ids."""
     if not any(map(board.parked_waiting, board.read_board(root)["jobs"])) or board.machine_ok(root, claim=True) \
             or board.finish_first(root):
         return []

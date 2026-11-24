@@ -1312,12 +1312,8 @@ class ServeTest(unittest.TestCase):
 
     def test_play_queue_tick_held_launch_does_not_stop_later_launch(self):
         """Job 1428: a launch held by heavy_cap or RAM stays queued while a later queued launch the gates let through starts."""
-        first = self.queued_launch_job("Held by gate", 3)
-        later = self.queued_launch_job("Gate lets it through", 2)
-        for job_id in (first, later):
-            self.edit_job(job_id, queued_launch={"action": "start", "prompt": job_id, "stage": "needs-human"})
-        s = self.serve
-        started = []
+        first, later = self.queued_launch_job("Held by gate", 3), self.queued_launch_job("Gate lets it through", 2)
+        s, started = self.serve, []
 
         def fake_spawn(project, root, job_id, *a, **k):
             if job_id == first:
