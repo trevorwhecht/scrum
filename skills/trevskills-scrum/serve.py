@@ -319,14 +319,15 @@ NO_HOLD_TEXT = "No hold recorded: the queue has not picked it up yet"
 
 def held_by(root, job, stage):
     """The reasons a waiting job whose depends_on are all done is held by right now (gate_entries' texts, sorted by gate
-    head and joined with `; `), NO_HOLD_TEXT when it has no fresh gate (and is not paused, play-queued or overlap-held), or None for any other job.
+    head and joined with `; `), NO_HOLD_TEXT when it has no fresh gate (and is not paused, play-queued, overlap-held, setup-pending or shop-tagged), or None for any other job.
     A depends_on:<id> gate whose job is done is dropped: that blocker merged, so it is no longer the cause (job 1406).
     `stage` is {job id: stage}."""
     if job.get("stage") != "waiting" or not all(stage.get(d) == "done" for d in job.get("depends_on") or []):
         return None
     ents = {g: t for g, t in gate_entries(root, job).items() if not (g.startswith("depends_on:") and stage.get(g[11:]) == "done")}
-    if not ents and (job.get("paused") or job.get("play_queued") or job.get("overlap_hold")):
-        return None  # Trevor's pause, a queued play or an overlap hold is its own reason, not a missing one
+    if not ents and (job.get("paused") or job.get("play_queued") or job.get("overlap_hold")
+                     or job.get("setup") == "pending" or board.stored_runs_on(root, job) == "shop"):
+        return None  # Trevor's pause, a queued play, an overlap hold, a pending setup or a shop tag is its own reason, not a missing one
     return "; ".join(ents[g] for g in sorted(ents)) or NO_HOLD_TEXT
 
 

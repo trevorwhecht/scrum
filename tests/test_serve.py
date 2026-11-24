@@ -9933,6 +9933,14 @@ class WatchdogIdleParentTest(unittest.TestCase):
         paused = {"id": "002-second", "stage": "waiting", "paused": True, "depends_on": ["001-first"]}
         self.assertIsNone(self.serve.held_by(self.root, paused, stage))  # Trevor's pause is its own reason
 
+    def test_held_by_none_for_setup_pending_and_shop_jobs(self):
+        """Job 1437 round 2: a setup-pending or shop-tagged waiting job keeps its own card line, so no heldBy."""
+        self.queue_board({"id": "002-second", "stage": "waiting", "setup": "pending"},
+                         {"id": "003-third", "stage": "waiting", "runs_on": "shop"})
+        for j in self.serve.board_with_activity(self.root, "repo")["jobs"]:
+            self.assertIsNone(self.serve.held_by(self.root, j, {}), j["id"])
+            self.assertNotIn("heldBy", j)
+
     def test_held_by_text_for_each_gate(self):
         """Job 1437: each held-gate writer records the full why text on the waiting job's card."""
         self.waiting_pair()
