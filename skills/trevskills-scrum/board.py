@@ -1679,7 +1679,7 @@ PROCESSES = (
     ("Two sessions", ("stop_two_sessions",), ()),
     ("Same tests", ("stop_same_tests",), ()),
     ("CPU hogs", ("report_hogs",), ()),
-    ("E2E lock reaps", ("e2e_lock_reap",), ()),
+    ("E2E lock reaps", ("e2e_lock_reap", "render_reap_tick"), ()),
     ("Agent links", ("agent_links_tick",), ()),
     ("Digest retry", ("digest_retry_tick",), ()),
     ("Weekly digest", ("weekly_tick",), ()),

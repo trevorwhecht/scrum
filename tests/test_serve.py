@@ -14449,7 +14449,7 @@ class HotStopTest(unittest.TestCase):
         with mock.patch.object(self.serve, "hot_stop_tick", side_effect=RuntimeError("boom")), \
                 mock.patch.object(self.serve.board, "projects", return_value={}), \
                 mock.patch.object(self.serve.board, "record_cpu_sample"), \
-                mock.patch.object(self.serve, "e2e_lock_reap"), mock.patch.object(self.serve, "write_shop_room"), \
+                mock.patch.object(self.serve, "e2e_lock_reap"), mock.patch.object(self.serve, "render_reap_tick"), mock.patch.object(self.serve, "write_shop_room"), \
                 mock.patch.object(self.serve, "agent_links_tick"), \
                 mock.patch.object(self.serve.board, "ram_room", return_value=0) as room, \
                 contextlib.redirect_stderr(err):
@@ -17006,7 +17006,7 @@ class AgentLinksTest(unittest.TestCase):
         with mock.patch.object(self.serve, "agent_links_tick", side_effect=RuntimeError("boom")) as tick, \
                 mock.patch.object(self.serve.board, "projects", return_value={}), \
                 mock.patch.object(self.serve.board, "record_cpu_sample"), mock.patch.object(self.serve.board, "ram_room", return_value=0), \
-                mock.patch.object(self.serve, "e2e_lock_reap"), mock.patch.object(self.serve, "write_shop_room"), \
+                mock.patch.object(self.serve, "e2e_lock_reap"), mock.patch.object(self.serve, "render_reap_tick"), mock.patch.object(self.serve, "write_shop_room"), \
                 contextlib.redirect_stderr(err):
             self.serve.watchdog_tick()
         self.assertEqual(tick.call_count, 1)

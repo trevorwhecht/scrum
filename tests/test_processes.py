@@ -169,7 +169,7 @@ class ProcessesDigestTest(unittest.TestCase):
                          f"- 2023-11-14T22:13+00:00 start repo={repo} job=2-a manual=false\n"
                          "Files: none\n\n")
         self.assertEqual(self.section(text, "E2E lock reaps"),
-                         "## E2E lock reaps\nCode: e2e_lock_reap\nRuns: 1 (freed 1)\n"
+                         "## E2E lock reaps\nCode: e2e_lock_reap, render_reap_tick\nRuns: 1 (freed 1)\n"
                          "- 2023-11-14T22:15+00:00 freed slot=e2e.lock.0 pid=42 dead=true\nFiles: none\n\n")
         self.assertEqual(self.section(text, "Held items"),
                          "## Held items\nCode: none\nRuns: none logged since the last digest\nFiles:\n- held.md: missing\n\n")
