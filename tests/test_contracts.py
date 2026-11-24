@@ -4258,6 +4258,17 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "`reel.py log` caches each clip's trace", "never reuses a review number",
                        "recorded as exported", "never rebuilds an Edits project"):
             self.assertIn(phrase, resume, phrase)
+        # Job 1440: a rejected export is marked on its Edits line and never resumed as final.
+        for phrase in ("recorded as exported and not marked `rejected`",
+                       "a round whose Edits line is marked `rejected` goes to step 6 as a new Edits project",
+                       "An `approve` means the newest exported round not marked `rejected`"):
+            self.assertIn(phrase, resume, phrase)
+        template = next(l for l in preamble.splitlines() if l.startswith("- r<R>: project "))
+        self.assertIn("exported <ISO time> | rejected <ISO time>: <why>", template)
+        for phrase in ("any `black_start` line marks that round's Edits line `rejected` and sends it back to step 6",
+                       "a shot that differs marks that round's Edits line `rejected` and goes back to step 6 too"):
+            self.assertIn(phrase, approval, phrase)
+        self.assertIn("replacing any `rejected` mark", edits)
         for kind, skill_name, app, ledger in (("edit-vector", "trevskills-vectorcraft", "VectorCraft", "vector.md"),
                                               ("edit-photo", "trevskills-photocraft", "PhotoCraft", "photo.md")):
             text_k = kind_files[kind]
