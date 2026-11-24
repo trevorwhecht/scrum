@@ -1,0 +1,3 @@
+Backlog: add
+Item: Manual checks pile up unrun: 680 open and 6 ticked across the six projects (onewitharts 394/3, boisepartyco 163/1, trevskills-scrum 70/2, messageManager 37/0, trevorhecht-skills 13/0, the-ritzy-mist-google 3/0; counted 2026-11-24), so a check filed there is not done by anyone. After job 1496 merges, sort the open ones once: a command can decide it -> run it or make it a live check; the screen or feature has since changed or a later job covered it -> retire with the reason; only a person can do it -> keep, at most 10 per project, worst first. Use Jev to sort the list, never a read of all 680. Never tick one without evidence. Lane: standard.
+Project: trevskills-scrum

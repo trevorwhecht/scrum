@@ -1,0 +1,1 @@
+Copy the open items stranded in the shop Mac ~/scrum-work/*/scrum/backlog.md files (audit 2026-11-24: law audit, leads finder and 8 others) into each project home backlog (from 1504-wrong-project-on-the-shop-mac-loses-the)
