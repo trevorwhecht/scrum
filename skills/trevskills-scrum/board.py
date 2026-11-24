@@ -8058,6 +8058,7 @@ CLOUD_MARK = "<!-- scrum needs-human -->"  # second line of the cloud session's 
 CLOUD_LABEL = "scrum:needs-human"
 CLOUD_CLOSED = "requeue: cloud PR closed without merging"
 CLOUD_SELF_ABORT = ("requeue:", "obsolete:", "looks already fixed:")  # the cloud job aborted itself (Auto-abort)
+CLOUD_MOVED = re.compile(r"moved to [\w.-]+ backlog")  # New job 3b Wrong-project abort (job 1521); fullmatch only
 CLOUD_LANE = re.compile(r"^Scrum lane: (fast|standard|debug|lilguy)[ \t]*$", re.M)  # the PR body's lane line
 CLOUD_PENDING_HOURS = 24  # how long a moved job waits for its scrum-artifacts/<id> push; fixed, not a setting
 
@@ -8238,7 +8239,7 @@ def _cloud_plan(repo, job_id, prs, ended=False):
               if isinstance(c, dict) and author and _login(c) == author and CLOUD_MARK in str(c.get("body") or "")]
     reason = clean(bodies[-1].split("\n")[0], 300) if bodies else ""
     reason = reason or f"cloud job needs a human; no reason comment on {url}. Fix: read the PR."
-    if reason.startswith(CLOUD_SELF_ABORT):
+    if reason.startswith(CLOUD_SELF_ABORT) or CLOUD_MOVED.fullmatch(reason):
         return "ABORTED", [f"pr={url}"] + lane, reason, False, (reason.startswith("requeue:"), number), head
     pairs = ["stage=needs-human", f"pr={url}"]
     ref = (pr.get("base") or {}).get("ref")
@@ -8280,7 +8281,8 @@ def _cloud_home(root: Path, job_id: str, url: str | None, base: str | None, work
 def cmd_cloud_sync(root: Path, ended=()) -> dict:
     """Move every stage-`cloud` job whose PR finished: MERGED -> done, CLOSED -> aborted and requeued, open with the
     scrum:needs-human label -> needs-human with the comment's reason and a local worktree, or, for a requeue:,
-    obsolete: or looks already fixed: reason, aborted with the PR closed. ended (serve.py cloud_tick: ids whose shop
+    obsolete: or looks already fixed: reason or exactly `moved to <folder> backlog` (CLOUD_MOVED, no requeue), aborted
+    with the PR closed. ended (serve.py cloud_tick: ids whose shop
     session ended, job 1414) brings that job's work home (HOME): its open unlabelled PR, or with no trusted PR at all its
     pushed scrum/<id> branch (branch_pushed), gets a local worktree (cloud_worktree on the PR head, or scrum/<id>) and the
     job becomes a spec stall on it (_cloud_home), the PR left open; when the worktree add fails it goes to needs-human
