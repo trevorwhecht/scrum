@@ -189,6 +189,53 @@ class LaunchCpuGate(ServeBase):
         self.serve.note_queue_gate(self.root, child, "vm_pressure(70%)")  # held again now: the line is current
         self.assertEqual(tuple(self.cpu_first_here()), ("repo", child))
 
+    def test_cpu_first_skips_waiting_child_while_hand_start_queued(self):
+        """Job 1499: a light memory-held waiting child never leads while board.finish_first holds its project (a hand
+        start queued in another project): idle_claim drops waiting children then, so the two held each other."""
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base)
+        kid = base / "kid" / "scrum"
+        (kid / "jobs" / "2-child").mkdir(parents=True)
+        (kid / "jobs" / "2-child" / "queue-gates.txt").write_text("vm_pressure(70%)\n")  # fresh: mem_held now
+        (kid / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "1-runall", "stage": "running", "lane": "runall", "children": ["2-child"]},
+            {"id": "2-child", "stage": "waiting", "lane": "fast", "parent": "1-runall"}]}))
+        (base / "repo").mkdir()
+        (base / "repo" / "scrum").symlink_to(self.root)
+        b = self.serve.board
+        hand = b.cmd_new(self.root, "Hand queued start")
+        self.addCleanup(lambda: self.edit_job(hand, stage="done"))  # the board root is shared
+        stage = self.stage_of(hand)["stage"]
+        self.edit_job(hand, started_by="hand", play_queued="2026-11-24T09:00:00+00:00",
+                      queued_launch={"action": "start", "prompt": f"/trevskills-scrum start {hand}", "stage": stage})
+        repos = {"kid": base / "kid", "repo": base / "repo"}
+        with mock.patch.object(b, "projects", return_value=repos), mock.patch.object(b, "ram_room", return_value=1):
+            self.assertIsNone(self.serve.cpu_first())
+            out, spawn = self.launch(400, hand, lambda: self.start(hand))
+        self.assertIsNotNone(out)
+        self.assertEqual([c.args[1] for c in spawn.call_args_list], [hand])
+        gates = self.root / "jobs" / hand / "queue-gates.txt"
+        self.assertNotIn("cpu_queue", gates.read_text().split() if gates.exists() else [])
+
+    def test_cpu_first_waiting_child_leads_without_hand_start(self):
+        """Job 1499: with nothing holding finish_first, the same light memory-held waiting child still leads (job 1077)."""
+        child = self.waiting_child_with_gate("vm_pressure(70%)", 0)
+        with mock.patch.object(self.serve.board, "finish_first", return_value=None) as ff:
+            self.assertEqual(tuple(self.cpu_first_here()), ("repo", child))
+        self.assertEqual(ff.call_count, 1)
+
+    def test_cpu_first_finish_first_only_for_waiting_child(self):
+        """Job 1499: finish_first is never asked when no waiting child is a candidate, and once per project otherwise."""
+        self.cpu_held_job("Cpu held only", "fast", "2020-01-01T00:00:00+00:00")
+        with mock.patch.object(self.serve.board, "finish_first", return_value=None) as ff:
+            self.assertIsNotNone(self.cpu_first_here())
+        self.assertEqual(ff.call_count, 0)
+        self.waiting_child_with_gate("vm_pressure(70%)", 0)
+        self.waiting_child_with_gate("swap(30%)", 0)
+        with mock.patch.object(self.serve.board, "finish_first", return_value="finish first: x") as ff:
+            self.assertIsNotNone(self.cpu_first_here())
+        self.assertEqual(ff.call_count, 1)
+
     def ram_blocked_setup(self):
         """A standard CPU-held job older than a fast one; board.projects() names this test's board as project repo."""
         std = self.cpu_held_job("Ram std", "standard", "2020-01-01T00:00:00+00:00")
