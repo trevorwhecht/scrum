@@ -179,7 +179,7 @@
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
   board.py ops-kind <id>           print ops-data, ops-content or none: feature.md's `Kind:` line, else a stored ops kind, else
                                    Jev's one cached sort (tag_kind); New job step 1d routes an ops kind to lanes/ops.md
-  board.py fable-ok <id> <planner|spec-writer>  print the Agent model override (claude-fable-5-1) or none: the planner, or
+  board.py fable-ok <id> <planner|spec-writer>  print the Agent model override (fable) or none: the planner, or
                                    the spec-writer on lane standard (or unset), of a complex job (header `Complex: yes`
                                    in feature.md, else spec.md) gets Fable only while fable_state is ok; each such call
                                    appends a line to jobs/<id>/fable.log
@@ -203,7 +203,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 REVIEWERS = ("security", "ux", "ui", "code")
-FABLE_MODEL = "claude-fable-5-1"  # fable-ok: the planner and standard spec-writers of complex jobs, in the ok band only
+FABLE_MODEL = "claude-fable-5-1"  # the weekly digester's override (lanes/digest.md), a full model id
+FABLE_AGENT = "fable"  # fable-ok and spec-models print this: the Agent tool takes only sonnet, opus, haiku or fable (job 1461)
 FABLE_WARN_5H_PCT = 65  # used % at which Fable is near its limit: fable-ok answers none, the weekly digest keeps Fable
 FABLE_WARN_7D_PCT = 75
 FABLE_SWITCH_5H_PCT = 80  # used % at which fable-ok answers none (frontmatter Opus) until the window resets
@@ -9553,7 +9554,7 @@ def big_ticket(root: Path, job_id: str) -> bool:
 
 
 def cmd_fable_ok(root: Path, job_id: str, role: str) -> str:
-    """fable-ok: FABLE_MODEL or "none" for a new planner or spec-writer spawn. Only a job_complex job on the board is
+    """fable-ok: FABLE_AGENT or "none" for a new planner or spec-writer spawn. Only a job_complex job on the board is
     eligible, and its spec-writer only when the board lane is missing, empty or standard. An eligible call gets Fable
     only while fable_state is ok, and appends a tab-separated line to jobs/<id>/fable.log (skipped when that dir is
     missing); an ineligible one writes nothing."""
@@ -9573,7 +9574,7 @@ def cmd_fable_ok(root: Path, job_id: str, role: str) -> str:
         # a reset window reads 0 (fable_used) and a live one is a lower bound. ponytail: a stale 7d reading can undercount.
         usage = {**usage, "written_at": now}
     state = fable_state(usage, now)
-    model = FABLE_MODEL if state == "ok" else "none"
+    model = FABLE_AGENT if state == "ok" else "none"
     job = Path(root) / "jobs" / job_id
     if job.is_dir():
         pct = {k: "—" if v is None else f"{round(v)}%" for k, v in fable_used(usage, now).items()}

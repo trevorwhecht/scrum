@@ -14345,9 +14345,9 @@ class SpecModelsTest(unittest.TestCase):
         self.assertEqual(out, {"001-son": "sonnet", "003-slow": None, "004-fail": None, "005-junk": None})
 
     def test_spec_models_fable_replaces_decision(self):
-        with mock.patch.object(board, "cmd_fable_ok", side_effect=lambda r, j, role: "claude-fable-5-1" if j == "001-son" else "none") as m:
+        with mock.patch.object(board, "cmd_fable_ok", side_effect=lambda r, j, role: "fable" if j == "001-son" else "none") as m:
             out = board.cmd_spec_models(self.root, ["001-son", "002-opus"])
-        self.assertEqual(out, {"001-son": "claude-fable-5-1", "002-opus": "opus"})
+        self.assertEqual(out, {"001-son": "fable", "002-opus": "opus"})
         self.assertEqual([c.args[2] for c in m.call_args_list], ["spec-writer", "spec-writer"])
 
     def test_spec_models_rejects_bad_ids(self):
@@ -14378,6 +14378,7 @@ class FableTest(unittest.TestCase):
 
     def test_fable_state_thresholds(self):
         self.assertEqual(board.FABLE_MODEL, "claude-fable-5-1")
+        self.assertEqual(board.FABLE_AGENT, "fable")  # an Agent tool model value, never a full model id
         self.assertEqual((board.FABLE_WARN_5H_PCT, board.FABLE_WARN_7D_PCT, board.FABLE_SWITCH_5H_PCT,
                           board.FABLE_SWITCH_7D_PCT), (65, 75, 80, 85))
         for five, seven, want in ((79.9, 0, "warn"), (80, 0, "paused"), (0, 84.9, "warn"), (0, 85, "paused"),
@@ -14462,12 +14463,12 @@ class FableTest(unittest.TestCase):
                      "013-noline", "015-below", "016-featureno", "017-weird", "099-gone")
         for job_id in spec_fable:
             out = self.cli(job_id, "spec-writer")
-            self.assertEqual((out.returncode, out.stdout), (0, "claude-fable-5-1\n"), (job_id, out.stderr))
+            self.assertEqual((out.returncode, out.stdout), (0, "fable\n"), (job_id, out.stderr))
         for job_id in spec_none:
             out = self.cli(job_id, "spec-writer")
             self.assertEqual((out.returncode, out.stdout), (0, "none\n"), (job_id, out.stderr))
         for job_id in ("008-bigboy", "011-unlinked", "014-speconly", "004-fast"):
-            self.assertEqual(self.cli(job_id, "planner").stdout, "claude-fable-5-1\n", job_id)
+            self.assertEqual(self.cli(job_id, "planner").stdout, "fable\n", job_id)
         for job_id in ("012-simple", "013-noline", "015-below", "016-featureno", "017-weird", "099-gone"):
             self.assertEqual(self.cli(job_id, "planner").stdout, "none\n", job_id)
         for job_id in ("012-simple", "013-noline", "099-gone"):
@@ -14495,7 +14496,7 @@ class FableTest(unittest.TestCase):
     def test_fable_ok_counts_stale_usage(self):
         """A usage.json hours old still counts: the cli gate passes written_at through as fresh (a missing one stays unknown)."""
         self.setup_jobs()
-        for five, seven, want in ((10, 10, "claude-fable-5-1"), (10, 80, "none")):
+        for five, seven, want in ((10, 10, "fable"), (10, 80, "none")):
             self.write_usage(five, seven)
             data = json.loads(self.usage_file.read_text())
             data["written_at"] -= 17 * 3600
@@ -14507,7 +14508,7 @@ class FableTest(unittest.TestCase):
         log = self.root / "jobs" / "008-bigboy" / "fable.log"
         log.write_text("earlier line\n")
         self.write_usage(10.4, 20)
-        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "claude-fable-5-1\n")
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "fable\n")
         self.write_usage(70, 20)
         self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n")
         self.write_usage(81, 20)
