@@ -4168,6 +4168,15 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             for phrase in ("`$F/jobs/$ID/preview.md`", "`- <absolute path>`", files, "replacing any older preview.md"):
                 self.assertIn(phrase, body, (step, phrase))
             self.assertLess(body.index("preview.md"), body.index("B ask $ID"), step)
+        # Job 1432: reel, vector and photo write preview.md before their approval asks too.
+        for kind, step, end in (("edit-reel", "7. **Final approval.**", "\n8. **"),
+                                ("edit-vector", "5. **Version round.**", "\n6. **"),
+                                ("edit-photo", "5. **Version round.**", "\n6. **")):
+            body = self.section(kind_files[kind], step, end)
+            for phrase in ("`$F/jobs/$ID/preview.md`", "`- <absolute path>`", "replacing any older preview.md",
+                           "`PREVIEW_TYPES`", "`rm -f`"):
+                self.assertIn(phrase, body, (kind, phrase))
+            self.assertLess(body.index("preview.md"), body.index("B ask $ID"), kind)
         # Job 1364: edit-reel runs the 8 steps of pipeline-handoff.md "Reel flow", after a Folder and Ledger preamble.
         reel = kind_files["edit-reel"]
         self.assertNotIn("not built yet", reel)
