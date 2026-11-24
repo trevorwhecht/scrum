@@ -346,7 +346,9 @@ def held_order(root, job):
 def cpu_first():
     """(project, job id) of the CPU-held launch (cpu_held, or a mem_held light job in held_work; not running) that starts first across every board.projects()
     board, by held_order; None when none waits. A candidate the RAM gate refuses at its own share (spawn's ram_short test)
-    is skipped, so it never holds the others. spawn holds every other non-manual start while one waits."""
+    is skipped, so it never holds the others. So is a waiting child (no queued_launch) while board.finish_first holds
+    its project (job 1499): idle_claim starts none then. finish_first is read at most once per project, and only for
+    such a candidate. spawn holds every other non-manual start while one waits."""
     best = None
     for project, repo in board.projects().items():
         root = repo / "scrum"
@@ -354,10 +356,14 @@ def cpu_first():
             jobs = cached_board(root).get("jobs", [])
         except (OSError, ValueError, AttributeError):
             continue
-        held = {j["id"] for j in held_work(project, jobs)}
+        held, fin = {j["id"] for j in held_work(project, jobs)}, None  # fin: finish_first(root), read on first need
         for job in jobs:
             if ((cpu_held(root, job) or job["id"] in held and mem_held(root, job)) and not running(project, job["id"])
                     and board.ram_room(floor=0, light=board.light_job(root, job)) >= 1):
+                if not job.get("queued_launch"):  # a waiting child: idle_claim starts none while finish_first holds
+                    fin = (board.finish_first(root) or "") if fin is None else fin
+                    if fin:
+                        continue
                 key = held_order(root, job)
                 if best is None or key < best[0]:
                     best = (key, project, job["id"])
