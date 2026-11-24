@@ -15389,7 +15389,11 @@ class PulseTest(unittest.TestCase):
         with mock.patch.object(s.board, "spawn", return_value=(object(), "runs/x.log")), \
                 mock.patch.object(s.board, "ram_room", return_value=5), \
                 mock.patch.object(s.board, "cooling_down", return_value=False), \
+                mock.patch.object(s, "cpu_first", return_value=None), \
+                mock.patch.object(s, "cpu_exempt", return_value=False), \
                 mock.patch.object(s.board, "cpu_load_pct", side_effect=lambda: next(cpu)):
+            # cpu_first and cpu_exempt read the live machine (held launches, session count): pinned so a loaded run
+            # cannot queue the first start behind another job (job 1487)
             s.spawn("app", root, "006-dep", "start", "x")  # gate reads 320: launched, recorded
             s.spawn("app", root, "006-dep", "start", "x", manual=True)  # Trevor's click: no read, not recorded
             s.spawn("app", root, "006-dep", "resume", "x")  # not a start
