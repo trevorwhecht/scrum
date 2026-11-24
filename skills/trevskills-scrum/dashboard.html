@@ -1236,7 +1236,7 @@ const reopenForm = job => !["done", "aborted"].includes(job.stage) ? ""
 
 // A stop's issue in plain words: the machine prefix (board.py ask, "Hard stop: x — ") goes, the text is cut at the
 // first " Fix: ", and every path is cut to its basename (the same rule as serve.py waiting_on).
-const noPaths = text => text.replace(/\S*\//g, "");
+const noPaths = text => text.replace(/\S*\/(?!\d+\))/g, "");  // a "(2/2)" count (heavy_cap, session_cap) is no path
 const STOP_PREFIX = /^(stalled in \w+: )?(Hard stop: [^—]+ — |[a-z][\w ]{0,30}: )/;
 const stopIssue = text => noPaths(String(text || "").replace(STOP_PREFIX, "").split(" Fix: ")[0]).trim() || "No reason recorded.";
 const VERBS = {spec: "Writing spec", plan: "Planning", build: "Building", check: "Checking", review: "Reviewing", approve: "Approving",
