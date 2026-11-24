@@ -9216,6 +9216,60 @@ class CloudPollTest(unittest.TestCase):
         clear.assert_called_once_with(root, job_id)
         self.assertNotIn("artifactsPending", real.read_board(root)["jobs"][0])
 
+    def shop_job(self, tail):
+        """A real board with one stage-cloud shop job and feature.md, whose ended session's log tail is tail; run one
+        cloud_tick with no PR anywhere. Returns (job, backlog text, stderr)."""
+        s = self.serve
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = tmp / "scrum"
+        job_id = s.board.cmd_new(root, "Leads finder")
+        (root / "jobs" / job_id).mkdir(parents=True, exist_ok=True)
+        (root / "jobs" / job_id / "feature.md").write_text("Leads finder skill text\n")
+        with s.board.locked_board(root) as b:
+            job = s.board.find(b, job_id)
+            job.update(stage="cloud", shop="4242", account="owa")
+        jobs = s.board.read_board(root)["jobs"]
+        s.SHOP_PROBE_LAST.clear()
+        self.addCleanup(s.SHOP_PROBE_LAST.clear)
+        with mock.patch.object(s.shop, "ended", return_value=tail), \
+                mock.patch.object(s.board, "gh_api", return_value=[]), \
+                mock.patch.object(s.board, "branch_pushed", return_value=False), \
+                mock.patch.object(s.board, "cooling_down", return_value=False), \
+                mock.patch.object(s, "spawn") as sp, \
+                mock.patch("sys.stderr", new=io.StringIO()) as err:
+            s.cloud_tick("p", root, jobs, now=10_000)
+        sp.assert_not_called()
+        backlog = (root / "backlog.md").read_text() if (root / "backlog.md").exists() else ""
+        return s.board.read_board(root)["jobs"][0], backlog, err.getvalue()
+
+    def test_shop_session_that_closed_its_job_is_not_requeued(self):
+        """Job 1844: a shop session that moved its item to another backlog (or aborted it obsolete / already fixed) and
+        opened no PR is aborted with that reason, never requeued with SHOP_ENDED."""
+        cases = [
+            ("moved", "Spec says WRONG PROJECT.\nRan B abort 1844 --reason 'moved to trevorhecht-skills backlog'\n"
+                      "Done.\n", "moved to trevorhecht-skills backlog"),
+            ("moved, backticked", "Moved the item to the `trevorhecht-skills` backlog and aborted the job.\n",
+             "moved to trevorhecht-skills backlog"),
+            ("obsolete", "Working\nAborted as obsolete: duplicate of job 1844, already on the backlog\n",
+             "obsolete: duplicate of job 1844, already on the backlog"),
+            ("already fixed", "Checked main.\n**Looks already fixed:** the guard landed in #1341.\n",
+             "looks already fixed: the guard landed in #1341."),
+        ]
+        for why, tail, reason in cases:
+            with self.subTest(why):
+                self.serve.CLOUD_LAST.clear()
+                job, backlog, err = self.shop_job(tail)
+                self.assertEqual((job["stage"], job["reason"]), ("aborted", reason))
+                self.assertNotIn("Leads finder skill text", backlog, "closed on purpose: nothing requeued")
+                self.assertEqual(err, "")
+
+    def test_shop_session_ended_without_closing_still_requeued(self):
+        self.serve.CLOUD_LAST.clear()
+        job, backlog, _ = self.shop_job("Working on it\nThe job is not obsolete yet\nDone for now\n")
+        self.assertEqual((job["stage"], job["reason"]), ("aborted", "requeue: shop session ended without a PR"))
+        self.assertIn("Leads finder skill text", backlog)
+
     def test_cloud_poll_runs_for_pending_without_cloud_job(self):
         jobs = [{"id": "003-late", "stage": "done", "artifactsPending": "2026-10-22T00:00:00+00:00"}]
         cs, sp = self.tick(jobs, now=10_000, result={"moved": [], "arrived": ["003-late"], "error": None})

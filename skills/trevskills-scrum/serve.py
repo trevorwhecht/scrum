@@ -2541,6 +2541,26 @@ def shop_pr_close(project, root, job_id):
         print(f"cloud-sync: {project}: {job_id}: PR close failed: {e}", file=sys.stderr, flush=True)
 
 
+# an ended shop session's log tail saying it closed its job on purpose (job 1844): an `obsolete:` or `looks already
+# fixed:` abort (lanes/cloud.md Needs-human), or newjob.md 3b's `moved to <folder> backlog`
+SHOP_CLOSED_RE = re.compile(r"\b(obsolete|looks already fixed):[*_]*[ \t]+([^\s'\"`*][^\n'\"`]*)"
+                            r"|\bmoved (?:the item |this item |it )?to (?:the )?[`*]*([\w.-]+)[`*]* backlog\b", re.I)
+
+
+def shop_closed(tail):
+    """The abort reason an ended shop session's log tail gives for closing its own job (SHOP_CLOSED_RE's last match,
+    so the session's final word wins): `obsolete: <why>`, `looks already fixed: <why>` (prefix lower-cased, the rest
+    through board.clean) or `moved to <folder> backlog`; None when it shows none."""
+    m = None
+    for m in SHOP_CLOSED_RE.finditer(tail or ""):
+        pass
+    if m is None:
+        return None
+    if m.group(3):
+        return f"moved to {m.group(3)} backlog"
+    return board.clean(f"{m.group(1).lower()}: {m.group(2).rstrip(' *_')}", 300)
+
+
 def cloud_tick(project, root, jobs, now=None):
     """While a job is in stage cloud or awaits its artifacts branch (artifactsPending), run board.py cloud-sync (plain
     Python, no LLM) at most every CLOUD_EVERY seconds, then start a headless `/trevskills-scrum cloud-home <id>` for
@@ -2557,8 +2577,9 @@ def cloud_tick(project, root, jobs, now=None):
     as a spec stall with a local worktree, the PR left open (HOME: no cloud-home spawn; auto_resume's spec-stall rule
     resumes it); with none ended it is called with no ended. After a sync with no error, a usage-limit line in an ended
     session's log tail marks its account limited (note_limit), whatever stage the sync left the job in; one still in
-    stage cloud after the sync (no PR and no branch) is aborted with SHOP_ENDED (requeued unless a BigBoy child), and
-    once that abort took effect, shop_pr_close closes the job's open unlabelled PR, so the rerun opens no duplicate.
+    stage cloud after the sync (no PR and no branch) is aborted with SHOP_ENDED (requeued unless a BigBoy child), or,
+    when its log tail shows it closed the job on purpose (shop_closed: obsolete, looks already fixed, or moved to
+    another project's backlog; job 1844), aborted with that reason and no requeue; once either abort took effect, shop_pr_close closes the job's open unlabelled PR, so the rerun opens no duplicate.
     A no-git project (board.no_git, job 1362) is skipped: none of its jobs goes to the cloud or the shop."""
     if board.cooling_down() or board.no_git(root):
         return
@@ -2596,8 +2617,9 @@ def cloud_tick(project, root, jobs, now=None):
                                      reset if reset and reset > now else now + AUTO_RESUME_EVERY)
                 if job.get("stage") != "cloud":  # a PR or branch the sync just moved wins
                     continue
+                closed = shop_closed(tail)  # the session closed its job on purpose: no requeue, no rerun
                 try:  # re-checks stage cloud under the lock
-                    board._cloud_abort(root, job_id, job.get("pr"), True, SHOP_ENDED)
+                    board._cloud_abort(root, job_id, job.get("pr"), not closed, closed or SHOP_ENDED)
                 except SystemExit as e:
                     print(f"cloud-sync: {project}: {job_id}: {e}", file=sys.stderr, flush=True)
                     continue
