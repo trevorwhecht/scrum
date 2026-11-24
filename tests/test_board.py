@@ -7589,8 +7589,12 @@ print("stub err", file=sys.stderr)
         lines = []
         while time.time() < end:
             lines = self.out.read_text().splitlines() if self.out.exists() else []
-            if len(lines) >= n:
-                return [json.loads(l) for l in lines]
+            try:  # a line the stub is still writing does not parse yet: keep waiting until the deadline
+                recs = [json.loads(l) for l in lines]
+            except ValueError:
+                recs = []
+            if len(recs) >= n:
+                return recs
             time.sleep(0.05)
         self.fail(f"stub ran {len(lines)} times, expected {n}")
 
@@ -7832,7 +7836,10 @@ print("stub err", file=sys.stderr)
 
     def test_spawn_cli_never_holds(self):
         job_id = self.hot_job()
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400"):
+        # Pin the memory gates too: under full-suite load the real free RAM, swap or kernel pressure must not
+        # hold the launch, so only the hot CPU is under test.
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400", SCRUM_FREE_RAM="90", SCRUM_SWAP_PCT="0",
+                             SCRUM_VM_PRESSURE="1"):
             out = self.cli(job_id, "start")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(len(self.records()), 1)
