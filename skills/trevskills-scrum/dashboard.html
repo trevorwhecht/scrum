@@ -671,7 +671,8 @@ const newestFirst = (a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.upd
 function render() {
   const list = shown(), rcards = roadmapShown().map(p => [roadmapCol(p), roadmapCard(p)]);
   const rIn = s => rcards.filter(([c]) => c === s).map(([, html]) => html);
-  const cols = [...STAGES, ...new Set([...list.map(colOf), ...rcards.map(([c]) => c)].filter(s => !STAGES.includes(s)))];
+  // Extra columns (waiting, running) sit before done, which can be off the right edge: a card Trevor just approved must stay in view.
+  const cols = [...STAGES.slice(0, -1), ...new Set([...list.map(colOf), ...rcards.map(([c]) => c)].filter(s => !STAGES.includes(s))), ...STAGES.slice(-1)];
   const count = s => list.filter(j => colOf(j) === s).length + rIn(s).length;
   // Empty stages stay visible but narrow, so the columns holding jobs get the room.
   $("board").style.gridTemplateColumns = cols.map(s => count(s) ? "minmax(230px,2fr)" : "minmax(min-content,.5fr)").join(" ");
@@ -1267,7 +1268,7 @@ const statusLine = job => !job.waitingOn && job.play_queued && job.ram_hold && !
   : job.heldBy ? `Held by ${job.heldBy}`
   : job.paused ? "Paused by you"
   : job.resumeRefusal ? `${String(job.resumeRefusal).startsWith("lilguy job") ? "Can't resume" : "Waiting"}: ${String(job.resumeRefusal).split(" Fix: ")[0]}`
-  : playQueued(job) ? "Queued, starts next"
+  : playQueued(job) ? job.queued_launch?.action === "approve" ? "Approved, starts when this Mac has room" : "Queued, starts next"
   : isStalled(job) ? `Stalled: ${stopIssue(job.reason)}`
   : limitHeld(job) ? "Stalled: usage limit"
   : answering(job) ? runLine(runs[job.key])

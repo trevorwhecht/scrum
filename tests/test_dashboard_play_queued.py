@@ -137,9 +137,18 @@ class PlayQueued(unittest.TestCase):
             self.assertEqual(column_of(html, f"p/30{i}-x"), col)
         sections = re.findall(r'<section class="([^"]*)" data-col="([^"]+)">', html)
         self.assertEqual([c for _, c in sections],
-                         ["spec", "build", "review", "shipping", "stalled", "needs-human", "done", "waiting"])
+                         ["spec", "build", "review", "shipping", "stalled", "needs-human", "waiting", "done"])
         self.assertEqual(dict((c, k) for k, c in sections)["stalled"], "col")  # no human class
         self.assertIn('data-col="stalled"><h2><span>stalled</span> <span>· 3</span></h2>', html)
+
+    def test_queued_approve_says_approved_and_sits_before_done(self):
+        job = {**OFF_TRACK, "reason": "video storyboard: ready", "stopTitle": "EDIT_APPROVE",
+               "queued_launch": {"action": "approve", "stage": "needs-human"}}
+        line, other, html = run(f"""const a = {json.dumps(job)}; out(statusLine(a));
+            out(statusLine({{...a, queued_launch: {{action: "rework"}}}})); jobs = [a]; render(); out(els.board.innerHTML);""")
+        self.assertEqual((line, other), ("Approved, starts when this Mac has room", "Queued, starts next"))
+        self.assertEqual(re.findall(r'data-col="([^"]+)">', html)[-2:], ["waiting", "done"])
+        self.assertEqual(column_of(html, job["key"]), "waiting")
 
     def test_stages_group_into_fewer_columns(self):
         stages = ["spec", "build", "check", "review", "approve", "merging", "deploying", "cloud"]
