@@ -15,7 +15,7 @@ import board, jev  # noqa: E402
 # step -> (question, cutoff, fallback)
 STEPS = {
     "model": ("How hard is this feature to implement", 1.5, "opus"),  # score index 0-3 = difficulty 1-4
-    "spec-model": ("How hard is this feature to implement", 2.25, "opus"),  # writing a spec is easier than building
+    "spec-model": ("How hard is this feature to implement", 2.5, "opus"),  # writing a spec is easier than building
     "promote": (None, None, "opus"),
     "dupe": ("Item {i} is the same task as the query", 0.8, "add"),
     "approver": ("This diff changes payment, pricing, billing, authentication, session, role or permission logic",

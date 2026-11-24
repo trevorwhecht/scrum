@@ -151,7 +151,7 @@ class JevGateTest(unittest.TestCase):
 
     def test_spec_model_cutoffs(self):
         (self.job / "feature.md").write_text("# Feature\nAdd a button")
-        for score, want in ((0, "sonnet"), (1, "sonnet"), (2, "sonnet"), (2.1, "sonnet"), (2.3, "opus"), (2.4, "opus"), (3, "opus")):
+        for score, want in ((0, "sonnet"), (1, "sonnet"), (2, "sonnet"), (2.1, "sonnet"), (2.3, "sonnet"), (2.39, "sonnet"), (2.4, "sonnet"), (2.5, "opus"), (3, "opus")):
             with self.subTest(score=score):
                 out, f = self.gate("spec-model", ask=lambda s, q, *a, v=score: {"q": {"type": "score", "score": v}})
                 self.assertEqual((out, f[1], f[4]), (want, "spec-model", want))
@@ -238,7 +238,7 @@ class JevGateTest(unittest.TestCase):
         self.assertEqual(self.sent, [])
 
     def test_spec_model_still_asks_jev(self):
-        ask = lambda s, q, *a: {"q": {"type": "score", "score": 2.3}}
+        ask = lambda s, q, *a: {"q": {"type": "score", "score": 2.6}}
         for name, text in (("yes", "# Feature\nComplex: yes\n\n## Body\nAdd a button"),
                            ("below heading", "# Feature\n\n## Body\nComplex: no\nAdd a button")):
             with self.subTest(name):
@@ -251,7 +251,7 @@ class JevGateTest(unittest.TestCase):
     def test_spec_model_ignores_spec_md_complex(self):
         (self.job / "feature.md").write_text("# Feature\n\n## Body\nAdd a button")
         (self.job / "spec.md").write_text("# Spec\nComplex: no\n")
-        out, f = self.gate("spec-model", ask=lambda s, q, *a: {"q": {"type": "score", "score": 2.3}})
+        out, f = self.gate("spec-model", ask=lambda s, q, *a: {"q": {"type": "score", "score": 2.6}})
         self.assertEqual(out, "opus")
         self.assertEqual(len(self.sent), 1)
 
