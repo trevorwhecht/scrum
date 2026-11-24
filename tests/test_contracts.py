@@ -1047,6 +1047,17 @@ class ContractTest(unittest.TestCase):
         self.assertTrue(step4.rstrip().endswith("Then `B set $ID worktree=$WT stage=build`."), step4[-120:])
         self.assertIn("\n6. Continue: **Check gate**.\n", newjob)
 
+    def test_newjob_e2e_stopped_rule(self):
+        """Job 1497: a runaway-stopped job E2E is a retry, never a CHECK: FAIL, triage, rework or backlog item."""
+        text = (SKILL_DIR / "lanes" / "newjob.md").read_text()
+        rule = text[text.index("Delete `jobs/$ID/e2e-stopped.json`"):]
+        rule = rule[:rule.index("`B e2e-budget $ID")]
+        for phrase in ("`B e2e-stopped $ID --since $S`", "stale stop", "only before the check's first E2E run", "the retry keeps it", "a fresh `S=$(date +%s)`", "`count` 1", "no `CHECK: FAIL`", "no **E2E triage**", "no rework and no backlog item",
+                       "re-run the E2E command once", "`E2E stopped: <reason>`",
+                       "`E2E: not run, stopped: <reason> twice`", "deletes `jobs/$ID/e2e-stopped.json` when the E2E exits 0"):
+            self.assertIn(phrase, rule)
+        self.assertEqual(text.count("B e2e-stopped"), 1)
+
     def test_approver_minor_findings_never_rework(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
         self.assertIn("Use it only when a remaining `[blocking]` finding is real and must be fixed before shipping; a "
@@ -1090,7 +1101,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 29000, "newjob.md")  # +inline ops-data rewrite, job 1475; +wrong-project move, job 1319; +load wait ask, job 1316; +job E2E budget, job 1311; +lilguy hand-off, job 1261; +fast lane Out of scope, job 1257; +debug E2E in background, Build queue, job 1250; +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 30000, "newjob.md")  # +runaway E2E stop rule, job 1497; +inline ops-data rewrite, job 1475; +wrong-project move, job 1319; +load wait ask, job 1316; +job E2E budget, job 1311; +lilguy hand-off, job 1261; +fast lane Out of scope, job 1257; +debug E2E in background, Build queue, job 1250; +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -4868,7 +4879,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for phrase in ("an `aborted` job whose reason starts `moved to ` without a `pr`",
                        "runs only **Artifacts home** then **Follow-ups**"):
             self.assertIn(phrase, tail, phrase)
-        self.assertLessEqual(len(self.lane("newjob")), 29000)
+        self.assertLessEqual(len(self.lane("newjob")), 30000)
 
     def test_skill_cloud_artifacts_come_home(self):
         cloud = self.lane("cloud")

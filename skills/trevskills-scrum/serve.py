@@ -30,7 +30,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, collections, errno, fcntl, functools, hashlib, json, os, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, threading, time
+import argparse, base64, collections, errno, fcntl, functools, hashlib, json, os, pwd, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, threading, time
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -441,6 +441,10 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                     stop_live_idle(project, job)
                 try:
                     proc, log = board.spawn(root, job_id, action, prompt, flags, **niced)
+                    claude_missing_clear()
+                except OSError:  # job 1497: no claude CLI; recorded for claude_missing_tick, raised as before
+                    claude_missing_note(time.time())
+                    raise
                 except board.LiveSession as e:  # job 1275: a second session would fight the live one
                     refused_live = e
                 except (board.HeldStart, board.HardStop) as e:  # job 1312: a hot Mac queued this start for the shop Mac
@@ -488,6 +492,10 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             account = off_board or board.pick_account(time.time())[0]
         try:
             proc, log = board.spawn(root, job_id, action, prompt, flags, account=account, **niced)
+            claude_missing_clear()
+        except OSError:  # job 1497: no claude CLI; recorded for claude_missing_tick, raised as before
+            claude_missing_note(time.time())
+            raise
         except board.LiveSession as e:  # job 1275: a board job past the gate (cloud-home) is checked too
             print(f"spawn refused: {project}/{job_id} {action}: {e}", file=sys.stderr, flush=True)
             return None
@@ -1788,6 +1796,125 @@ def hot_stop_tick() -> list[str]:
             stopped.append(f"{running}/e2e-full")
         else:
             E2E_FULL.pop("hot_stop", None)
+    return stopped
+
+
+E2E_MAX_FOOTPRINT_GB = 8  # e2e_runaway_tick: a job E2E's dev server over this footprint is stopped
+E2E_MIN_FREE_DISK_GB = 3  # e2e_runaway_tick stops a live E2E under this; disk_alert_tick texts on 2 pulses in a row
+FOOTPRINT_RE = re.compile(r"Footprint:\s*([\d.]+)\s*(B|KB|MB|GB|TB)\b")
+E2E_SERVER_RE = re.compile(r"next-server|\bnext dev\b|\bnext\b.*\bdev\b")
+
+
+def footprint_gb(pid) -> float | None:
+    """`footprint -p <pid>`'s first `Footprint:` total in GB (1024 base); None when footprint is missing, fails, times
+    out (5 s) or prints no parsable total. Never RSS."""
+    try:
+        out = subprocess.run(["footprint", "-p", str(int(pid))], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    m = FOOTPRINT_RE.search(out.stdout or "") if out.returncode == 0 else None
+    if not m:
+        return None
+    return float(m[1]) * {"B": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3, "TB": 1024 ** 4}[m[2]] / 1024 ** 3
+
+
+def port_listeners(ports=(*board.KEEP_PORTS, 3000)) -> set[int]:
+    """Pids `lsof` lists as listening on any of ports (Trevor's dev servers); empty when lsof is missing or fails."""
+    try:
+        out = subprocess.run([shutil.which("lsof") or "/usr/sbin/lsof", "-nP", "-t", *(f"-iTCP:{p}" for p in ports),
+                              "-sTCP:LISTEN"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {int(x) for x in out.stdout.split() if x.isdigit()}
+
+
+def job_root_for_cwd(cwd):
+    """(scrum root, job) of the job on any registered board whose worktree holds cwd; (None, None) when none does."""
+    for repo in board.projects().values():
+        try:
+            jobs = cached_board(repo / "scrum").get("jobs", [])
+        except (OSError, ValueError):
+            continue
+        for j in jobs:
+            if j.get("worktree") and in_tree(cwd, j["worktree"]):
+                return repo / "scrum", j
+    return None, None
+
+
+def e2e_runaway_tick(now=None, footprint=None) -> list[str]:
+    """Stop a job's runaway E2E (job 1497). Returns at once, with no ps and no footprint call, when no e2e.lock slot has a
+    live holder (read_holder over buildlock.slot_paths; pid over 1, not serve's own, os.kill 0 succeeds). For each live
+    holder, one processes() snapshot gives its descendant tree; the measured process is the largest-footprint descendant
+    whose command line matches E2E_SERVER_RE (next-server, next dev), read with `footprint` (footprint_gb; tests
+    replace it), never RSS. None (unreadable) stops nothing. The holder's group is stopped (stop_group, its tree goes
+    with it) when that footprint is over E2E_MAX_FOOTPRINT_GB (reason memory), or board.free_disk_gb of the first
+    registered repo is under E2E_MIN_FREE_DISK_GB (reason disk). Never a pid outside the holder's tree, never a session,
+    never serve; a tree holding a pid that listens on board.KEEP_PORTS or 3000 is left alone. Before stopping, the job whose
+    worktree holds the holder's cwd gets jobs/<id>/e2e-stopped.json {"reason", "count", "at"} (count + 1 on each stop);
+    no job (a main-checkout run) writes no marker. One board.log_process("E2E runaway stop", "stopped") per stop.
+    Returns "<pid>:<reason>" per stop."""
+    now = time.time() if now is None else now
+    if footprint is None and "unittest" in sys.modules and Path.home() == Path(pwd.getpwuid(os.getuid()).pw_dir):
+        return []  # a test tick never reads or stops the real machine's E2E; tests set HOME or pass footprint
+    footprint = footprint or footprint_gb
+    holders = []
+    for slot in buildlock.slot_paths(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock"):
+        h = read_holder(slot)
+        if not h or h[0] <= 1 or h[0] == os.getpid():
+            continue
+        try:
+            os.kill(h[0], 0)
+        except ProcessLookupError:
+            continue
+        except OSError:
+            pass  # alive, owned by another user
+        holders.append(h)
+    if not holders:
+        return []
+    procs = processes()
+    kids, cmds = {}, {p: c for p, _, c in procs}
+    for p, ppid, _ in procs:
+        kids.setdefault(ppid, []).append(p)
+    repos = list(board.projects().values())
+    free = board.free_disk_gb(repos[0]) if repos else None
+    stopped = []
+    for pid, cwd, _ in holders:
+        tree, todo = set(), list(kids.get(pid, []))
+        while todo:
+            p = todo.pop()
+            if p not in tree and p != os.getpid():
+                tree.add(p)
+                todo.extend(kids.get(p, []))
+        sizes = [g for p in sorted(tree) if E2E_SERVER_RE.search(cmds.get(p, "")) and not board._is_claude(cmds.get(p, ""))
+                 and (g := footprint(p)) is not None]
+        gb = max(sizes) if sizes else None
+        reason = ("memory" if gb is not None and gb > E2E_MAX_FOOTPRINT_GB
+                  else "disk" if free is not None and free < E2E_MIN_FREE_DISK_GB else None)
+        if not reason:
+            continue
+        if tree & port_listeners():
+            print(f"watchdog: e2e runaway: holder {pid} tree listens on a kept port, not stopped", file=sys.stderr, flush=True)
+            continue
+        root, job = job_root_for_cwd(cwd)
+        if job:
+            marker = root / "jobs" / str(job["id"]) / "e2e-stopped.json"
+            try:
+                old = json.loads(marker.read_text(encoding="utf-8"))
+                count = old["count"] if isinstance(old, dict) and board.is_num(old.get("count")) else 0
+            except (OSError, ValueError):
+                count = 0
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                tmp = marker.with_name("e2e-stopped.json.tmp")
+                tmp.write_text(json.dumps({"reason": reason, "count": int(count) + 1, "at": now}))
+                os.replace(tmp, marker)
+            except OSError as e:
+                print(f"watchdog: e2e runaway: marker: {e}", file=sys.stderr, flush=True)
+        if stop_group(pid):
+            board.log_process("E2E runaway stop", "stopped", reason=reason, pid=pid,
+                              gb=None if gb is None else round(gb, 1))
+            print(f"watchdog: e2e runaway stop: holder {pid} ({cwd}) {reason}", file=sys.stderr, flush=True)
+            stopped.append(f"{pid}:{reason}")
     return stopped
 
 
@@ -4486,7 +4613,7 @@ TIMED_STEPS = ("claude_migrate", "respawn_exited", "record_outcomes", "board_bus
                "main_ff_tick", "terminal_batch_tick", "e2e_full_tick", "ui_sweep_tick", "idle_claim", "sweep_parents",
                "cloud_tick", "project_notes_tick", "shop_tick", "prune_worktrees", "prod_errors_tick", "digest_retry_tick",
                "actions_alert", "idle_cleanup", "stop_leftovers", "report_hogs", "auto_continue_tick", "window_tick",
-               "weekly_tick", "e2e_lock_reap", "render_reap_tick", "hot_stop_tick")  # watchdog_tick steps timed_step names when slow
+               "weekly_tick", "e2e_lock_reap", "render_reap_tick", "hot_stop_tick", "e2e_runaway_tick")  # watchdog_tick steps timed_step names when slow
 
 
 def time_steps(names=TIMED_STEPS, scope=None):
@@ -4587,6 +4714,10 @@ def watchdog_tick():
         hot_stop_tick()
     except (Exception, SystemExit) as e:
         print(f"watchdog: hot stop: {e}", file=sys.stderr, flush=True)
+    try:
+        e2e_runaway_tick()  # job 1497: a job's own E2E dev server over its footprint or disk limit
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: e2e runaway: {e}", file=sys.stderr, flush=True)
     try:
         hard_stop_tick()  # Trevor 2026-11-20: 98% weekly stops every scrum session on that account
     except (Exception, SystemExit) as e:
@@ -4911,6 +5042,11 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
         stuck_alert(now, why, sessions)
     except (Exception, SystemExit) as e:
         print(f"watchdog: pulse: stuck alert: {e}", file=sys.stderr, flush=True)
+    for step in (disk_alert_tick, claude_missing_tick):  # job 1497: low disk on 2 pulses, a missing claude CLI
+        try:
+            step(now)
+        except (Exception, SystemExit) as e:
+            print(f"watchdog: pulse: {step.__name__}: {e}", file=sys.stderr, flush=True)
     line = {"t": int(now), "sessions": sessions, "cpu_load": board.cpu_load_pct(),
             "free_ram": board.free_ram_pct(), "swap": board.swap_used_pct(), "cooldown": board.cooling_down(),
             "u5h": usage["5h"], "u7d": usage["weekly"], "focus": next(iter(names), None), "projects": projects,
@@ -5009,7 +5145,9 @@ def stuck_mark(path: Path, now: float, key: str = "sent") -> None:
             cur = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             cur = {}
-        if isinstance(cur, dict) and (key == "isent" or board.is_num(cur.get("clear")) and cur["clear"] < STUCK_ALERT_CLEAR):
+        clear = "dclear" if key == "dsent" else "clear"  # job 1497: the low-disk episode has its own clear count
+        own = path.name == "claude-missing.json" and board.is_num(cur.get("since")) if isinstance(cur, dict) else False
+        if isinstance(cur, dict) and (key == "isent" or own or board.is_num(cur.get(clear)) and cur[clear] < STUCK_ALERT_CLEAR):
             stuck_write(path, {**cur, key: now}, cur)
 
 
@@ -5152,6 +5290,7 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None, backgroun
         idle_fire = quiet and not fire and now - idle >= STUCK_IDLE_S and (isent is None or now - isent >= STUCK_IDLE_REPEAT_S)
         state = {"held": held, "clear": clear, "sent": sent}
         state.update({k: v for k, v in (("idle", idle), ("isent", isent)) if v is not None})
+        state.update({k: old[k] for k in ("dlow", "dclear", "dsent") if k in old})  # disk_alert_tick's keys
         stuck_write(path, state, old)
         busy = STUCK_SEND is not None and STUCK_SEND.is_alive()
     if not (fire or idle_fire) or busy or send is None and "unittest" in sys.modules:
@@ -5183,6 +5322,171 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None, backgroun
         STUCK_SEND = threading.Thread(target=stuck_deliver, args=(path, now, why, argv, send, key), daemon=True)
         STUCK_SEND.start()
     return None
+
+
+DISK_ALERT_PULSES = 2  # disk_alert_tick: low-disk pulses in a row before it texts
+CLAUDE_MISSING_S = 300  # claude_missing_tick: a missing claude CLI this long texts once
+CLAUDE_REINSTALL = "npm install -g @anthropic-ai/claude-code"
+
+
+def alert_dispatch(path: Path, now: float, why: str, text: str, key: str, send=None, background=None) -> str | None:
+    """The send half of stuck_alert for the job 1497 texts: a missing alert-to.txt or script marks `key` (nothing to
+    retry), prints one `watchdog: stuck alert:` line and logs `unsent`; else stuck_deliver runs inline (send given and
+    background not True) or on the one STUCK_SEND thread (a send already in flight does nothing). Under unittest nothing
+    is sent without `send`. Returns the text sent inline, else None."""
+    global STUCK_SEND
+    if send is None and "unittest" in sys.modules:
+        return None
+    if missing := alert_missing():
+        stuck_mark(path, now, key)
+        print(f"watchdog: stuck alert: no {missing}, not texted: {why}", file=sys.stderr, flush=True)
+        board.log_process("Stuck alert", "unsent", reason=why, missing=missing)
+        return None
+    argv = alert_argv(text)
+    if background is None:
+        background = send is None
+    if not background:
+        return stuck_deliver(path, now, why, argv, send, key)
+    with STUCK_LOCK:
+        if STUCK_SEND is not None and STUCK_SEND.is_alive():
+            return None
+        STUCK_SEND = threading.Thread(target=stuck_deliver, args=(path, now, why, argv, send, key), daemon=True)
+        STUCK_SEND.start()
+    return None
+
+
+def largest_process() -> str:
+    """`<name> pid <pid> (<GB> GB)` of the largest process by footprint: one `ps` (pid, rss, command), footprint_gb on
+    the 5 largest by RSS; none readable names the largest RSS; "" when ps fails."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,rss=,command="], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    rows = []
+    for line in out.stdout.splitlines() if out.returncode == 0 else []:
+        p = line.split(None, 2)
+        if len(p) == 3 and p[0].isdigit() and p[1].isdigit():
+            rows.append((int(p[1]), int(p[0]), p[2]))
+    top = sorted(rows, reverse=True)[:5]
+    if not top:
+        return ""
+    sized = [(g, pid, cmd) for _, pid, cmd in top if (g := footprint_gb(pid)) is not None]
+    gb, pid, cmd = max(sized) if sized else (top[0][0] / 1048576, top[0][1], top[0][2])
+    prog, rest = command_head(cmd)
+    arg = next((w for w in rest if w), "")
+    arg = os.path.basename(arg) if "/" in arg and arg[0] != "-" else arg
+    name = " ".join(w for w in (os.path.basename(prog), arg) if w)
+    return f"{name} pid {pid} ({gb:.1f} GB)"
+
+
+def disk_alert_tick(now: float, send=None, background=None) -> str | None:
+    """Text Trevor once an episode when free disk (board.free_disk_gb of the first registered repo) is under
+    E2E_MIN_FREE_DISK_GB on DISK_ALERT_PULSES pulses in a row, whatever is live (job 1497). State keys `dlow` (low pulses
+    in a row, capped), `dclear` (clear pulses in a row, capped at STUCK_ALERT_CLEAR) and `dsent` live in stuck-alert.json
+    beside the stuck keys, written under STUCK_LOCK (stuck_write); STUCK_ALERT_CLEAR clear pulses end the episode and
+    drop `dsent`. `dsent` is written only after a send exits 0 (stuck_deliver key="dsent"), so a failed text is retried
+    on the next low pulse. The text names largest_process and never starts `<word>:`. An unreadable disk is no pulse
+    either way. Missing alert-to.txt or script: alert_dispatch's unsent path. Returns the text sent inline, else None."""
+    repos = list(board.projects().values())
+    free = board.free_disk_gb(repos[0]) if repos else None
+    path = board.pulse_path().parent / "stuck-alert.json"
+    low = free is not None and free < E2E_MIN_FREE_DISK_GB
+    with STUCK_LOCK:
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            old = {}
+        old = old if isinstance(old, dict) else {}
+        num = lambda k: old[k] if board.is_num(old.get(k)) else None
+        if free is None:
+            return None
+        dlow = min((num("dlow") or 0) + 1, DISK_ALERT_PULSES) if low else 0
+        dclear = 0 if low else min((num("dclear") or 0) + 1, STUCK_ALERT_CLEAR)
+        dsent = None if dclear >= STUCK_ALERT_CLEAR else num("dsent")
+        state = {k: v for k, v in old.items() if k not in ("dlow", "dclear", "dsent")}
+        state.update({"dlow": dlow, "dclear": dclear})
+        if dsent is not None:
+            state["dsent"] = dsent
+        stuck_write(path, state, old)
+        busy = STUCK_SEND is not None and STUCK_SEND.is_alive()
+    if not (dlow >= DISK_ALERT_PULSES and dsent is None) or busy:
+        return None
+    big = largest_process()
+    text = (f"This Mac's disk is nearly full: {free:.1f} GB free." + (f" Largest process: {big}." if big else "")
+            + " Free some space.")
+    return alert_dispatch(path, now, f"disk {free:.1f} GB free", text, "dsent", send, background)
+
+
+def claude_missing_path() -> Path:
+    """claude-missing.json, beside pulse.log."""
+    return board.pulse_path().with_name("claude-missing.json")
+
+
+def claude_missing_skip() -> bool:
+    """True under unittest while pulse_path is the live default: a test never writes the real claude-missing.json."""
+    return "unittest" in sys.modules and board.pulse_path() == Path.home() / ".claude" / "trevskills-scrum" / "pulse.log"
+
+
+def claude_missing_read() -> dict | None:
+    """The claude-missing.json record ({"since", "sent"}) or None when missing, unreadable or without a numeric since."""
+    try:
+        rec = json.loads(claude_missing_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) and board.is_num(rec.get("since")) else None
+
+
+def claude_missing_note(now: float) -> None:
+    """Record a failed claude start: {"since": first failure, "sent": null} in claude-missing.json (tmp + os.replace,
+    under STUCK_LOCK); an existing record keeps its earlier `since` and `sent`. Never raises."""
+    if claude_missing_skip():
+        return
+    path = claude_missing_path()
+    try:
+        with STUCK_LOCK:
+            if claude_missing_read() is None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_name("claude-missing.json.tmp")
+                tmp.write_text(json.dumps({"since": now, "sent": None}))
+                os.replace(tmp, path)
+    except OSError as e:
+        print(f"watchdog: claude missing: {e}", file=sys.stderr, flush=True)
+
+
+def claude_missing_clear() -> None:
+    """Delete claude-missing.json (a start worked, or the probe did): the next outage is a new episode. Never raises."""
+    if claude_missing_skip():
+        return
+    try:
+        with STUCK_LOCK:
+            claude_missing_path().unlink(missing_ok=True)
+    except OSError as e:
+        print(f"watchdog: claude missing: {e}", file=sys.stderr, flush=True)
+
+
+def claude_probe() -> bool:
+    """True when `<claude> --version` exits 0 within 10 s."""
+    try:
+        return subprocess.run([board.CLAUDE, "--version"], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def claude_missing_tick(now: float, probe=None, send=None, background=None) -> str | None:
+    """With no claude-missing.json record, nothing. With one, `probe` (claude_probe: `<claude> --version`, 10 s) says the
+    CLI is back: the record goes. Still missing, CLAUDE_MISSING_S or more after `since` and not yet sent: one text
+    through stuck_deliver (key="sent" on this file) with the reinstall command; under that, nothing. Returns the text
+    sent inline, else None."""
+    rec = claude_missing_read()
+    if rec is None:
+        return None
+    if (probe or claude_probe)():
+        claude_missing_clear()
+        return None
+    if now - rec["since"] < CLAUDE_MISSING_S or rec.get("sent") is not None:
+        return None
+    text = f"The claude CLI is missing on this Mac, so no scrum session can start. Reinstall it with {CLAUDE_REINSTALL}"
+    return alert_dispatch(claude_missing_path(), now, "claude CLI missing", text, "sent", send, background)
 
 
 # --- live_check_tick: the `## Live checks` commands board.py live-record stored at Mark done (jobs/<id>/live-checks.json)
