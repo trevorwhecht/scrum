@@ -53,6 +53,18 @@ class TimeStepsTest(unittest.TestCase):
         for name in serve.TIMED_STEPS:
             self.assertTrue(getattr(serve, name).timed, name)
 
+    def test_hand_queue_tick_is_timed(self):
+        """Job 1466: the hand pass (job 1454) is a timed watchdog step, so a slow one is named on stderr."""
+        self.assertIn("hand_queue_tick", serve.TIMED_STEPS)
+        self.assertTrue(serve.hand_queue_tick.timed)
+        ticks = iter([0.0, 31.0])
+        with mock.patch.object(serve, "launch_queued", return_value=None), \
+                mock.patch.object(serve.board, "projects", return_value={}), \
+                mock.patch.object(serve.time, "monotonic", side_effect=lambda: next(ticks)), \
+                mock.patch("sys.stderr", new=io.StringIO()) as err:
+            serve.hand_queue_tick()
+        self.assertEqual(err.getvalue(), "watchdog: slow step hand_queue_tick 31s\n")
+
 
 class PulseTimerTest(unittest.TestCase):
     def test_tick_does_not_run_pulse_and_publishes_busy(self):
