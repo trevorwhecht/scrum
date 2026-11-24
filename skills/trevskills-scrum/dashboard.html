@@ -582,6 +582,13 @@ const staleAt = job => Math.max(Date.parse(job.updatedAt), (job.activity?.at || 
 // Card meta "P1/2 · S2/10" for a roadmap job, "" for every other job. roadmapLookup() rebuilds it each poll.
 let roadmapSteps = {};
 const roadmapMeta = job => roadmapSteps[job.key]?.text || "";
+// serve.py liveCheckInfo (job 1496): a done job's `## Live checks` state as one line on its card and in its modal, dates
+// as local YYYY-MM-DD; "" for a job without one, so its card renders as before.
+const ymd = secs => { const d = new Date(secs * 1000), p = n => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+const liveText = ({liveCheckInfo: l}) => !l ? "" : l.state === "waiting" ? `Live check: waiting until ${ymd(l.until)}`
+  : l.state === "passed" ? `Live check: passed ${ymd(l.at)}` : l.state === "failed" ? `Live check: failed, see backlog "${l.item}"`
+  : l.state === "refused" ? `Live check: refused, ${l.reason}` : "";
+const liveLine = (job, el, cls) => liveText(job) ? `<${el} class="${cls}">${esc(liveText(job))}</${el}>` : "";
 // BigBoy parent: merged count, then one line per child with the tickets it waits on. Child: which parent it belongs to.
 function bigboyLines(job) {
   const rm = roadmapMeta(job);
@@ -646,7 +653,7 @@ function card(job) {
     ${job.routed ? routeTags(routes[job.key]) : ""}
     ${pct == null ? "" : `<span class="bar${job.stage === "done" ? " done" : human ? " human" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Estimated progress" title="~${pct}% (estimate)"><span style="width:${pct}%"></span></span>`}
     ${outcomeLine(job, "span", "meta")}
-    <span class="status">${esc(statusLine(job))}</span>
+    <span class="status">${esc(statusLine(job))}</span>${liveLine(job, "span", "meta")}
     ${job.stage === "aborted" ? `<span class="reason">${esc(job.reason || "Aborted")}</span>` : ""}
     ${job.stage === "done" && (job.reason || "").startsWith("merged, not live") ? `<span class="reason" role="status">${esc(job.reason)}</span>` : ""}
     ${job.reopened_to ? `<span class="meta">Reopened as ${esc(job.reopened_to)}</span>` : ""}
@@ -1263,7 +1270,7 @@ const statusLine = job => !job.waitingOn && job.play_queued && job.ram_hold && !
   ? `Waiting for CPU/RAM: ${noPaths(String(job.resumeRefusal).replace(/^waiting: /, "").split(" Fix: ")[0])}`
   : !job.waitingOn && job.play_queued && !playQueued(job) && !job.shopWait && !["done", "aborted"].includes(job.stage)
   ? String(job.resumeRefusal || "").startsWith("waiting: ") ? "Queued: starts when CPU/RAM frees up" : "Queued, starts next"
-  : noPaths(job.stage === "done" ? "Done" : job.stage === "aborted" ? "Aborted"
+  : noPaths(job.stage === "done" ? job.liveCheck === "waiting" ? "Done, live check waiting" : "Done" : job.stage === "aborted" ? "Aborted"
   : job.waitingOn ? `Waiting on ${(job.waitingOn.ids || []).map((id, i) => job.waitingOn.titles?.[i] ? `${id} ${job.waitingOn.titles[i]}` : id).join(", ")} (${job.waitingOn.why})`
   : job.heldBy ? `Held by ${job.heldBy}`
   : job.paused ? "Paused by you"
@@ -1361,7 +1368,7 @@ function actionsHtml(job, err) {
   const now = run?.alive ? `<p class="running">${esc(runLine(run))}${log}</p>` : "";
   if (run?.alive && run.action !== "discuss") return banner + kids + now + pauseForm(job) + moreMenu(job) + err;
   const last = run && !run.alive ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? `stopped by ${PAUSED_RE.test(reason) ? "Pause" : "Abort"}` : `failed (exit ${esc(run.exit)})`}${log}</p>` : now;
-  const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
+  const why = (job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "") + liveLine(job, "p", "note");
   if (job.stage !== "needs-human" || isStalled(job)) { const held = heldByTrevor(job) || isStalled(job);  // Play and Reopen never show together, so err can follow both
     return banner + kids + why + last + setupForm(job) + playForm(job) + reopenForm(job) + (held ? err : "") + pauseForm(job) + moreMenu(job) + (held ? "" : err); }
   // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work),
