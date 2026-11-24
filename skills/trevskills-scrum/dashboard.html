@@ -57,7 +57,7 @@ main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
   border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer}
 .card:hover,.card:focus-visible{border-color:var(--accent);outline:none}
 .card.human{border:2px solid var(--human);box-shadow:0 0 0 3px color-mix(in srgb,var(--human) 15%,transparent)}
-.card.human.approve{border-color:var(--pass);box-shadow:0 0 0 3px color-mix(in srgb,var(--pass) 15%,transparent)}
+.card.human.approve{--muted:color-mix(in srgb,var(--ink) 75%,var(--card));--line:color-mix(in srgb,var(--pass) 40%,var(--card));border-color:var(--pass);background:color-mix(in srgb,var(--pass) 18%,var(--card));box-shadow:0 0 0 4px color-mix(in srgb,var(--pass) 35%,transparent)}
 .card.paused{border:2px solid var(--human)}
 .card.shop{border:2px solid var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 15%,transparent)}
 .card.shop .lanechip{color:var(--accent);border-color:var(--accent)}
@@ -78,7 +78,7 @@ main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
 .bar{display:block;height:3px;margin-top:6px;border-radius:99px;background:var(--line);overflow:hidden}
 .bar>span{display:block;height:100%;background:var(--accent)}.bar.done>span{background:var(--pass)}.bar.human>span{background:var(--human)}
 .reason{display:block;font-size:12px;color:var(--human);margin-top:6px}
-.card .status{display:block;font-size:12px;color:var(--muted);margin-top:6px;overflow-wrap:anywhere}.card.human .status{color:var(--human)}.card.human.approve .status{color:var(--pass)}.card.human.approve .bar.human>span{background:var(--pass)}
+.card .status{display:block;font-size:12px;color:var(--muted);margin-top:6px;overflow-wrap:anywhere}.card.human .status{color:var(--human)}.card.human.approve .status,.card.human.approve .badge{color:color-mix(in srgb,var(--pass) 60%,var(--ink));border-color:currentColor}.card.human.approve .bar.human>span{background:var(--pass)}
 .stale{color:var(--changes)}
 .meta.kid{margin-top:0;font-family:ui-monospace,monospace;overflow-wrap:anywhere}
 .empty{color:var(--muted);font-size:12px}

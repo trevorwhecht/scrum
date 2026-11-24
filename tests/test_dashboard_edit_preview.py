@@ -56,7 +56,7 @@ class EditPreview(unittest.TestCase):
         css = css[:css.index("</style>")]
         self.assertRegex(css, r"\.stop\.approve\{[^}]*border-color:var\(--pass\)[^}]*background:color-mix\(in srgb,var\(--pass\) 8%")
         self.assertRegex(css, r"\.stop\.approve b\{color:var\(--pass\)\}")
-        self.assertRegex(css, r"\.card\.human\.approve\{[^}]*border-color:var\(--pass\)[^}]*var\(--pass\) 15%")
+        self.assertRegex(css, r"\.card\.human\.approve\{[^}]*border-color:var\(--pass\)[^}]*background:color-mix\(in srgb,var\(--pass\) 18%", "a green fill, not only an outline")
         self.assertRegex(css, r"\.stop \.preview video,\.stop \.preview img\{[^}]*max-width:100%")
         self.assertRegex(css, r"\.stop \.preview img\{[^}]*max-height:", "round 1: a tall picture never pushes Approve off a 1440 px screen")
 
