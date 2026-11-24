@@ -156,6 +156,24 @@ class JevGateTest(unittest.TestCase):
                 out, f = self.gate("spec-model", ask=lambda s, q, *a, v=score: {"q": {"type": "score", "score": v}})
                 self.assertEqual((out, f[1], f[4]), (want, "spec-model", want))
 
+    def test_spec_model_own_question_and_levels(self):
+        full = "# Feature\nFix x in `a.py` (cause: y), tests in `tests/test_a.py`."
+        open_ = "# Feature\nMake the dashboard faster"
+        for text, score, want in ((full, 0.5, "sonnet"), (open_, 3, "opus")):
+            with self.subTest(want=want):
+                self.sent.clear()
+                (self.job / "feature.md").write_text(text)
+                out, f = self.gate("spec-model", ask=lambda s, q, *a, v=score: {"q": {"type": "score", "score": v}})
+                self.assertEqual(out, want)
+                crit = self.sent[0][1]["q"]
+                self.assertEqual(len(crit["criteria"]), 4)
+                self.assertIn("spec writer", f[2])
+                self.assertNotIn("implement", f[2])
+                self.assertIn("fully specified", str(crit["criteria"]))
+        self.sent.clear()
+        self.gate("model", ask=lambda s, q, *a: {"q": {"type": "score", "score": 1}})
+        self.assertNotIn("fully specified", str(self.sent[0][1]["q"]["criteria"]))
+
     def test_spec_model_bigboy_child_skips_jev(self):
         (self.job / "feature.md").write_text("# Feature\nAdd a button")
         for parent_lane, want in (("bigboy", "sonnet"), ("runall", "opus")):
