@@ -15328,6 +15328,15 @@ class HeavyCapReasonTest(HeavyCapBase):
         self.assertEqual(board.heavy_cap_reason(self.root, {"id": "001-a", "stage": "build", "lane": "standard"}),
                          "heavy_cap(2/2): 2 heavy jobs on this Mac (002-b, 003-c)")
 
+    def test_no_git_project_job_is_never_heavy(self):
+        """An edit job has no lane before its Route; it neither waits on the heavy cap nor fills it."""
+        job = {"id": "001-a", "stage": "spec"}
+        self.jobs(job, {"id": "002-b", "stage": "build"}, {"id": "003-c", "stage": "build"})
+        self.assertIsNotNone(board.heavy_cap_reason(self.root, job))
+        (self.root / "project.md").write_text("- Git: none\n")
+        self.assertIsNone(board.heavy_cap_reason(self.root, job))
+        self.assertEqual(board.heavy_count(self.root), 0)
+
     def test_interactive_alive_heavy_jobs_count(self):
         """Job 1392: an interactive session (a tty on the job) fills a slot though live_sessions() is 0."""
         self.live.return_value = 0

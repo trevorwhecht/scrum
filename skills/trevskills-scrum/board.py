@@ -6481,7 +6481,9 @@ def heavy_job(root, job: dict, parent_lane=None) -> bool:
     standard or debug, no readable lane (crash prevention), or a child of a BigBoy parent (`parent_lane` bigboy, else
     the parent's lane on root's board). A backlog item (no `stage`): points of BIG_POINTS or more; with no points, a
     `Lane:` of its pre-written spec or its text that is not fast or lilguy, and no `Lane:` at all; any other points
-    are light."""
+    are light. Never in a no-git project (no_git): an edit job runs none of them, and has no lane until its Route."""
+    if no_git(root):
+        return False
     if "stage" in job:
         if parent_lane is None and job.get("parent"):
             try:
