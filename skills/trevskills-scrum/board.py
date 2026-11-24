@@ -4780,7 +4780,7 @@ def jev_main_only(text: str, terms: list[str], log_path: Path) -> bool | None:
 
 def tag_runs_on(root, job_id: str) -> str:
     """The job's Runs on tag. feature.md's header wins and is stored when it differs from the board's `runs_on`; else
-    the stored tag; else it is decided once: `any` for an empty main_only_terms() (no Jev call), else jev_main_only
+    the stored tag; else it is decided once: `main` for an edit kind (feature.md `Kind: edit-*`), `any` for an empty main_only_terms() (no Jev call), else jev_main_only
     over feature.md plus spec.md (`main` / `any`), falling back to names_main_only when Jev is unsure or down. A
     decided tag is stored under the lock only when the job is still untagged. Call it outside the board lock."""
     job = find(read_board(root), check_id(job_id))
@@ -4790,6 +4790,8 @@ def tag_runs_on(root, job_id: str) -> str:
     if stored and head in (None, stored):
         return stored
     tag = head
+    if not tag and edit_kind((folder / "feature.md").read_text(errors="replace") if (folder / "feature.md").is_file() else ""):
+        tag = "main"  # an edit job drives apps on this Mac (Edits, Blender, QuickTime): never sent to a shop worker
     if not tag:
         text = "\n\n".join(f.read_text(encoding="utf-8", errors="replace")
                            for f in (folder / "feature.md", folder / "spec.md") if f.is_file())

@@ -4238,7 +4238,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                               ("Final approval", ("blackdetect", "sends it back to step 6", "`<folder>/caption.md`",
                                                   "trevskills-email `captions.md`", "`View: Edits`", "`$F/jobs/$ID/view.md`",
                                                   "--a \"Approve the reel=approve $ID\"", "--title EDIT_APPROVE",
-                                                  "`mkdir -p ~/Desktop/videos`", "~/Desktop/videos/",
+                                                  "`mkdir -p ~/Desktop/videos/owa/reel/<project>`", "~/Desktop/videos/owa/reel/<project>/<project>.mp4",
                                                   "previous Desktop copy", "to the Trash", "`cp -c",
                                                   "record the copy", "`B set $ID stage=done`", "Never press Share",
                                                   "Trevor posts")),

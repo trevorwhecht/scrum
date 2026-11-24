@@ -91,6 +91,15 @@ class RunsOnTest(unittest.TestCase):
         self.jev(False)
         self.assertEqual(board.tag_runs_on(self.root, "012-c"), "any")
 
+    def test_edit_kind_runs_on_main(self):
+        self.jobs({"id": "013-e", "stage": "spec", "feature": "Cut the reel\nKind: edit-reel\n"},
+                  {"id": "014-f", "stage": "spec", "feature": "Cut the reel\nKind: edit-reel\nRuns on: any\n"})
+        ask = self.jev(AssertionError("no Jev call for an edit kind"))
+        self.assertEqual(board.tag_runs_on(self.root, "013-e"), "main")
+        self.assertEqual(self.job("013-e")["runs_on"], "main")
+        self.assertEqual(board.tag_runs_on(self.root, "014-f"), "any", "the header still wins")
+        ask.assert_not_called()
+
     def test_jev_yes_no(self):
         self.jobs({"id": "010-a", "stage": "spec", "feature": "Fix the widget\n", "spec": "# Spec\nLikely files\n"},
                   {"id": "011-b", "stage": "spec"})
