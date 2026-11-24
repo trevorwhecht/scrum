@@ -16,7 +16,7 @@ os.environ.setdefault("SCRUM_PS", os.devnull)
 import board  # noqa: E402
 
 JOB = "200-owa-order-ad"
-KINDS = ("edit-reel", "edit-animation", "edit-vector", "edit-photo")
+KINDS = ("edit-reel", "edit-animation", "edit-vector", "edit-photo", "edit-embroidery")
 
 
 class EditLaneTest(unittest.TestCase):
@@ -105,7 +105,7 @@ class EditLaneTest(unittest.TestCase):
         # No workers.txt beside SCRUM_REGISTRY: shop.workers() is the default shopmac worker, read from the real notes.
         self.assertFalse((self.base / "workers.txt").exists())
         terms = board.main_only_terms()
-        for term in ("Kind: edit-reel", "Kind: edit-animation", "Kind: edit-vector", "Kind: edit-photo",
+        for term in ("Kind: edit-reel", "Kind: edit-animation", "Kind: edit-vector", "Kind: edit-photo", "Kind: edit-embroidery",
                      "PhotoCraft", "Blender", "saas-animation", "vid-img-editing", "Video folder"):
             self.assertIn(term, terms)
         self.assertNotIn("VectorCraft", terms)  # installed on the shop Mac (#866); an edit-vector job is held by its Kind line

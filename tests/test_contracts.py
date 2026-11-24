@@ -4148,7 +4148,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         lane = self.lane("edit")
         self.assertEqual(re.findall(r"^### edit-.*$", lane, re.M), [])  # job 1363: each kind has its own file
         shared = lane
-        kind_files = {k: self.lane(k) for k in ("edit-reel", "edit-animation", "edit-vector", "edit-photo")}
+        kind_files = {k: self.lane(k) for k in ("edit-reel", "edit-animation", "edit-vector", "edit-photo", "edit-embroidery")}
         self.assertIn("Read `$HOME/.claude/skills/trevskills-scrum/lanes/<kind>.md` for the job's kind", shared)
         self.assertIn("and no other file of that pattern", shared)
         for kind in kind_files:
@@ -4221,10 +4221,13 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         # Job 1432: reel, vector and photo write preview.md before their approval asks too.
         for kind, step, end in (("edit-reel", "7. **Final approval.**", "\n8. **"),
                                 ("edit-vector", "5. **Version round.**", "\n6. **"),
-                                ("edit-photo", "5. **Version round.**", "\n6. **")):
+                                ("edit-photo", "5. **Version round.**", "\n6. **"),
+                                ("edit-embroidery", "5. **Version round.**", "\n6. **")):
             body = self.section(kind_files[kind], step, end)
             for phrase in ("`$F/jobs/$ID/preview.md`", "`- <absolute path>`", "replacing any older preview.md",
                            "`PREVIEW_TYPES`", "`rm -f`"):
+                if kind == "edit-embroidery" and phrase in ("`PREVIEW_TYPES`", "`rm -f`"):
+                    continue  # its preview is always out/preview.png
                 self.assertIn(phrase, body, (kind, phrase))
             self.assertLess(body.index("preview.md"), body.index("B ask $ID"), kind)
         # Job 1364: edit-reel runs the 8 steps of pipeline-handoff.md "Reel flow", after a Folder and Ledger preamble.
@@ -4320,14 +4323,17 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, approval, phrase)
         self.assertIn("replacing any `rejected` mark", edits)
         for kind, skill_name, app, ledger in (("edit-vector", "trevskills-vectorcraft", "VectorCraft", "vector.md"),
-                                              ("edit-photo", "trevskills-photocraft", "PhotoCraft", "photo.md")):
+                                              ("edit-photo", "trevskills-photocraft", "PhotoCraft", "photo.md"),
+                                              ("edit-embroidery", "trevskills-digitize", "Preview", "embroidery.md")):
             text_k = kind_files[kind]
             self.assertNotIn("not built yet", text_k, kind)
             self.assertGreater(len(text_k.splitlines()), 10, kind)
             for phrase in (f"$HOME/.claude/skills/{skill_name}/SKILL.md", "Spawn `edit-builder`", "fresh `edit-reviewer`",
-                           f"`$F/jobs/$ID/view.md` as one line `View: {app} <the file's absolute path>`",
-                           f"$F/jobs/$ID/{ledger}", "--title EDIT_APPROVE", "--mcp-config"):
+                           (f"`$F/jobs/$ID/view.md` as one line `View: {app} <the file's absolute path>`" if kind != "edit-embroidery"
+                            else "`View: Preview <absolute path of out/preview.png>`"),
+                           f"$F/jobs/$ID/{ledger}", "--title EDIT_APPROVE"):
                 self.assertIn(phrase, text_k, (kind, phrase))
+            self.assertEqual("--mcp-config" in text_k, kind != "edit-embroidery", kind)
         text = (skill / "SKILL.md").read_text()
         self.assertNotIn("## Video lane", text)
         body = [l for l in self.h2(text, "## Edit lane").splitlines()[2:] if l.strip()]

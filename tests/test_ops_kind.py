@@ -66,7 +66,7 @@ class TagKindTest(unittest.TestCase):
             self.assertEqual(self.tag()[0], kind)
             self.assertEqual(self.stored(), kind)
         self.put({"id": JOB, "stage": "spec"})
-        for line in ("Kind: edit-reel", "Kind: edit-photo", "Kind: knowledge"):
+        for line in ("Kind: edit-reel", "Kind: edit-photo", "Kind: edit-embroidery", "Kind: knowledge"):
             self.feature(f"x\n{line}\n")
             self.assertIsNone(self.tag()[0])
             self.assertIsNone(self.stored())

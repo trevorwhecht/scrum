@@ -27,6 +27,6 @@ Only the main Mac has these, so the main Mac's scrum never sends a job that need
 - scrum/briefs, scroll-lab, agent draft API, AGENT_API_TOKEN
 - Blender, saas-animation, vid-img-editing, Video folder
 - yt-dlp, Whisper, video transcript, Instagram reel, YouTube link
-- Kind: edit-reel, Kind: edit-animation, Kind: edit-vector, Kind: edit-photo
+- Kind: edit-reel, Kind: edit-animation, Kind: edit-vector, Kind: edit-photo, Kind: edit-embroidery
 - Kind: ops-data, Kind: ops-content
 - ~/Developer/claude, md-trim

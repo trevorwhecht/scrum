@@ -53,7 +53,7 @@ class OpsLaneTest(unittest.TestCase):
         self.board({"id": JOB, "stage": "spec"})
         board.cmd_set(self.root, JOB, ["lane=ops", "kind=ops-data"])
         self.assertEqual((self.job(JOB)["lane"], self.job(JOB)["kind"]), ("ops", "ops-data"))
-        for kind in ("ops-content", "knowledge", "edit-reel", "edit-animation", "edit-vector", "edit-photo"):
+        for kind in ("ops-content", "knowledge", "edit-reel", "edit-animation", "edit-vector", "edit-photo", "edit-embroidery"):
             board.cmd_set(self.root, JOB, [f"kind={kind}"])
             self.assertEqual(self.job(JOB)["kind"], kind)
         board.cmd_set(self.root, JOB, ["kind=ops-data"])
