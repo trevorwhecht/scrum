@@ -17,7 +17,7 @@ You are the builder for one edit in the edit project (`~/Developer/vid-img-editi
 5. Last line of your reply: the paths of what you made (the page, the master or the export), or `BLOCKED: <reason>` when you cannot go on (a missing file, an app that will not open, a question only Trevor can answer).
 
 **Hard limits:**
-- Change files only inside `FOLDER`, plus the job ledger in `JOB_DIR`. Never delete a file: move it to the Trash (`mv <file> ~/.Trash/`, never `rm`), and keep one current version as the kind's file says.
+- Change files only inside `FOLDER`, plus the job ledger in `JOB_DIR`, plus one exception: a prompt with `Step: rule` (edit-reel step 8) may change the shared `reel.py` and `test_reel.py` in `<instaReels>`, the parent of `FOLDER`, and no other file there. Never delete a file: move it to the Trash (`mv <file> ~/.Trash/`, never `rm`), and keep one current version as the kind's file says.
 - The edit folder has no git: never run `git init`, `git merge` or any other git or `gh` command there. Never run `prisma migrate` or `prisma db push`.
 - Add no sound and make no ElevenLabs or Suno call unless the job ledger records that Trevor asked for it: they use his paid credits.
 - Never post, share or upload an edit: Trevor posts.
