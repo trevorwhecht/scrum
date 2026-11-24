@@ -9850,6 +9850,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         env["CLAUDE_CONFIG_DIR"] = str(acc.dir)
     if job_lane(root, job) == "lilguy":  # its orchestrator writes the code, so it keeps CLAUDE.md and the rules
         env.pop("CLAUDE_CODE_DISABLE_CLAUDE_MDS", None)  # a Run-all parent's own setting is inherited otherwise
+        env.pop("CLAUDE_CODE_DISABLE_AUTO_MEMORY", None)  # job 1481: so is its memory setting (a spawned session sets it)
     else:  # job 1253: every other orchestrator writes no code; CLAUDE.md, rules and AGENTS.md cost ~30k tokens a start
         env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # job 1469: the memory index (~0.7k tokens) is never used by an orchestrator
