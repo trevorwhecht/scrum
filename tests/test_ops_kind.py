@@ -140,6 +140,33 @@ class OpsRouteTextTest(unittest.TestCase):
         self.assertLess(text.index("1d. **Ops route"), text.index("2. **Base:**"))
         self.assertNotIn("ops-kind", (SKILL / "lanes" / "edit.md").read_text())
 
+    def test_newjob_rewrites_inline_ops_data(self):
+        text = (SKILL / "lanes" / "newjob.md").read_text()
+        route = text[text.index("   1d. **Ops route"):text.index("\n2. **Base:**")]
+        for phrase in ("starts `Kind: ops-data ` followed by `run: <commands>`", "`Run: <command>` line per `;`-separated command", "`Datafix: <text>`"):
+            self.assertIn(phrase, route)
+        self.assertLess(route.index("`Run: <command>` line per"), route.index("B ops-kind $ID"))
+        self.assertEqual(board.ops_kind("Kind: ops-data\nRun: a\nRun: b\n"), "ops-data")
+        self.assertTrue(board.RUN_LINE_RE.search("Kind: ops-data\nRun: a\nRun: b\n"))
+        self.assertEqual(board.ops_kind("Kind: ops-data\nDatafix: x\n"), "ops-data")
+
+    def test_newjob_strips_from_suffix_before_split(self):
+        """Round 1: a real followup item ends ` (from <id>)`; 1d strips it before splitting on `;`."""
+        root = Path(tempfile.mkdtemp())
+        job_id = board.cmd_new(root, "x")
+        fix = "Kind: ops-data run: npm run a:prod -- x; npm run b:prod"
+        with mock.patch.object(board, "merge_refusal", return_value=None):
+            board.cmd_followup(root, job_id, fix)
+        item = board.read_backlog(root)[1][0]["text"]
+        self.assertEqual(item, f"{fix} (from {job_id})")
+        text = (SKILL / "lanes" / "newjob.md").read_text()
+        route = text[text.index("   1d. **Ops route"):text.index("\n2. **Base:**")]
+        self.assertIn("strip a trailing ` (from <id>)` first", route)
+        self.assertLess(route.index("strip a trailing"), route.index("`;`-separated"))
+        stripped = re.sub(r"[ \t]\(from \d+-[\w-]+\)\s*\Z", "", item)
+        runs = stripped.split("run: ", 1)[1].split("; ")
+        self.assertEqual(runs, ["npm run a:prod -- x", "npm run b:prod"])
+
     def test_askme_skip_reaches_ops_route(self):
         """Round 1: a job with no askme, and one whose question round ended, go on to 1d, never straight to step 2."""
         text = (SKILL / "lanes" / "newjob.md").read_text()
