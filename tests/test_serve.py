@@ -6,6 +6,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 sys.path.insert(0, str(ROOT / "tests"))  # bare sibling imports resolve however the module is invoked
+os.environ.pop("SCRUM_SHOP", None)  # a shop Mac sets it; backlog-add without --job is refused there (job 1504)
+os.environ.pop("CLAUDE_CODE_REMOTE", None)  # a cloud session sets it; same refusal
 tempfile.tempdir = os.path.realpath(tempfile.gettempdir())  # macOS: /var/folders is a symlink to /private/var; code logs resolved paths
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 DEFAULT_REGISTRY = os.path.join(tempfile.mkdtemp(), "projects.json")  # pulse.log, weekly/ never in the real home

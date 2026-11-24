@@ -4,6 +4,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
+os.environ.pop("SCRUM_SHOP", None)  # a shop Mac sets it; backlog-add without --job is refused there (job 1504)
+os.environ.pop("CLAUDE_CODE_REMOTE", None)  # a cloud session sets it; same refusal
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 os.environ.setdefault("SCRUM_REGISTRY", os.path.join(tempfile.mkdtemp(), "projects.json"))  # job 971: finish_first reads every registered board; never the real ones
 import board  # noqa: E402
