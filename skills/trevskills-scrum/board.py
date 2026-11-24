@@ -4576,6 +4576,12 @@ def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool =
     check = first_word(last / "check.md", ("PASS", "FAIL")) if rounds else None
     reviews_pass = bool(rounds) and all(first_word(last / f"review-{r}.md", ("PASS", "CHANGES")) == "PASS"
                                         for r in REVIEWERS)
+    if lane == "lilguy" and not job.get("worktree"):
+        # job 1960: a lilguy job built with no board worktree merged unchecked; find its folder or promote
+        wt = Path(root).resolve().parent / ".claude" / "worktrees" / f"scrum-{check_id(job_id)}"
+        if wt.is_dir():
+            cmd_set(root, job_id, [f"worktree={wt}"])
+            job = dict(job, worktree=str(wt))
     diff = _route_diff(job)
     names = diff[1] if diff else []
     promote = None
@@ -4583,7 +4589,9 @@ def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool =
         promote = "check failed twice"
     elif lane == "fast" and check == "PASS":
         promote = _promote_trigger(*diff) if diff else "diff unreadable"
-    elif lane == "lilguy" and job.get("worktree"):
+    elif lane == "lilguy" and not job.get("worktree"):
+        promote = "worktree unset"
+    elif lane == "lilguy":
         feature = d / "feature.md"
         feature = feature.read_text(encoding="utf-8", errors="replace") if feature.is_file() else ""
         promote = "check failed 3 times" if check_fails >= 3 else \
