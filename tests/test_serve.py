@@ -3026,7 +3026,13 @@ class ServeTest(unittest.TestCase):
         real_running = self.serve.running
         with mock.patch.object(self.serve, "resume_refusal", side_effect=lambda p, r, j, manual=False: seen.append(j["id"]) or "nope"), \
                 mock.patch.object(self.serve, "running", side_effect=lambda p, i: i == busy or real_running(p, i)):
-            jobs = self.board_jobs()
+            def attempt():
+                nonlocal jobs
+                seen.clear()
+                jobs = self.board_jobs()
+                return all(jobs.get(i, {}).get("resumeRefusal") == "nope" for i in (paused, stalled))
+            jobs = {}
+            self.wait_for(attempt)
         self.assertEqual(sorted(i for i in seen if i in (paused, stalled, plain, busy)), sorted([paused, stalled]))
         for i in (paused, stalled):
             self.assertEqual(jobs[i]["resumeRefusal"], "nope")
