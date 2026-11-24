@@ -103,6 +103,21 @@ class JevGateTest(unittest.TestCase):
                 self.assertIn("usage: jev-gate.py", err)
                 self.assertEqual(self.log(), [])
 
+    def test_kind_step_prints_decision(self):
+        (self.job / "feature.md").write_text("Run the backfill\nRun: npm run x:prod\n")
+        by_question = lambda data, content: (lambda state, qs, timeout=jev.TIMEOUT, key=None: {
+            q: {"type": "noul", "noul": data if "data script" in qs[q]["instructions"] else content} for q in qs})
+        for data, content, want in ((0.9, 0.1, "ops-data"), (0.1, 0.8, "ops-content"), (0.9, 0.9, "code"),
+                                    (0.5, 0.5, "code"), (0.69, 0.1, "code")):
+            with self.subTest(data=data, content=content):
+                out, f = self.gate("kind", ask=by_question(data, content))
+                self.assertEqual((out, f[1], f[4]), (want, "kind", want))
+        out, f = self.gate("kind", ask=RuntimeError("boom"))
+        self.assertEqual((out, f[4]), ("code", "code"))
+        code, _, err = self.run_gate(["nope", str(self.job)])
+        self.assertIn("runs-on kind)", load_gate().__doc__)
+        self.assertIn("|kind>", err)
+
     def test_fallbacks(self):
         (self.job / "feature.md").write_text("# Feature\nDo a thing")
         (self.root / "backlog.md").write_text(BACKLOG)

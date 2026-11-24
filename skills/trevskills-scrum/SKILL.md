@@ -1,6 +1,6 @@
 ---
 name: trevskills-scrum
-description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum now"/"next"/"later <feature>" (start it, queue it first, or backlog it), "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum resume <id>" (restart a stalled, paused or stopped job), "/trevskills-scrum askme [1-3] <feature>" (ask questions first), "/trevskills-scrum bigboy <feature>" (plan a big request into 2-5 chained jobs), "/trevskills-scrum digest" (learn from done jobs; runs every 10), "/trevskills-scrum run-all" (triage the backlog, then run every open item in parallel where files don't overlap), "/trevskills-scrum run-all askme <1-3>" (the same, after answering questions first), "/trevskills-scrum lilguy <feature>" (cheap mode: no subagents; this session builds in the job's own worktree), "/trevskills-scrum cloud [N]" (run N backlog items in cloud sessions), "/trevskills-scrum cloud-sync" (pull their results), "/trevskills-scrum cloud-home <id>" (bring one synced cloud job home; serve.py starts it), and bare "/trevskills-scrum" for status.
+description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → reviews → approver → squash-merged PR). Also "/trevskills-scrum now"/"next"/"later <feature>" (start, queue first, or backlog), "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum resume <id>" (restart a stalled job), "/trevskills-scrum askme [1-3] <feature>" (questions first), "/trevskills-scrum bigboy <feature>" (plan a big request into chained jobs), "/trevskills-scrum digest" (learn from done jobs), "/trevskills-scrum run-all" (triage the backlog, then run every open item in parallel), "/trevskills-scrum run-all askme <1-3>", "/trevskills-scrum lilguy <feature>" (cheap mode: no subagents; builds in the job's own worktree), "/trevskills-scrum cloud [N]" (run N backlog items in the cloud), "/trevskills-scrum cloud-sync", "/trevskills-scrum cloud-home <id>" (bring one synced job home), and bare "/trevskills-scrum" for status.
 hooks:
   PermissionRequest:
     - hooks:
@@ -186,10 +186,16 @@ Read `$HOME/.claude/skills/trevskills-scrum/lanes/digest.md` when this lane runs
 
 ## Edit lane
 
-A job whose feature.md has a `Kind:` line, or any job in a `- Git: none` project, runs only this lane, for every command.
+A job whose feature.md has a `Kind: edit-*` line, or any job in a `- Git: none` project, runs only this lane, for every command.
 
 Read `$HOME/.claude/skills/trevskills-scrum/lanes/edit.md` when this lane runs.
 
 ## Final report
 
 End with the job id, the final stage, for a BigBoy parent or child the children this run started (or `none`) and the parent's stage, the PR URL, rounds used, any follow-ups added to the backlog, for merged jobs whether main was fast-forwarded (`main updated`, or `main not updated: <reason>`) the restart outcome (`restarted + verified`, `restarted + verified (behavioural)`, `restart failed`, `restart command not allowed`, `verify failed`, `Restart pending: <process> — <reason>`, or `none`), and whether the change is live (`live`, or `merged, not live: <why>` as written to the board), and, for needs-human, the exact reason and the next `/trevskills-scrum` command (`approve <id>`, `rework <id> "<feedback>"`, or `discuss <id>` when it's unclear which).
+
+## Ops lane
+
+A job whose feature.md has a `Kind: ops-*` line runs only this lane, for every command.
+
+Read `$HOME/.claude/skills/trevskills-scrum/lanes/ops.md` when this lane runs.

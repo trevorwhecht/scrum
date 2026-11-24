@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One Jev decision for the pipeline. Never fails the caller: any error prints the step's fallback.
 
-usage: jev-gate.py <step> <job-dir>   (steps: model spec-model promote dupe approver reviewer-security reviewer-ui rank critical prod-error runs-on)
+usage: jev-gate.py <step> <job-dir>   (steps: model spec-model promote dupe approver reviewer-security reviewer-ui rank critical prod-error runs-on kind)
 stdout is one line, the decision. Every run appends to <job-dir>/jev.log:
 timestamp, step, question, raw answer, decision, elapsed seconds (tab-separated).
 """
@@ -30,7 +30,10 @@ STEPS = {
                    "script reported and worked around (skipped, kept, retried)?", 0.3, "real"),  # prints real or handled
     "runs-on": ("Does this job need any of these, which only this Mac has: {terms}?", (0.3, 0.7),
                 "unsure"),  # prints main, any or unsure (board.tag_runs_on falls back to the term list)
+    "kind": ("Does this job only run an existing data script against production, with no code change", 0.7,
+             "code"),  # prints ops-data, ops-content or code (board.jev_ops_kind); the content question is KIND_CONTENT_Q
 }
+KIND_CONTENT_Q = "Does this job only write content for Trevor to publish, with no code change"
 LEVELS = ["trivial edit", "small contained change", "multi-file change with new logic", "cross-cutting or risky change"]
 SPEC_LEVELS = ["fully specified: names each file, the cause and the fix, so the spec only restates it",
                "mostly specified: names the files and the approach, a few details left to choose",
@@ -102,6 +105,22 @@ def runs_on(text, terms, asked):
     return q, raw, "main" if v >= high else "any" if v <= low else "unsure"
 
 
+def kind_of(text, asked):
+    """(question, raw answers, decision) for one feature.md: `ops-data` or `ops-content` when exactly one of the two
+    questions is a confident yes (score at or above the cutoff), else `code`; `code` with no Jev call on empty text."""
+    q, cut, _ = STEPS["kind"]
+    if not text.strip():
+        return "-", "-", "code"
+    raws = []
+    for question in (q, KIND_CONTENT_Q):
+        asked.append(question)
+        v, raw = jev.noul(text.strip(), question, timeout=20)
+        raws.append((v >= cut, raw))
+    (data, _), (content, _) = raws
+    return f"{q} | {KIND_CONTENT_Q}", [raw for _, raw in raws], \
+        "ops-data" if data and not content else "ops-content" if content and not data else "code"
+
+
 def bigboy_child(job):
     """True when the board entry of job (a jobs/<id> folder) has a `parent` whose lane is `bigboy`: its planner ticket
     already names its files. False on any read problem."""
@@ -137,6 +156,9 @@ def decide(step, job, asked):
     if step == "runs-on":
         return runs_on("\n\n".join(f.read_text() for f in (job / "feature.md", job / "spec.md") if f.is_file()),
                        board.main_only_terms(), asked)
+    if step == "kind":
+        f = job / "feature.md"
+        return kind_of(f.read_text() if f.is_file() else "", asked)
     stdin = sys.stdin.read().strip()
     if step == "rank":
         return rank_ticket(stdin, job.parent.parent, asked)
