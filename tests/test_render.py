@@ -1,6 +1,6 @@
 """render.py: the shared review render (job 652). Headless Chrome over a stdlib CDP websocket client."""
-import io, json, os, sys, tempfile, threading, time, unittest
-from contextlib import redirect_stderr, redirect_stdout
+import io, json, os, signal, subprocess, sys, tempfile, threading, time, unittest
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -56,11 +56,212 @@ class Page(BaseHTTPRequestHandler):
         pass
 
 
+REAL_REAP = render.reap
+
+
 def run_main(argv, env=None):
+    """render.main(argv); (exit code, stdout, stderr). render.reap returns [] unless a test patched it already, so no
+    test reads this machine's real process list (job 1451)."""
     out, err = io.StringIO(), io.StringIO()
-    with mock.patch.dict(os.environ, env or {}), redirect_stdout(out), redirect_stderr(err):
+    unpatched = render.reap is REAL_REAP
+    reap = mock.patch.object(render, "reap", return_value=[]) if unpatched else nullcontext()
+    with mock.patch.dict(os.environ, env or {}), reap, redirect_stdout(out), redirect_stderr(err):
         code = render.main(argv)
     return code, out.getvalue(), err.getvalue()
+
+
+def gone(pid, within):
+    """True once pid no longer exists, polled up to `within` seconds."""
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        time.sleep(0.05)
+    return False
+
+
+def kill_quietly(*pids):
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+CHILD = ("import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); "
+         "time.sleep(120)")
+# The fake Chrome leader: argv[1] "exit" exits once its child is up, "wait" sleeps (and dies on SIGTERM), "orphan"
+# starts its own session, ignores SIGTERM and writes "<pid> <child pid>" to argv[2]. The child ignores SIGTERM.
+LEADER = f"""import os, signal, subprocess, sys, time
+if sys.argv[1] == "orphan":
+    os.setsid()
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen([sys.executable, "-c", {CHILD!r}], stdout=subprocess.PIPE)
+child.stdout.readline()
+if sys.argv[1] == "orphan":
+    tmp = sys.argv[2] + ".tmp"
+    open(tmp, "w").write(f"{{os.getpid()}} {{child.pid}}")
+    os.replace(tmp, sys.argv[2])
+else:
+    print(child.pid, flush=True)
+if sys.argv[1] == "exit":
+    os._exit(0)
+time.sleep(120)
+"""
+
+
+class RenderKillTest(unittest.TestCase):
+    """Job 1451: _kill stops Chrome's whole process group, even when the leader went first."""
+
+    def leader(self, mode):
+        proc = subprocess.Popen([sys.executable, "-c", LEADER, mode], stdout=subprocess.PIPE, text=True,
+                                start_new_session=True)
+        child = int(proc.stdout.readline())
+        proc.stdout.close()
+        self.addCleanup(kill_quietly, proc.pid, child)
+        self.addCleanup(lambda: proc.poll() is None and proc.wait(5))
+        return proc, child
+
+    def test_kill_stops_term_ignoring_child(self):
+        proc, child = self.leader("wait")
+        render._kill(proc)
+        self.assertIsNotNone(proc.poll(), "the leader is stopped")
+        self.assertTrue(gone(child, 5), "the SIGTERM-ignoring child in Chrome's group is gone")
+
+    def test_kill_after_leader_exited(self):
+        proc, child = self.leader("exit")
+        proc.wait(30)
+        render._kill(proc)
+        self.assertTrue(gone(child, 5), "the child left in Chrome's group is gone")
+
+    def test_kill_terms_then_kills_the_group(self):
+        proc = mock.Mock(pid=4321)
+        proc.poll.return_value = None
+        with mock.patch.object(render.os, "killpg", side_effect=[None, ProcessLookupError()]) as killpg:
+            render._kill(proc)
+        self.assertEqual(killpg.call_args_list, [mock.call(4321, signal.SIGTERM), mock.call(4321, signal.SIGKILL)])
+        proc.wait.assert_any_call(5)
+
+    def test_kill_none_is_noop(self):
+        with mock.patch.object(render.os, "killpg", side_effect=AssertionError("signalled")):
+            self.assertIsNone(render._kill(None))
+
+    def test_main_handles_sighup(self):
+        before, seen = signal.getsignal(signal.SIGHUP), []
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(render.buildlock, "board_module", return_value=None), \
+                mock.patch.object(render, "render",
+                                  side_effect=lambda *a: seen.append(signal.getsignal(signal.SIGHUP)) or {"pages": []}):
+            code, _, _ = run_main(["http://127.0.0.1:1", str(Path(tmp) / "out"), "/"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(seen), 1)
+        self.assertNotIn(seen[0], (signal.SIG_DFL, signal.SIG_IGN, None))
+        self.assertIs(signal.getsignal(signal.SIGHUP), before)
+        with self.assertRaises(SystemExit) as cm:
+            seen[0](signal.SIGHUP, None)
+        self.assertEqual(cm.exception.code, 1)
+
+
+class RenderReapTest(unittest.TestCase):
+    """Job 1451: reap() stops each scrum-render Chrome whose render.py is gone (ppid 1) and removes its temp dir."""
+
+    def test_selects_only_orphaned_render_chrome(self):
+        tmp = "/var/folders/xy/T"
+        ps_out = "\n".join([
+            "  501     1   501 /Applications/Chrome --headless=new --user-data-dir=/var/folders/xy/T/scrum-render-ab_1/profile --no-first-run",
+            "  602  4242   602 /Applications/Chrome --headless=new --user-data-dir=/var/folders/xy/T/scrum-render-live/profile",
+            "  503   501   501 /Applications/Chrome Helper --type=renderer --user-data-dir=/var/folders/xy/T/scrum-render-ab_1/profile",
+            "  704     1   704 /Applications/Chrome --user-data-dir=/var/folders/xy/T/other-dir/profile",
+            "  805     1   805 /Applications/Chrome --user-data-dir=/var/folders/zz/T/scrum-render-x/profile",
+            "  906     1   906 /Applications/Chrome --user-data-dir=/var/folders/xy/T/scrum-render-a/b/profile",
+            "garbage line",
+            ""])
+        signalled = []
+
+        def kill(pid, sig):
+            if sig == 0:
+                raise ProcessLookupError()
+            signalled.append(("kill", pid, sig))
+
+        with mock.patch.object(render.os, "kill", side_effect=kill), \
+                mock.patch.object(render.os, "killpg", side_effect=lambda g, s: signalled.append(("killpg", g, s))), \
+                mock.patch.object(render.shutil, "rmtree") as rmtree, \
+                mock.patch.object(render.subprocess, "run", side_effect=AssertionError("ran ps")):
+            got = render.reap(tmp=tmp, ps_out=ps_out)
+        self.assertEqual(got, [501])
+        self.assertEqual(signalled, [("killpg", 501, signal.SIGTERM), ("killpg", 501, signal.SIGKILL)])
+        rmtree.assert_called_once_with("/var/folders/xy/T/scrum-render-ab_1", ignore_errors=True)
+
+    def test_signals_only_pid_when_not_group_leader(self):
+        ps_out = "  501     1   77 /c --user-data-dir=/t/scrum-render-q/profile\n"
+        signalled = []
+
+        def kill(pid, sig):
+            if sig == 0:
+                raise ProcessLookupError()
+            signalled.append(("kill", pid, sig))
+
+        with mock.patch.object(render.os, "kill", side_effect=kill), \
+                mock.patch.object(render.os, "killpg", side_effect=AssertionError("killpg")), \
+                mock.patch.object(render.shutil, "rmtree"):
+            self.assertEqual(render.reap(tmp="/t", ps_out=ps_out), [501])
+        self.assertEqual(signalled, [("kill", 501, signal.SIGTERM), ("kill", 501, signal.SIGKILL)])
+
+    def test_ps_failure_returns_empty(self):
+        with mock.patch.object(render.subprocess, "run", side_effect=OSError("no ps")), \
+                mock.patch.object(render.os, "kill", side_effect=AssertionError("signalled")), \
+                mock.patch.object(render.os, "killpg", side_effect=AssertionError("signalled")):
+            self.assertEqual(render.reap(tmp="/t"), [])
+
+    def test_reaps_spawned_orphan(self):
+        with tempfile.TemporaryDirectory() as root:
+            tmp = os.path.join(root, "T")
+            run_dir = os.path.join(tmp, "scrum-render-fake1")
+            os.makedirs(os.path.join(run_dir, "profile"))
+            script, pids_file = os.path.join(root, "leader.py"), os.path.join(root, "pids")
+            Path(script).write_text(LEADER)
+            subprocess.run(["sh", "-c", 'exec "$1" "$2" orphan "$3" "$4" >/dev/null 2>&1 </dev/null &', "sh",
+                            sys.executable, script, pids_file, f"--user-data-dir={run_dir}/profile"],
+                           check=True, timeout=30)
+            deadline = time.monotonic() + 30
+            while not os.path.exists(pids_file) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            leader, child = map(int, Path(pids_file).read_text().split())
+            self.addCleanup(kill_quietly, leader, child)
+            ppid = subprocess.run(["ps", "-o", "ppid=", "-p", str(leader)], capture_output=True, text=True,
+                                  timeout=30).stdout.strip()
+            if ppid != "1":
+                raise unittest.SkipTest(f"the fake leader's ppid is {ppid!r}, not 1 (a subreaper)")
+            got = render.reap(tmp=tmp)
+            self.assertEqual(got, [leader])
+            self.assertTrue(gone(leader, 10), "the SIGTERM-ignoring leader is gone")
+            self.assertTrue(gone(child, 10), "its group child is gone")
+            self.assertFalse(os.path.exists(run_dir))
+
+    def test_reap_flag(self):
+        with mock.patch.object(render, "reap", return_value=[11]):
+            self.assertEqual(run_main(["--reap"]), (0, '{"reaped": [11]}\n', ''))
+        self.assertEqual(run_main(["--bogus", "x", "/"])[0], 2)
+
+    def test_main_reaps_before_hold(self):
+        parent = mock.Mock()
+        parent.reap.return_value = []
+        parent.machine_hold.return_value = None
+        with tempfile.TemporaryDirectory() as tmp:
+            out = str(Path(tmp) / "out")
+            with mock.patch.object(render, "reap", parent.reap), \
+                    mock.patch.object(render.buildlock, "machine_hold", parent.machine_hold), \
+                    mock.patch.object(render.buildlock, "board_module", return_value=object()):
+                code, _, _ = run_main(["http://127.0.0.1:1", out, "/"], {"SCRUM_CHROME": str(Path(tmp) / "no-chrome")})
+                self.assertEqual(code, 1)
+                self.assertEqual([c[0] for c in parent.mock_calls], ["reap", "machine_hold"])
+                parent.reset_mock()
+                self.assertEqual(run_main(["http://127.0.0.1:1", out])[0], 2)
+                parent.reap.assert_not_called()
 
 
 def run_chrome(argv, env=None, took=None):

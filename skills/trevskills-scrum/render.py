@@ -3,14 +3,16 @@
 scrum-review-ui and scrum-review-ux read instead of loading it themselves.
 
   python3 render.py <url> <out_dir> [--cookies <file>] <path>...
+  python3 render.py --reap
 
 For each path: <slug>-390.png and <slug>-1440.png (viewport-sized, 900 px tall), console errors and warnings appended
 to out_dir/console.log as `<path> <width> <level>: <text>`, and out_dir/manifest.json
 {"url", "cookies", "pages": [{"path", "final_url", "http_status", "status", "shots", "console_errors"}]}.
 --cookies loads a Playwright storageState file's cookies first; no cookie name or value is ever written out.
 Exit 0 when every page is ok, redirected or http_error; 1 on a timeout or when Chrome cannot run (manifest "error");
-2 on a usage error. Stdlib only: Chrome DevTools Protocol over a small websocket client."""
-import base64, glob, json, os, select, shutil, signal, socket, struct, subprocess, sys, tempfile, time
+2 on a usage error. Every render first reaps (reap()) each scrum-render Chrome whose render.py is gone (ppid 1) and
+its temp dir; --reap does only that and prints {"reaped": [<pids>]}. Stdlib only: Chrome DevTools Protocol over a small websocket client."""
+import base64, glob, json, os, re, select, shutil, signal, socket, struct, subprocess, sys, tempfile, time
 import urllib.request
 from collections import deque
 from pathlib import Path
@@ -18,7 +20,7 @@ from urllib.parse import urlparse
 
 import buildlock  # a sibling: machine_hold and board_module for main()'s hold before Chrome starts (job 1227)
 
-USAGE = "usage: render.py <url> <out_dir> [--cookies <file>] <path>..."
+USAGE = "usage: render.py <url> <out_dir> [--cookies <file>] <path>...\n       render.py --reap"
 MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 WIDTHS = ((390, True), (1440, False))
 HEIGHT = 900
@@ -198,17 +200,73 @@ def _start_chrome(chrome: str, tmp: str):
 
 
 def _kill(proc):
-    if proc is None or proc.poll() is not None:
+    """Stop Chrome's whole process group: SIGTERM, up to 5 s on the leader, then always SIGKILL, so a helper that
+    ignores SIGTERM or outlives the leader never lives on (job 1451)."""
+    if proc is None:
         return
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-        proc.wait(5)
-    except (OSError, subprocess.TimeoutExpired):
+    for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait(5)
-        except (OSError, subprocess.TimeoutExpired):
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
             pass
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _signal(pid: int, pgid: int, sig: int):
+    """Send sig to pid's group when pid leads it, else to pid alone; a process already gone is ignored."""
+    try:
+        if pgid == pid:
+            os.killpg(pid, sig)
+        else:
+            os.kill(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _gone(pid: int, within: float) -> bool:
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def reap(tmp: str | None = None, ps_out: str | None = None) -> list[int]:
+    """Stop every scrum-render Chrome whose render.py is gone (ppid 1, its --user-data-dir under tmp) and remove that
+    render's temp dir; return the pids reaped. A Chrome with a live parent, and its helpers, are never signalled."""
+    tmp = tempfile.gettempdir() if tmp is None else tmp
+    if ps_out is None:
+        try:
+            ps_out = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,command="], capture_output=True, text=True,
+                                    timeout=5, check=True).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+    flag = re.compile(r"(?:^|\s)--user-data-dir=" + re.escape(tmp.rstrip("/"))
+                      + r"/(scrum-render-[^/\s]+)/profile(?:\s|$)")
+    found = []
+    for line in ps_out.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4 or not all(p.isdigit() for p in parts[:3]):
+            continue
+        pid, ppid, pgid = map(int, parts[:3])
+        if ppid == 1 and pid > 1 and (m := flag.search(parts[3])):
+            found.append((pid, pgid, os.path.join(tmp, m.group(1))))
+    for pid, pgid, _ in found:
+        _signal(pid, pgid, signal.SIGTERM)
+    for pid, pgid, run_dir in found:
+        _gone(pid, 5)
+        _signal(pid, pgid, signal.SIGKILL)
+        shutil.rmtree(run_dir, ignore_errors=True)
+    return [pid for pid, _, _ in found]
 
 
 def _load_cookies(cdp: CDP, file: Path) -> str:
@@ -386,6 +444,9 @@ def render(url: str, out_dir: Path, paths: list[str], cookies: Path | None = Non
 
 
 def main(argv: list[str]) -> int:
+    if list(argv) == ["--reap"]:
+        print(json.dumps({"reaped": reap()}))
+        return 0
     args, cookies = list(argv), None
     if "--cookies" in args:
         i = args.index("--cookies")
@@ -402,6 +463,7 @@ def main(argv: list[str]) -> int:
             not p.is_file() or not (p.name in OUR_FILES or p.suffix == ".png") for p in out_dir.iterdir())):
         print(f"render.py: {out_dir} holds files render.py did not write; refusing to delete it", file=sys.stderr)
         return 2
+    reap()  # a Chrome a dead render.py left behind (job 1451)
     board = buildlock.board_module()  # a hot machine holds Chrome's start (job 1227); BUDGET counts after it
     why, cap = buildlock.machine_hold(board), time.monotonic() + HOLD_CAP
     if why:
@@ -409,11 +471,13 @@ def main(argv: list[str]) -> int:
     while why and time.monotonic() < cap:
         time.sleep(HOLD_POLL)
         why = buildlock.machine_hold(board)
-    old = signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))  # run the finally that kills Chrome
+    olds = {sig: signal.signal(sig, lambda *_: sys.exit(1))  # run the finally that kills Chrome
+            for sig in (signal.SIGTERM, signal.SIGHUP)}
     try:
         manifest = render(url, out_dir, paths, cookies)
     finally:
-        signal.signal(signal.SIGTERM, old)
+        for sig, old in olds.items():
+            signal.signal(sig, old)
     print(json.dumps({"pages": [{"path": p["path"], "status": p["status"]} for p in manifest["pages"]],
                       "error": manifest.get("error")}))
     return 0 if "error" not in manifest and all(p["status"] != "timeout" for p in manifest["pages"]) else 1
