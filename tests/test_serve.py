@@ -13982,6 +13982,86 @@ class E2eFullTest(unittest.TestCase):
         self.assertIsNone(self.serve.E2E_FULL["running"])
         self.assertEqual(self.tick(), 1, "the same due run starts once the machine has room")
 
+    def read_full(self):
+        return json.loads((self.root / "e2e-full.json").read_text())
+
+    def test_swap_over_limit_holds_a_due_run(self):
+        """Job 1512: runs started at 71-76% swap grew it and hot_stop_tick stopped them within 2 min, 6 times."""
+        self.assertEqual(self.serve.board.MAX_SWAP_PCT, 25)
+        with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="26"):
+            self.assertEqual(self.tick(), 0)
+        self.assertIsNone(self.serve.E2E_FULL["running"])
+        rec = self.read_full()
+        self.assertNotEqual(rec.get("result"), "running")
+        self.assertIsInstance(rec["heldSince"], float)
+        with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="25"):
+            self.assertEqual(self.tick(), 1, "at the limit the run starts")
+        rec = self.read_full()
+        self.assertEqual(rec["result"], "running")
+        self.assertNotIn("heldSince", rec)
+
+    def test_swap_unknown_does_not_hold(self):
+        with mock.patch.object(self.serve.board, "swap_used_pct", return_value=None):
+            self.assertEqual(self.tick(), 1)
+        self.assertEqual(self.read_full()["result"], "running")
+
+    def test_swap_hold_keeps_held_since_and_other_keys(self):
+        rec = {"at": time.time() - 90000, "head": self.base, "result": "pass", "exit": 0, "failed": [],
+               "lastGreen": self.base}
+        (self.root / "e2e-full.json").write_text(json.dumps(rec))
+        self.merge("one merge")
+        first = float(int(time.time()))
+        with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="61"):
+            with mock.patch.object(self.serve.time, "time", return_value=first):
+                self.assertEqual(self.tick(), 0)
+            self.assertEqual(self.read_full(), {**rec, "heldSince": first})
+            with mock.patch.object(self.serve.time, "time", return_value=first + 4000):
+                self.assertEqual(self.tick(), 0)
+            self.assertEqual(self.read_full(), {**rec, "heldSince": first}, "never reset while held")
+        with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="10", SCRUM_VM_PRESSURE="2"):
+            self.assertEqual(self.tick(), 0, "swap dropped, the machine still refuses")
+        self.assertEqual(self.read_full(), rec, "heldSince removed once swap drops")
+
+    def test_swap_hold_over_24h_logs_once_and_shows_red(self):
+        self.assertEqual(self.serve.E2E_FULL_HELD_ALERT, 86400)
+        (self.root / "board.json").write_text(json.dumps({"jobs": []}))
+        rec = {"at": time.time() - 90000, "head": self.base, "result": "pass", "exit": 0, "failed": [],
+               "lastGreen": self.base, "heldSince": time.time() - 86400 + 120}
+        (self.root / "e2e-full.json").write_text(json.dumps(rec))
+        self.merge("one merge")
+        head = self.git("rev-parse", "HEAD")
+        with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="66"):
+            n, lines = processes_logged(self.tick)
+            self.assertEqual((n, lines), (0, []), "under 24 h: no line")
+            self.assertEqual(self.serve.board_with_activity(self.root, "repo")["e2eFull"]["result"], "pass",
+                             "under 24 h: not red")
+            held = {**rec, "heldSince": time.time() - 86400 - 5}
+            (self.root / "e2e-full.json").write_text(json.dumps(held))
+            n, lines = processes_logged(self.tick)
+            self.assertEqual(n, 0)
+            self.assertEqual(lines, [{"process": "Full E2E on main", "result": "held",
+                                      "repo": os.path.realpath(self.repo), "head": head,
+                                      "reason": "swap 66% of RAM over 25%"}])
+            self.assertEqual(self.serve.board_with_activity(self.root, "repo")["e2eFull"]["result"], "error")
+            self.assertEqual(self.read_full()["heldSince"], held["heldSince"])
+            n, lines = processes_logged(self.tick)
+            self.assertEqual((n, lines), (0, []), "one line per hold")
+        with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="10"):
+            self.assertEqual(self.tick(), 1)
+        self.assertEqual(self.serve.board_with_activity(self.root, "repo")["e2eFull"]["result"], "running")
+
+    def test_loaded_record_of_another_head_keeps_its_loads(self):
+        """Job 1512: a merge started the doubling waits over, so the run restarted every 10 to 12 min."""
+        w = self.serve.E2E_FULL_LOADED_WAIT
+        rec = {"at": 1000.0, "head": "other", "result": "loaded", "secs": 0, "loads": 3, "exit": 1, "failed": [],
+               "lastGreen": None}
+        self.assertFalse(self.serve.e2e_full_due(rec, "moved", 9, 1000.0 + 4 * w - 1))
+        self.assertTrue(self.serve.e2e_full_due(rec, "moved", 9, 1000.0 + 4 * w))
+        (self.root / "e2e-full.json").write_text(json.dumps({**rec, "at": time.time() - 4 * w - 5}))
+        self.assertEqual(self.tick(), 1)
+        rec = self.read_full()
+        self.assertEqual((rec["result"], rec["head"], rec["loads"]), ("running", self.base, 3))
+
     def test_tick_skips_dirty_checkout(self):
         (self.repo / "a.txt").write_text("dirty\n")
         self.assertEqual(self.tick(), 0)
@@ -14289,7 +14369,7 @@ class E2eFullTest(unittest.TestCase):
 
     def test_loaded_wait_doubles_per_head_and_resets(self):
         """Job 1345: each loaded stop on a head doubles the wait from E2E_FULL_LOADED_WAIT, capped at E2E_FULL_EVERY;
-        a moved HEAD or a finished run starts over."""
+        a finished run starts over; a moved HEAD keeps the count (job 1512)."""
         sv, w = self.serve, self.serve.E2E_FULL_LOADED_WAIT
         self.assertEqual(w, 600)
         due = lambda loads, secs, head="h": sv.e2e_full_due(
@@ -14298,7 +14378,8 @@ class E2eFullTest(unittest.TestCase):
             with self.subTest(loads=loads):
                 self.assertFalse(due(loads, wait - 1))
                 self.assertTrue(due(loads, wait))
-        self.assertTrue(due(5, w, head="moved"))  # HEAD moved: the first wait again
+        self.assertFalse(due(5, 16 * w - 1, head="moved"))  # HEAD moved: the count carries (job 1512)
+        self.assertTrue(due(5, 16 * w, head="moved"))
         # two loaded runs on one head count 1 then 2; the tick's running record carries the count between them
         with mock.patch.object(sv.board, "cpu_load_pct", return_value=350.0):
             rec = self.run_suite(E2E_LIST_OUTPUT, 1, last_green=self.base)

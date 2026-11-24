@@ -1305,7 +1305,8 @@ E2E_FULL = {"running": None}  # the project whose full run is in flight in this 
 E2E_FULL_MERGES, E2E_FULL_EVERY, E2E_FULL_STALE = 5, 86400, 7200
 # 2026-11-21 crash: a `loaded` run due at once was hot stopped and restarted 152 times in 11 h (start passes,
 # the run pushes memory pressure to level 2, hot_stop_tick kills it, pressure falls, repeat) until the Mac hung.
-E2E_FULL_LOADED_WAIT = 600  # the first wait after a loaded stop on a head; each further one on that head doubles, up to E2E_FULL_EVERY
+E2E_FULL_LOADED_WAIT = 600  # the first wait after a loaded stop; each further one doubles, up to E2E_FULL_EVERY, whatever the HEAD
+E2E_FULL_HELD_ALERT = 86400  # a due run the swap gate has held this long logs one `held` line and shows red (job 1512)
 E2E_FULL_BUSY_WAIT = 1800  # a `busy` record naming a live pid waits for that pid to exit, or this many seconds (job 1352)
 E2E_FULL_LOAD_SECS = 60  # e2e_full_run samples board.cpu_load_pct once per this many seconds of the run, and at exit
 E2E_FULL_FAILED_RE = re.compile(r"^\s*(\d+) failed\s*$")
@@ -1327,14 +1328,14 @@ def e2e_full_due(record, head, merges, now, settled=False) -> bool:
     held the checkout) is due at once, or, when it names a `pid` still alive, once that pid exits or
     E2E_FULL_BUSY_WAIT passed since its start (job 1352); a `loaded` one (a fail under load, or hot stopped) once its wait has passed
     since its stop (`at` plus `secs`, job 1457), whatever the HEAD or merges: E2E_FULL_LOADED_WAIT doubled per loaded stop counted in its `loads`
-    on this head (job 1345), capped at E2E_FULL_EVERY; a record of another HEAD waits the first one."""
+    (job 1345), capped at E2E_FULL_EVERY; a record of another HEAD keeps its count (job 1512), and a `pass` resets it."""
     if not record:
         return True
     if record.get("result") == "busy":
         pid = record.get("pid")
         return not isinstance(pid, int) or e2e_full_pid_gone(pid) or now - (record.get("at") or 0) >= E2E_FULL_BUSY_WAIT
     if record.get("result") == "loaded":
-        loads = record.get("loads") if head == record.get("head") else None  # a moved HEAD starts the waits over
+        loads = record.get("loads")  # a merge keeps the count (job 1512: it restarted the run every 10 to 12 min)
         wait = min(E2E_FULL_EVERY, E2E_FULL_LOADED_WAIT * 2 ** (max(int(loads or 1), 1) - 1))
         return now - ((record.get("at") or 0) + (record.get("secs") or 0)) >= wait  # from its stop, not its start (job 1457)
     if record.get("result") in ("error", "running") and now - (record.get("at") or 0) >= E2E_FULL_EVERY:
@@ -1429,14 +1430,16 @@ def e2e_full_tick(project, repo, root) -> None:
     lock), the E2E lock is free, no job waits on the E2E queue (e2e_job_waiting), no job session is live
     (board.live_sessions() is 0, the condition under which hot_stop_tick lets a run ride out a warn, job 1457), no solo run holds the Mac or waits
     for it (board.solo_hold, job 1361), the tracked tree is clean, e2e_full_due holds (watchdog_tick pass 1) and
-    board.machine_ok passes (without claim=True, so cool-down never stops it). During
+    board.machine_ok passes (without claim=True, so cool-down never stops it). Swap over board.MAX_SWAP_PCT holds a due
+    run even when it is not growing (e2e_full_swap_hold, job 1512); an unknown swap reading never holds. During
     cool down, once no job on this project blocks a restart, any new HEAD is due: the merges bundled into one run.
     With no run in flight here, every project's `running` record is an orphan (a serve reload killed its thread; one
     serve.py per Mac) and is rewritten as `error` first, keeping its head and lastGreen, unless e2e_full_stop_orphan
     finds its buildlock child still running and stops it (`loaded`, job 1397); then every `error`/exit-null record
     goes through e2e_full_from_log, so an orphan that finished later is filed. A `running` sweep older than
     E2E_FULL_STALE still holds the run while a claude process names its dir. A `busy` record on this HEAD is retried
-    once (retried=True). A no-git project (board.no_git, job 1362) never starts one."""
+    once (retried=True). The running record carries the last record's `loads`, whatever its HEAD (job 1512). A no-git
+    project (board.no_git, job 1362) never starts one."""
     cmd = e2e_command(root)
     if cmd.lower() in ("", "none") or E2E_FULL["running"] or board.no_git(root):
         return
@@ -1461,16 +1464,44 @@ def e2e_full_tick(project, repo, root) -> None:
     head = board._git(repo, "rev-parse", "HEAD").decode().strip()
     merges = merges_since(repo, record)
     settled = board.cooling_down() and not [b for b in restart_blockers(project) if b != f"{project}/{E2E_FULL_BLOCKER}"]
-    if not e2e_full_due(record, head, merges, now, settled) or board.machine_ok(root) or board.vm_pressure_reason():
+    if not e2e_full_due(record, head, merges, now, settled):
+        e2e_full_swap_hold(repo, root, record, head, now, None)
+        return
+    if e2e_full_swap_hold(repo, root, record, head, now, board.swap_used_pct()) or board.machine_ok(root) \
+            or board.vm_pressure_reason():
         return
     last_green = (record or {}).get("lastGreen")
-    loads = (record or {}).get("loads") if (record or {}).get("head") == head else None  # run's loaded count carries
+    loads = (record or {}).get("loads")  # the run's loaded count carries, whatever the HEAD (job 1512)
     write_e2e_full(root, {"at": now, "head": head, "result": "running", "exit": None, "failed": [],
                           "lastGreen": last_green, **({"loads": loads} if loads else {})})
     E2E_FULL["running"] = project
     retried = (record or {}).get("result") == "busy" and (record or {}).get("head") == head
     threading.Thread(target=e2e_full_run, args=(repo, root, cmd, head, now, last_green),
                      kwargs={"retried": retried}, daemon=True).start()
+
+
+def e2e_full_swap_hold(repo, root, record, head, now, swap) -> bool:
+    """True when swap (board.swap_used_pct) is over board.MAX_SWAP_PCT, so e2e_full_tick starts no due run: board.machine_ok
+    passes swap that is not growing, the run's dev servers then grow it and hot_stop_tick stops the run (job 1512). A
+    hold keeps `heldSince` (its first tick) in root/e2e-full.json, every other key kept; once it has lasted
+    E2E_FULL_HELD_ALERT it writes one `held` processes.log line and sets `heldLogged`, which board_with_activity shows
+    as a red `error`. Swap at or under the limit, or None (unknown, or the run is not due), drops both keys."""
+    rec = dict(record or {})
+    if swap is None or swap <= board.MAX_SWAP_PCT:
+        if "heldSince" in rec or "heldLogged" in rec:
+            rec.pop("heldSince", None)
+            rec.pop("heldLogged", None)
+            write_e2e_full(root, rec)
+        return False
+    since = rec.get("heldSince") if isinstance(rec.get("heldSince"), (int, float)) else now
+    new = {**rec, "heldSince": since}
+    if now - since >= E2E_FULL_HELD_ALERT and not rec.get("heldLogged"):
+        board.log_process("Full E2E on main", "held", repo=str(repo), head=head,
+                          reason=f"swap {swap:.0f}% of RAM over {board.MAX_SWAP_PCT}%")
+        new["heldLogged"] = True
+    if new != rec:
+        write_e2e_full(root, new)
+    return True
 
 
 def e2e_full_stop_orphan(repo, root, rec) -> dict | None:
@@ -7403,6 +7434,8 @@ def board_with_activity(root, project):
     data["actionsAlert"] = (ACTIONS_ALERT.get(str(root.parent)) or (0, None))[1]  # the watchdog's cache; never gh here
     rec = e2e_full_record(root)  # the dashboard's "E2E main" header line
     data["e2eFull"] = {k: rec.get(k) for k in ("at", "head", "result", "failed")} if rec else None
+    if rec and rec.get("heldLogged"):  # a due run the swap gate held E2E_FULL_HELD_ALERT shows red, as a failed one
+        data["e2eFull"]["result"] = "error"
     rec = ui_sweep_record(root)  # the same line's "UI sweep" part
     data["uiSweep"] = {k: rec.get(k) for k in ("at", "head", "result", "findings")} if rec else None
     if rec:  # open: the sweep's backlog items still open; 0 once all were retired, so a fail sweep is not red
