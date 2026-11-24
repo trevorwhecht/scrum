@@ -28,3 +28,4 @@ Only the main Mac has these, so the main Mac's scrum never sends a job that need
 - Blender, saas-animation, vid-img-editing, Video folder
 - yt-dlp, Whisper, video transcript, Instagram reel, YouTube link
 - Kind: edit-reel, Kind: edit-animation, Kind: edit-vector, Kind: edit-photo
+- ~/Developer/claude, md-trim
