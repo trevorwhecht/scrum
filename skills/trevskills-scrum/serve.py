@@ -2600,7 +2600,12 @@ SHOP_RETRY_AT = {}  # worker alias -> time.time() before which shop_tick sends t
 # worker alias -> its last shop_tick note {"text", "kind": "failed" | "stashed", "at"}; machine_status sends it. Memory only:
 # watchdog_loop runs shop_tick in this process, and a restart clears it.
 SHOP_NOTES = {}
-SHOP_ENDED = "requeue: shop session ended without a PR"
+SHOP_SETUP_TTL = 3600  # seconds shop_tick skips shop.setup on a worker whose setup passed in this process (job 1464)
+# worker alias -> time.monotonic() its last shop.setup passed; memory only, so a restart runs setup again, and any
+# failed dispatch step there (shop_tick's fail) drops it
+SHOP_SETUP_AT = {}
+SHOP_SLOW_TICK = 5  # seconds: a dispatching shop_tick pass longer than this prints its `steps` line
+SHOP_ENDED ="requeue: shop session ended without a PR"
 
 
 def shop_worker():
@@ -2669,7 +2674,8 @@ def shop_tick(project, repo, root) -> bool:
     first, then fast, then lowest id. A worker runs at most board.SHOP_HEAVY_PER_WORKER heavy jobs (board.shop_heavy_by_worker):
     with one on it, heavy jobs in the pool are skipped, the first light one is sent, and new work claims only a light line.
     A job tagged Runs on main (board.tag_runs_on; Jev is asked, if at all, only here, with a worker free) is never sent: it is skipped and the next one is tried (job 1155). A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
-    profile_copy and start run on that worker; a failed step puts a claimed child back to waiting, prints one
+    profile_copy and start run on that worker (setup is skipped while SHOP_SETUP_AT says it passed there within
+    SHOP_SETUP_TTL and shop.ready still says ready with the account true; job 1464); a failed step puts a claimed child back to waiting, prints one
     `shop: <project>: <id>: <step> failed on <alias>` line (clone adds `: <git's error>`) and holds that worker for
     SHOP_RETRY_EVERY. A failed clone on a worker with no shop job (board.shop_jobs_by_worker) first has shop.stash_dirty
     set the clone's modified tracked files aside, prints a `set aside <paths> on <alias> (git stash)` line and retries
@@ -2685,7 +2691,10 @@ def shop_tick(project, repo, root) -> bool:
     the new job the same queued launch (held work). The job is then
     marked stage cloud with shop=<pid>, account= and worker=<alias>; a refused mark, or a local run started meanwhile,
     kills the session on that worker. No worker, a down one or nothing to send: no output, no change. True when it
-    dispatched."""
+    dispatched. A dispatching pass over SHOP_SLOW_TICK seconds also prints one stderr line
+    `shop: <project>: <id>: steps md_sync=<s> setup=<s> clone=<s> env_copy=<s> profile_copy=<s> start=<s>` (steps reached).
+    """
+    t0 = time.monotonic()  # the whole pass, for the `steps` line
     if board.shop_project_excluded(root):
         return False
     jobs_dir = Path(root) / "jobs"
@@ -2754,6 +2763,19 @@ def shop_tick(project, repo, root) -> bool:
             hold_start(root, job["id"])
             return False
     job_id, claimed = job["id"], "spec" if child else job["stage"]
+    took = {}  # dispatch step -> seconds, in run order; a step not reached is left out
+
+    def timed(step, fn, *args, **kwargs):
+        at = time.monotonic()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            took[step] = took.get(step, 0) + time.monotonic() - at
+
+    def steps_line():  # job 1464: where a slow dispatching pass went, the standing evidence
+        if time.monotonic() - t0 > SHOP_SLOW_TICK:
+            print(f"shop: {project}: {job_id}: steps " + " ".join(f"{k}={v:.1f}" for k, v in took.items()),
+                  file=sys.stderr, flush=True)
 
     def note(text, kind):
         print(f"shop: {text}", file=sys.stderr, flush=True)
@@ -2770,34 +2792,47 @@ def shop_tick(project, repo, root) -> bool:
             hold_start(root, job_id)
         note(f"{project}: {job_id}: {step} failed on {alias}" + (f": {why}" if why else ""), "failed")
         SHOP_RETRY_AT[alias] = time.time() + SHOP_RETRY_EVERY
+        SHOP_SETUP_AT.pop(alias, None)  # the next dispatch there runs the full setup
+        steps_line()
         return False
 
-    if not shop.md_sync(alias=alias):
+    def setup():  # job 1464: skipped while this process's last setup there passed within SHOP_SETUP_TTL and still holds
+        at = SHOP_SETUP_AT.get(alias)
+        if at is not None and time.monotonic() - at < SHOP_SETUP_TTL:
+            ready = shop.ready(alias=alias)  # cached: no ssh inside its own TTL
+            if ready["ready"] and ready["accounts"].get(account):
+                return True
+        steps = shop.setup(alias=alias)
+        if any(v == "failed" for k, v in steps.items() if k not in shop.OPTIONAL_STEPS) \
+                or steps.get(f"account {account}") != "ok":
+            return False
+        SHOP_SETUP_AT[alias] = time.monotonic()
+        return True
+
+    if not timed("md_sync", shop.md_sync, alias=alias):
         return fail("md-sync")
-    steps = shop.setup(alias=alias)
-    if any(v == "failed" for k, v in steps.items() if k not in shop.OPTIONAL_STEPS) \
-            or steps.get(f"account {account}") != "ok":
+    if not timed("setup", setup):
         return fail("setup")
     try:
         url = board._git(repo, "remote", "get-url", "origin").decode().strip()
     except (ValueError, OSError, subprocess.SubprocessError):
         url = ""
-    ok, why = shop.clone(repo.name, url, alias=alias)
+    ok, why = timed("clone", shop.clone, repo.name, url, alias=alias)
     stashed = False
     try:
         idle = not ok and board.shop_jobs_by_worker()[alias] == 0  # no shop session there: its clone's edits are no one's work
     except SystemExit:  # a bad board.json hides its shop jobs: never stash then
         idle = False
     if idle:
-        if paths := shop.stash_dirty(repo.name, job_id, alias=alias):
+        if paths := timed("clone", shop.stash_dirty, repo.name, job_id, alias=alias):
             note(f"{project}: {job_id}: set aside {', '.join(paths)} on {alias} (git stash)", "stashed")
             stashed = True
-            ok, why = shop.clone(repo.name, url, alias=alias)  # once: a second failure is final
+            ok, why = timed("clone", shop.clone, repo.name, url, alias=alias)  # once: a second failure is final
     if not ok:
         return fail("clone", why)
-    if shop.env_copy(repo.name, str(repo), alias=alias) == "failed":
+    if timed("env_copy", shop.env_copy, repo.name, str(repo), alias=alias) == "failed":
         return fail("env copy")
-    if shop.profile_copy(repo.name, str(repo), alias=alias) == "failed":
+    if timed("profile_copy", shop.profile_copy, repo.name, str(repo), alias=alias) == "failed":
         return fail("profile copy")
     try:
         prompt = f"/trevskills-scrum cloud-job {job_id} " + (jobs_dir / job_id / "feature.md").read_text()
@@ -2805,7 +2840,8 @@ def shop_tick(project, repo, root) -> bool:
             prompt += "\n\n## Pre-written spec\n\n" + (jobs_dir / job_id / "spec.md").read_text()
     except (OSError, ValueError):
         return fail("feature.md")
-    pid = shop.start(repo.name, job_id, prompt, account, model=board.orchestrator_model(root, job_id), alias=alias)
+    pid = timed("start", shop.start, repo.name, job_id, prompt, account, model=board.orchestrator_model(root, job_id),
+                alias=alias)
     if pid is None:
         return fail("start")
     try:
@@ -2816,6 +2852,7 @@ def shop_tick(project, repo, root) -> bool:
     except SystemExit as e:
         shop.run(f"kill {pid}", shop.STEP_TIMEOUT, alias=alias)
         print(f"shop: {project}: {job_id}: not marked ({e}); stopped shop pid {pid}", file=sys.stderr, flush=True)
+        steps_line()
         return False
     try:  # board._timing_row: Spec ends here, the rest is the Cloud column
         (jobs_dir / job_id / "shop-at.txt").write_text(f"{time.time()}\n", encoding="utf-8")
@@ -2826,6 +2863,7 @@ def shop_tick(project, repo, root) -> bool:
     if not stashed:
         SHOP_NOTES.pop(alias, None)
     print(f"shop: {project}: {job_id}: started on {alias} (pid {pid}, account {account})", flush=True)
+    steps_line()
     return True
 
 

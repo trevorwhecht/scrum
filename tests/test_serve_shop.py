@@ -52,6 +52,8 @@ class ShopTickTest(unittest.TestCase):
         self.addCleanup(serve.SHOP_RETRY_AT.clear)
         serve.SHOP_NOTES.clear()
         self.addCleanup(serve.SHOP_NOTES.clear)
+        serve.SHOP_SETUP_AT.clear()  # as after a restart: the first dispatch runs setup
+        self.addCleanup(serve.SHOP_SETUP_AT.clear)
         for s in (serve.CLOUD_LAST, serve.SHOP_PROBE_LAST, serve.RUNS, serve.IDLE_SINCE):
             s.clear()
             self.addCleanup(s.clear)
@@ -715,6 +717,7 @@ class ShopTickTest(unittest.TestCase):
         for why, (steps, sent) in cases.items():
             with self.subTest(why):
                 self.serve.SHOP_RETRY_AT.clear()
+                self.serve.SHOP_SETUP_AT.clear()  # job 1464: the first case's passed setup would skip the next one's
                 self.sh.reset_mock()
                 self.sh.setup.return_value = steps
                 root = self.project("mm", self.runall({"id": "043-a"}))
@@ -729,6 +732,115 @@ class ShopTickTest(unittest.TestCase):
                     self.assertEqual((got, out, err), (False, "", "shop: mm: 043-a: setup failed on shopmac\n"))
                     self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
                     self.assertNotIn("clone", self.calls())
+
+    # --- job 1464: per-step timing and the setup TTL ---
+    def clock(self, costs, now):
+        """Each shop function named in `costs` moves the fake clock `now` ([seconds]) on by its cost when called, then
+        returns its configured value; the returned patch makes time.monotonic read `now`."""
+        for name, secs in costs.items():
+            fn = getattr(self.sh, name)
+            fn.side_effect = None
+            values = list(secs[1]) if isinstance(secs, tuple) else None
+
+            def step(*a, _fn=fn, _secs=secs[0] if values is not None else secs, _values=values, **kw):
+                now[0] += _secs
+                return _values.pop(0) if _values else _fn.return_value
+            fn.side_effect = step
+        return mock.patch.object(self.serve.time, "monotonic", side_effect=lambda: now[0])
+
+    def fresh(self, **costs):
+        """A new board holding one waiting Run-all child 043-a, the backoff cleared, mocks reset; then tick it under a
+        fake clock with these step costs. (result, stdout, stderr, the shop calls)."""
+        self.serve.SHOP_RETRY_AT.clear()
+        self.sh.reset_mock(side_effect=True)  # an earlier tick's costs never carry over
+        self.project("mm", self.runall({"id": "043-a"}))
+        with self.clock(costs, self.now):
+            got = self.tick()
+        return (*got, self.calls())
+
+    def test_steps_line_only_when_slow(self):
+        self.now = [1000.0]
+        ok = "shop: mm: 043-a: started on shopmac (pid 4242, account owa)\n"
+        with self.subTest("slow dispatch: one line, a number per step"):
+            got = self.fresh(md_sync=2, setup=3, clone=1, env_copy=0.5, profile_copy=0.5, start=0.5)
+            self.assertEqual(got[:3], (True, ok, "shop: mm: 043-a: steps md_sync=2.0 setup=3.0 clone=1.0 env_copy=0.5 "
+                                                 "profile_copy=0.5 start=0.5\n"))
+        with self.subTest("4 s pass: no line"):
+            self.serve.SHOP_SETUP_AT.clear()
+            self.assertEqual(self.fresh(md_sync=1, setup=1, clone=1, start=1)[:3], (True, ok, ""))
+        with self.subTest("5 s exactly: no line"):
+            self.serve.SHOP_SETUP_AT.clear()
+            self.assertEqual(self.fresh(md_sync=1, setup=1, clone=1, start=2)[:3], (True, ok, ""))
+        with self.subTest("the whole pass counts: a slow ready probe before dispatch"):
+            self.serve.SHOP_SETUP_AT.clear()
+            got = self.fresh(ready=4.5, md_sync=1)
+            self.assertEqual(got[:3], (True, ok, "shop: mm: 043-a: steps md_sync=1.0 setup=0.0 clone=0.0 env_copy=0.0 "
+                                                 "profile_copy=0.0 start=0.0\n"))
+        with self.subTest("a failed step: steps not reached are left out"):
+            self.serve.SHOP_SETUP_AT.clear()
+            self.sh.clone.return_value = (False, "")
+            got = self.fresh(md_sync=3, setup=3, clone=0.5)
+            self.assertEqual(got[:3], (False, "", "shop: mm: 043-a: clone failed on shopmac\n"
+                                                  "shop: mm: 043-a: steps md_sync=3.0 setup=3.0 clone=0.5\n"))
+
+    def test_setup_skipped_within_ttl(self):
+        self.now = [1000.0]
+        got = self.fresh()
+        self.assertEqual(got[3], ["ready", "md_sync", "setup", "clone", "env_copy", "profile_copy", "start"])
+        self.now[0] += 3590  # setup's check falls 3596 s after the first setup passed (md_sync costs 6): inside SHOP_SETUP_TTL
+        got = self.fresh(md_sync=6)
+        self.assertEqual(got[:3], (True, "shop: mm: 043-a: started on shopmac (pid 4242, account owa)\n",
+                                   "shop: mm: 043-a: steps md_sync=6.0 setup=0.0 clone=0.0 env_copy=0.0 "
+                                   "profile_copy=0.0 start=0.0\n"))
+        self.assertEqual(got[3], ["ready", "md_sync", "ready", "clone", "env_copy", "profile_copy", "start"],
+                         "setup passed here 3596 s ago and ready() still says ready: no setup")
+        self.assertEqual(self.sh.ready.call_args_list, [mock.call(alias="shopmac")] * 2)
+
+    def test_setup_reruns_when_stale_or_failed(self):
+        not_ready, owa_off = dict(READY, ready=False), dict(READY, accounts={"main": True, "owa": False})
+        cases = {  # why: (what runs between the two dispatches, the second dispatch's ready() answers)
+            "TTL passed": (lambda: self.now.__setitem__(0, self.now[0] + 3600), None),
+            "ready() not ready": (None, [READY, not_ready]),
+            "account false": (None, [READY, owa_off]),
+            "fail() on that worker": (lambda: (self.sh.clone.configure_mock(return_value=(False, "")),
+                                               self.assertIs(self.fresh()[0], False),
+                                               self.assertNotIn("shopmac", self.serve.SHOP_SETUP_AT),
+                                               self.sh.clone.configure_mock(return_value=(True, ""))), None),
+            "failed setup": (lambda: (self.now.__setitem__(0, self.now[0] + 3600),
+                                      self.sh.setup.configure_mock(return_value=dict(SETUP, gh="failed")),
+                                      self.assertIs(self.fresh()[0], False),
+                                      self.assertNotIn("shopmac", self.serve.SHOP_SETUP_AT),
+                                      self.sh.setup.configure_mock(return_value=dict(SETUP))), None),
+        }
+        for why, (between, ready) in cases.items():
+            with self.subTest(why):
+                self.serve.SHOP_SETUP_AT.clear()
+                self.sh.ready.side_effect, self.sh.ready.return_value = None, READY
+                self.now = [1000.0]
+                self.assertIs(self.fresh()[0], True)
+                self.assertEqual(self.serve.SHOP_SETUP_AT, {"shopmac": 1000.0})
+                if between:
+                    between()
+                costs = {"ready": (0, ready)} if ready else {}
+                got = self.fresh(**costs)
+                self.assertEqual(got[0], True, why)
+                self.assertIn("setup", got[3], why)
+                self.assertEqual(self.serve.SHOP_SETUP_AT, {"shopmac": self.now[0]}, "a setup that passed is remembered")
+
+    def test_setup_failure_unchanged(self):
+        self.now = [1000.0]
+        self.sh.setup.return_value = dict(SETUP, **{"account owa": "not ready"})
+        t0 = time.time()
+        got = self.fresh()  # no SHOP_SETUP_AT entry, as right after a restart
+        self.assertEqual(got, (False, "", "shop: mm: 043-a: setup failed on shopmac\n", ["ready", "md_sync", "setup"]))
+        self.assertEqual(self.serve.SHOP_SETUP_AT, {})
+        self.backed_off(t0)
+        self.assertEqual(self.job(self.projects["mm"] / "scrum", "043-a")["stage"], "waiting")
+        self.sh.setup.return_value = dict(SETUP)
+        got = self.fresh()
+        self.assertEqual(got[:2], (True, "shop: mm: 043-a: started on shopmac (pid 4242, account owa)\n"))
+        self.assertEqual(got[3], ["ready", "md_sync", "setup", "clone", "env_copy", "profile_copy", "start"],
+                         "a setup that never passed runs in full")
 
     def test_refused_mark_kills_remote_session(self):
         def pause(*a, **kw):
@@ -1170,6 +1282,7 @@ class ShopTickTest(unittest.TestCase):
             with self.subTest(why):
                 flag.write_text("")
                 self.sh.reset_mock()
+                self.serve.SHOP_SETUP_AT.clear()  # job 1464: each case dispatches first after a restart
                 root = self.project("mm", [], AUTO)
                 self.backlog(root, "Fix the gadget {p:3}", "Polish the knob {p:5}",
                              specs={"Polish the knob": SPEC, "Fix the gadget": SPEC.replace("a.py", "b.py").replace("# Spec", "# Spec\nLane: fast")})
