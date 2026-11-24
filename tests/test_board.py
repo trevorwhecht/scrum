@@ -6625,6 +6625,14 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
         self.assertEqual((self.get(lil)["stage"], self.get(lil)["updatedAt"]), ("build", old))
 
+    def test_watchdog_flags_pipeline_started_lilguy_without_worktree(self):
+        died = self.aged("Lil died early", 45, stage="spec", lane="lilguy", runlog="runs/x.log")
+        here = self.aged("Lil by hand", 45, stage="spec", lane="lilguy")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [died])
+        self.assertEqual(self.get(died)["stalled"], True)
+        self.assertEqual(self.get(here)["stage"], "spec")
+        self.assertNotIn("stalled", self.get(here))
+
     def test_watchdog_flags_lilguy_with_worktree(self):
         wt = self.aged("Lil in worktree", 45, stage="build", lane="lilguy", worktree="/tmp/wt-lil")
         here = self.aged("Lil in checkout", 45, stage="build", lane="lilguy")
