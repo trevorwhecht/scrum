@@ -2882,7 +2882,8 @@ def shop_tick(project, repo, root) -> bool:
     (cmd_ready shop= for a child, the stage-cloud mark with expect= for a launch) stops both taking one job
     (held_work: a queued `start` launch or a waiting child; never paused, board.shop_excluded (lilguy: board lane,
     `Lane: lilguy` anywhere in feature.md, or lilguy-fit.json fit true with no parent or a Run-all parent, unless this
-    Mac's gates have held it over 2 h, board.SHOP_LILGUY_HELD_SECS; or naming a digest proposals.json), setup pending,
+    Mac's gates have held it over board.SHOP_LILGUY_HELD_SECS, or board.SHOP_LILGUY_MEM_HELD_SECS for swap or
+    vm_pressure; or naming a digest proposals.json), setup pending,
     nor any job of a board.shop_project_excluded project (a `- Base branch:` or `- Git: none` line, or docker in
     project.md), nor a launch whose files are not clear_of_busy(busy_files), checked only when the pool holds a
     launch) to the first shop_worker() worker (out of backoff, room, ready, an account; later workers are not probed).

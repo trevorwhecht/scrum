@@ -5119,14 +5119,18 @@ def shop_room(root) -> bool:
 
 DIGEST_PROPOSALS_RE = re.compile(r"digests/\d+/proposals\.json")  # cloud.md expands these; shop dispatch does not
 SHOP_LILGUY_HELD_SECS = 7200  # seconds this Mac's gates hold a lilguy job before the shop may take it (job 1246)
+SHOP_LILGUY_MEM_HELD_SECS = 1800  # the same for a swap or vm_pressure hold (job 1518)
+SHOP_MEM_GATES = frozenset({"swap", "vm_pressure"})  # gate heads SHOP_LILGUY_MEM_HELD_SECS applies to
 
 
 def shop_excluded(root, job: dict, jobs: list) -> bool:
     """A job shop dispatch never takes: a feature.md naming a digest proposals.json, always; or lilguy as the local
     lilguy route takes it (board lane, `Lane: lilguy` anywhere in feature.md, or lilguy-fit.json fit true with no parent
-    or a Run-all parent) unless this Mac's gates have held it over 2 h: its queue-gates.txt names a gate and
-    play_queued, else updatedAt, is more than SHOP_LILGUY_HELD_SECS old (job 1246; a missing or empty file, or a missing
-    or malformed time, keeps it excluded). cmd_ready never leaves an excluded job to the shop."""
+    or a Run-all parent) unless this Mac's gates have held it long enough: its queue-gates.txt names a gate and a gate
+    head's "held" seconds in current-gates.json (note_current_gate, job 1485) are over SHOP_LILGUY_MEM_HELD_SECS for a
+    swap or vm_pressure head that queue-gates.txt names, else over SHOP_LILGUY_HELD_SECS (jobs 1246, 1518; play_queued
+    and updatedAt never count, as later board writes push them forward; a missing or empty file, or a missing,
+    malformed or non-positive held, keeps it excluded). cmd_ready never leaves an excluded job to the shop."""
     folder = Path(root) / "jobs" / job["id"]
     try:
         feature = (folder / "feature.md").read_text(errors="replace")
@@ -5142,8 +5146,13 @@ def shop_excluded(root, job: dict, jobs: list) -> bool:
         gates = (folder / "queue-gates.txt").read_text(encoding="utf-8", errors="replace").split()
     except OSError:
         gates = []
-    since = _epoch(job.get("play_queued") or job.get("updatedAt"))
-    return not (gates and since is not None and time.time() - since > SHOP_LILGUY_HELD_SECS)
+    mem = SHOP_MEM_GATES & {g.split("(", 1)[0] for g in gates}
+    for head, rec in _health_file(folder / CURRENT_GATES, dict).items():
+        held = rec.get("held") if isinstance(rec, dict) else None
+        limit = SHOP_LILGUY_MEM_HELD_SECS if head in mem else SHOP_LILGUY_HELD_SECS
+        if gates and type(held) in (int, float) and held > limit:
+            return False
+    return True
 
 
 def cmd_lilguy_fit(root, job_id: str) -> dict:
