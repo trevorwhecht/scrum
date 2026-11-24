@@ -44,6 +44,11 @@
                                    " {by:back}" at p:1; with neither it is an agent item, capped at p:3 unless --critical,
                                    passed after jev-gate.py critical confirmed, makes it p:5), then
                                    estimate each in the background
+  board.py backlog-add --job <id> [--project <folder>] [flags] "<item>"...
+                                   write each item, with its flags and target project folder, as a "Backlog: add" file
+                                   jobs/<id>/followups/add-<n>.md instead (the job folder syncs home; the home backlog-spec
+                                   files it); on a shop or cloud worker (SCRUM_SHOP set, CLAUDE_CODE_REMOTE=true) backlog-add
+                                   without --job is refused, as that worker's backlog.md never syncs home
   board.py rank-backlog [--all]    Jev rates each open backlog item with no {p:N} marker, or every open item with --all
                                    (jev-gate.py rank, plus critical for an agent "Critical:" item, logged to jev.log), writes
                                    the source-capped {p:N} where it changed, print {"rated","unrated","skipped"}
@@ -51,6 +56,8 @@
                                    and empty items are skipped), print the added texts as JSON
   board.py backlog-spec <id>       ingest jobs/<id>/followups/*.md: add or match backlog items, store each spec in
                                    backlog-specs/ (moved to the job's spec.md when claimed), print {"added","updated","skipped"};
+                                   a "Backlog: add" file is filed in its Project's backlog (listed under "moved"), else here
+                                   (ignored on a worker);
                                    a backlog edit of the text, a delete or a triage merge/retire/manual drops the item's spec
   board.py roadmap-show            print roadmap.md as {"name","phases","current","next","blocker"} (null = no roadmap)
   board.py roadmap-link <P> <S> <id>  write the job id into step P/S and mark it [~] (also resumes a [!] step)
@@ -1278,6 +1285,51 @@ def cmd_backlog_add(root, items, setup=None, priority=None, top=False, by=None, 
     return added
 
 
+def on_worker() -> bool:
+    """A shop Mac run (SCRUM_SHOP non-empty) or a claude.ai cloud session (CLAUDE_CODE_REMOTE=true): its scrum/ is a
+    throwaway board, and only jobs/<id>/ comes home (the Artifacts push)."""
+    return bool(os.environ.get("SCRUM_SHOP")) or os.environ.get("CLAUDE_CODE_REMOTE") == "true"
+
+
+FOLDER_RE = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._-]*")  # a repo folder name a worker add may name (--project)
+
+
+def worker_add(root, job_id, items, project=None, setup=None, priority=None, top=False, by=None, critical=False) -> list[str]:
+    """Write each non-empty item as its own "Backlog: add" file jobs/<id>/followups/add-<n>.md (n the first free number,
+    never overwriting a file), with Project / Top / By / Priority / Critical / Setup lines for the flags given; the
+    home backlog-spec files it (job 1504). The same flag checks as cmd_backlog_add run before anything is written.
+    project is a repo folder name, not checked against projects.json (a worker's registry is not the home one).
+    Returns the item texts written."""
+    folder = Path(root) / "jobs" / check_id(job_id) / "followups"
+    check_source(by, priority, top, critical)
+    steps = setup_steps(setup) if setup is not None else None
+    check_priority(priority)
+    if project is not None and not FOLDER_RE.fullmatch(project):
+        raise SystemExit(f"--project must be a repo folder name, got {project!r}")
+    if flags := [clean(item, ITEM_MAX) for item in items if flag_item(item)]:
+        raise SystemExit(f"backlog item {flags[0]!r} is a flag, not work; nothing added: {FLAG_HINT}")
+    extra = [f"Project: {project}" if project else None, "Top: yes" if top else None, f"By: {by}" if by else None,
+             f"Priority: {priority}" if priority is not None else None, "Critical: yes" if critical else None,
+             f"Setup: {'; '.join(steps)}" if steps else None]
+    written = []
+    for item in items:
+        text = clean(item, ITEM_MAX)
+        if not text:
+            continue
+        folder.mkdir(parents=True, exist_ok=True)
+        body = "\n".join(["Backlog: add", f"Item: {text}", *(line for line in extra if line)]) + "\n"
+        n = 1
+        while True:
+            try:
+                with open(folder / f"add-{n}.md", "x", encoding="utf-8") as f:
+                    f.write(body)
+                break
+            except FileExistsError:
+                n += 1
+        written.append(text)
+    return written
+
+
 # --- manual-checks.md: "- [ ] text" follow-ups only a human can do; Trevor ticks them on the dashboard ---
 MANUAL_HEADER = "# Manual checks"
 MANUAL_RE = re.compile(r"^- \[( |x)\] (.*?)\s*$")
@@ -1331,10 +1383,43 @@ def manual_tick(root, index):
     return manual_items(root)
 
 
+ADD_KEYS = ("Project", "Top", "By", "Priority", "Critical", "Setup")  # worker_add's lines after Item:
+
+
 def parse_followup(text):
-    """(kind, item text, body) for one followups/*.md file; raises ValueError with the reason when malformed."""
+    """(kind, item text, body) for one followups/*.md file; raises ValueError with the reason when malformed.
+    A "Backlog: add" file (worker_add) gives ("add", item, {"project", "top", "by", "priority", "critical", "setup"})
+    once its flags pass the same checks as backlog-add."""
     lines = text.splitlines()
     head = lines[0].strip() if lines else ""
+    if head == "Backlog: add":
+        m = re.match(r"^Item:\s*(.*)$", lines[1].strip() if len(lines) > 1 else "")
+        if not m or not m.group(1).strip():
+            raise ValueError("second line is not 'Item: <text>'")
+        fields = {}
+        for line in lines[2:]:
+            key, sep, value = line.partition(":")
+            if not line.strip():
+                continue
+            if not sep or key.strip() not in ADD_KEYS:
+                raise ValueError(f"unknown line {line.strip()[:60]!r}")
+            fields[key.strip()] = value.strip()
+        priority = fields.get("Priority")
+        if priority is not None and not re.fullmatch(r"[1-5]", priority):
+            raise ValueError(f"Priority must be 1-5, got {priority!r}")
+        by = fields.get("By")
+        if by is not None and by not in ("t", "back"):
+            raise ValueError(f"By must be t or back, got {by!r}")
+        opts = {"project": fields.get("Project") or None, "top": fields.get("Top") == "yes", "by": by,
+                "priority": int(priority) if priority else None, "critical": fields.get("Critical") == "yes",
+                "setup": fields.get("Setup") or None}
+        try:
+            check_source(opts["by"], opts["priority"], opts["top"], opts["critical"])
+            if opts["setup"] is not None:
+                setup_steps(opts["setup"])
+        except SystemExit as e:
+            raise ValueError(str(e)) from None
+        return "add", m.group(1).strip(), opts
     if head == "Backlog: new":
         m = re.match(r"^Item:\s*(.*)$", lines[1].strip() if len(lines) > 1 else "")
         if not m or not m.group(1).strip():
@@ -1343,18 +1428,36 @@ def parse_followup(text):
     elif (m := re.match(r"^Backlog: update\s+(\S.*)$", head)):
         kind, item, rest = "update", m.group(1).strip(), lines[1:]
     else:
-        raise ValueError("first line is not 'Backlog: new' or 'Backlog: update <text>'")
+        raise ValueError("first line is not 'Backlog: new', 'Backlog: update <text>' or 'Backlog: add'")
     body = "\n".join(rest).strip("\n")
     if not body.strip():
         raise ValueError("spec body is empty")
     return kind, item, body + "\n"
 
 
+def add_target(root, project):
+    """The scrum/ dir a "Backlog: add" file's Project names: root for none or root's own repo folder, the registered
+    project (projects() display name or repo folder name) otherwise, None when no registered project has that name."""
+    home = Path(root).resolve()
+    if not project or project == home.parent.name:
+        return Path(root)
+    for name, repo in projects().items():
+        if project in (name, repo.name):
+            return Path(root) if (repo / "scrum").resolve() == home else repo / "scrum"
+    return None
+
+
 def cmd_backlog_spec(root, job_id):
     """Ingest jobs/<id>/followups/*.md under the lock: each file adds an item (or matches an open one by exact text)
-    and stores its spec at spec_path. Appends lines itself: backlog_op would flock .board.lock again and deadlock."""
+    and stores its spec at spec_path. Appends lines itself: backlog_op would flock .board.lock again and deadlock.
+    "Backlog: add" files (worker_add, job 1504) are filed after that lock is released, each through cmd_backlog_add with
+    its flags and unless_open=<its text> (E2E_SLOW_ITEM for that item), so a rerun adds no copy: in add_target's backlog,
+    listed under "moved" as {"project", "text"} when that is another project, else here under "added"; an unregistered
+    Project is filed here as "<text> (for <folder>: not a registered project)". On a worker (on_worker) they are left
+    alone and counted nowhere. "moved" is in the result only when something was filed in another project."""
     folder = Path(root) / "jobs" / check_id(job_id) / "followups"
     out = {"added": [], "updated": [], "skipped": []}
+    worker, adds = on_worker(), []
     with locked_board(root):
         lines, items = read_backlog(root)
         specs = {}
@@ -1365,6 +1468,10 @@ def cmd_backlog_spec(root, job_id):
                 print(f"backlog-spec: skipped {f.name}: {e}", file=sys.stderr)
                 out["skipped"].append(f.name)
                 continue
+            if kind == "add":
+                if not worker:
+                    adds.append((text, body))
+                continue
             if kind == "update" and any(not i["done"] and i["text"] == text for i in items):
                 out["updated"].append(text)
             else:
@@ -1372,7 +1479,7 @@ def cmd_backlog_spec(root, job_id):
                 lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None}))
                 out["added"].append(text)
             specs[text] = body
-        if not specs:
+        if not specs and not adds:
             raise SystemExit(f"backlog-spec {job_id}: no usable followups/*.md; backlog.md was not touched")
         if out["added"]:
             write_backlog(root, lines)
@@ -1380,6 +1487,17 @@ def cmd_backlog_spec(root, job_id):
             path = spec_path(root, text)
             path.parent.mkdir(exist_ok=True)
             path.write_text(body, encoding="utf-8")
+    for text, opts in adds:
+        target = add_target(root, opts["project"])
+        if target is None:
+            target, text = Path(root), f"{text} (for {opts['project']}: not a registered project)"
+        text = clean(text, ITEM_MAX)
+        filed = cmd_backlog_add(target, [text], opts["setup"], opts["priority"], opts["top"], opts["by"],
+                                opts["critical"], unless_open=E2E_SLOW_ITEM if text.startswith(E2E_SLOW_ITEM) else text)
+        if target == Path(root):
+            out["added"] += filed
+        elif filed:
+            out.setdefault("moved", []).extend({"project": opts["project"], "text": t} for t in filed)
     return out
 
 
@@ -4172,7 +4290,8 @@ def e2e_budget(text: str) -> dict:
 
 def cmd_e2e_budget(root, job_id, log) -> dict:
     """e2e_budget of the log file plus "backlog": when over budget with no failed test, the one E2E_SLOW_ITEM backlog
-    item this run filed (None when one is already open or nothing is filed)."""
+    item this run filed (None when one is already open or nothing is filed). On a worker (on_worker) the item is
+    written as a "Backlog: add" file in jobs/<id>/followups/ (worker_add) instead, and backlog.md is left alone."""
     job_id = check_id(job_id)
     try:
         text = Path(log).read_text(encoding="utf-8", errors="replace")
@@ -4182,7 +4301,10 @@ def cmd_e2e_budget(root, job_id, log) -> dict:
     if out["over_budget"] and not out["failed"]:
         times = ", ".join(f"{f} {s:g}s" for f, s in out["slowest"]) or "no per-test times in the log"
         item = f"{E2E_SLOW_ITEM}: {times} (job {job_id} E2E ran past the {E2E_BUDGET_MS // 60000} min budget)"
-        out["backlog"] = next(iter(cmd_backlog_add(root, [item], unless_open=E2E_SLOW_ITEM)), None)
+        if on_worker():  # a worker's backlog.md never comes home: the job's followups do (job 1504)
+            out["backlog"] = next(iter(worker_add(root, job_id, [item])), None)
+        else:
+            out["backlog"] = next(iter(cmd_backlog_add(root, [item], unless_open=E2E_SLOW_ITEM)), None)
     return out
 
 
@@ -7980,6 +8102,16 @@ def _cloud_arrivals(root, repo):
     return arrived
 
 
+def cloud_pending_mark(root: Path, job_id: str) -> None:
+    """Set job_id's artifactsPending mark to now() under the board lock, so cloud-sync reports it once its
+    scrum-artifacts/<id> branch arrives (serve.py cloud_tick, after a shop `moved to <folder> backlog` abort: job 1504).
+    A missing job is a no-op."""
+    with locked_board(root) as board:
+        for job in board["jobs"]:
+            if job["id"] == job_id:
+                job["artifactsPending"] = now()  # internal, not in FIELDS, like pid
+
+
 def cloud_pending_clear(root: Path, job_id: str) -> None:
     """Drop job_id's artifactsPending mark under the board lock (serve.py calls it once cloud-home spawned). A missing
     job or mark is a no-op."""
@@ -9274,6 +9406,8 @@ def main(argv=None):
     src.add_argument("--trevor", action="store_true", help="Trevor's item: {by:t}, p:4 (p:5 with --priority 5)")
     src.add_argument("--back", action="store_true", help="Trevor's item for the back of the backlog: {by:back}, p:1")
     ba.add_argument("--critical", action="store_true", help="agent item jev-gate.py critical confirmed: p:5")
+    ba.add_argument("--job", metavar="ID", help="write each item as jobs/<id>/followups/add-<n>.md, not backlog.md")
+    ba.add_argument("--project", metavar="FOLDER", help="with --job: the repo folder whose backlog files it at home")
     ba.add_argument("items", nargs="+")
     sub.add_parser("manual-add").add_argument("items", nargs="+")
     sub.add_parser("rank-backlog").add_argument("--all", action="store_true", dest="all_items")
@@ -9549,9 +9683,20 @@ def main(argv=None):
         out = cmd_backlog_spec(a.dir, a.id)
         print(json.dumps(out))
         spawn_estimates(a.dir, out["added"])
+        for m in out.get("moved") or []:
+            if (target := add_target(a.dir, m["project"])) is not None:
+                spawn_estimates(target, [m["text"]])
     else:
-        spawn_estimates(a.dir, cmd_backlog_add(a.dir, a.items, a.setup, a.priority, a.top,
-                                                    "back" if a.back else "t" if a.trevor else None, a.critical))
+        by = "back" if a.back else "t" if a.trevor else None
+        if a.project is not None and a.job is None:
+            raise SystemExit("backlog-add --project needs --job <id>: it names the project a worker's add is filed in")
+        if a.job is not None:
+            worker_add(a.dir, a.job, a.items, a.project, a.setup, a.priority, a.top, by, a.critical)
+        elif on_worker():
+            raise SystemExit("backlog-add on a shop or cloud worker needs --job <id>: this machine's backlog.md never "
+                             "syncs home, so the add goes to jobs/<id>/followups/ instead; nothing added")
+        else:
+            spawn_estimates(a.dir, cmd_backlog_add(a.dir, a.items, a.setup, a.priority, a.top, by, a.critical))
 
 
 def spawn_estimates(root, texts):
