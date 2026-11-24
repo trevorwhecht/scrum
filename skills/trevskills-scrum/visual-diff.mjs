@@ -2,6 +2,7 @@
 // Check gate Visual diff (lanes/review.md): captures BASE vs HEAD of each path at 390 and 1440 px in one Chromium run,
 // pixel-diffs each pair with odiff and writes side-by-side crops (sharp), <out>/results.json and <out>/../visual-diff.md.
 // playwright, odiff-bin and sharp load from --project-dir; when one is missing it writes a `skipped` result and exits 0.
+// Chromium: Playwright's own first; when that launch throws (shop Mac) and SCRUM_CHROME is non-blank, that binary.
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
@@ -126,12 +127,23 @@ function boundingBox(res, w, h) {
     truncated: bottom - top > MAX_CROP_H };
 }
 
+// Playwright's own Chromium first; only when that launch throws and SCRUM_CHROME is non-blank, that binary instead.
+async function launchBrowser(chromium) {
+  try {
+    return await chromium.launch();
+  } catch (e) {
+    const chrome = (process.env.SCRUM_CHROME || "").trim();
+    if (!chrome) throw e;
+    return await chromium.launch({ executablePath: chrome });
+  }
+}
+
 async function run(opts, deps) {
   const out = path.resolve(opts.out);
   const shots = path.join(out, "shots");
   fs.mkdirSync(shots, { recursive: true });
   const masks = (opts.mask || "").split(",").map((s) => s.trim()).filter(Boolean);
-  const browser = await deps.chromium.launch();
+  const browser = await launchBrowser(deps.chromium);
   const pairs = [];
   let changed = 0;
   try {
