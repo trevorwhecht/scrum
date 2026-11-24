@@ -4851,6 +4851,25 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for phrase in ("skips `git worktree add`", "so the builder continues from the shop session's commits"):
             self.assertIn(phrase, resume, phrase)
 
+    def test_cloud_job_backlog_adds_go_to_followups(self):
+        """Job 1504: a worker's backlog.md never syncs home, so every add goes to the job's followups."""
+        cloud = self.lane("cloud")
+        job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
+        adds = next(l for l in job.splitlines() if l.lstrip().startswith("- **Backlog adds:**"))
+        for phrase in ("every `B backlog-add` the session runs passes `--job $ID`",
+                       'B backlog-add --job $ID --project <folder> --top -- "$(cat "$F/jobs/$ID/feature.md") (moved from $ID)"',
+                       "against `$F`", "never `--dir <that repo>/scrum`", "before its `B abort`"):
+            self.assertIn(phrase, adds, phrase)
+        artifacts = job[job.index("- **Artifacts:**"):]
+        artifacts = artifacts[:artifacts.index("\n")]
+        self.assertIn("or a `moved to <folder> backlog` abort", artifacts)
+        tail = cloud[cloud.index("**Cloud-home tail** ("):]
+        tail = tail[:tail.index("\n")]
+        for phrase in ("an `aborted` job whose reason starts `moved to ` without a `pr`",
+                       "runs only **Artifacts home** then **Follow-ups**"):
+            self.assertIn(phrase, tail, phrase)
+        self.assertLessEqual(len(self.lane("newjob")), 29000)
+
     def test_skill_cloud_artifacts_come_home(self):
         cloud = self.lane("cloud")
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
