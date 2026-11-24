@@ -6379,7 +6379,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [plain])
 
     def test_watchdog_skips_queue_wait(self):
-        waiting = self.aged("Queued check", 24 * 60, stage="check", reason="waiting: E2E queue")
+        waiting = self.aged("Queued check", 23 * 60, stage="check", reason="waiting: E2E queue")
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
         self.assertEqual((self.get(waiting)["stage"], self.get(waiting)["reason"]), ("check", "waiting: E2E queue"))
         self.assertNotIn("stalled", self.get(waiting))
@@ -6743,6 +6743,34 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
         self.assertEqual(self.jobs(), before)
         self.assertEqual(len(shapes), 5)
+
+    def test_watchdog_asks_once_for_a_day_old_queue_wait_with_no_session(self):
+        """Job 1519: a Check, Build or E2E queue wait held for days was skipped by every watchdog net."""
+        parent = self.aged("Parent", 1, stage="running", lane="runall")
+        old = self.aged("Old E2E wait", 25 * 60, stage="check", reason="waiting: E2E queue")
+        kid = self.aged("Old Build wait", 25 * 60, stage="check", reason="waiting: Build queue", parent=parent)
+        fresh = self.aged("Fresh wait", 23 * 60, stage="check", reason="waiting: Check queue")
+        live = self.aged("Live wait", 25 * 60, stage="check", reason="waiting: Check queue")
+        other = self.aged("Not queued", 25 * 60, stage="waiting", depends_on=[parent])
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: job["id"] == live), [])
+        got = self.get(old)
+        self.assertEqual((got["stage"], got["stopTitle"]), ("needs-human", "CHECKS_FAILING"))
+        self.assertTrue(got["question"].startswith("blocked: waited on the E2E queue for over 24 h"), got["question"])
+        self.assertIn("dead process", got["question"])
+        self.assertLess(len(got["question"].split()), 40)
+        self.assertEqual([(o["label"], o["command"]) for o in got["options"]],
+                         [("Try again", f"resume {old}"), ("Put it back on the backlog", f"abort {old} --requeue")])
+        self.assertEqual(got["recommend"]["key"], "a")
+        got = self.get(kid)
+        self.assertEqual(got["stage"], "needs-human")
+        self.assertTrue(got["question"].startswith("blocked: waited on the Build queue for over 24 h"), got["question"])
+        self.assertEqual([o["command"] for o in got["options"]], [f"resume {kid}", f"abort {kid}"])
+        for jid, stage, reason in ((fresh, "check", "waiting: Check queue"), (live, "check", "waiting: Check queue"),
+                                   (other, "waiting", None)):
+            self.assertEqual((self.get(jid)["stage"], self.get(jid).get("reason")), (stage, reason), jid)
+        before = self.jobs()
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: job["id"] == live), [])
+        self.assertEqual(self.jobs(), before, "the second pass asks nothing")
 
     def test_watchdog_net_runs_ps_only_for_a_candidate(self):
         self.aged("Fresh", 1, stage="build")

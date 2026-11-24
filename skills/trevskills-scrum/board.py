@@ -9024,6 +9024,10 @@ def dead_wait_cause(job, by_id):
     return f"{gone} was aborted or removed" if gone else None
 
 
+QUEUE_WAIT_HOURS = 24  # job 1519: a queue wait this old with no live session asks Trevor; its lock may be held by a dead process
+QUEUE_NAMES = {E2E_QUEUE_WAIT: "E2E", CHECK_QUEUE_WAIT: "Check", BUILD_QUEUE_WAIT: "Build"}
+
+
 def cmd_watchdog(root, alive=None, exits=None, hold=None):
     """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session (for a parent,
     a live child session or its live chain lock counts as its own): it keeps
@@ -9034,6 +9038,7 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
     logged "auto" with that "hold": the gate, not the session, held it, so process-health counts no stop.
     A job whose launch serve.py queued (`play_queued`) is waiting on its own gate and is never flagged.
     A stuck spec job with no feature.md is an orphaned claim instead: aborted and requeued, not flagged.
+    A queue wait (queue_waiting) with no update for QUEUE_WAIT_HOURS and no live session is asked once (CHECKS_FAILING).
     Returns the flagged ids; writes board.json only when it flags something."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALL_MINUTES)
     flagged, requeued = [], []
@@ -9089,6 +9094,10 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
             lost = [(j["id"], cause) for j in board["jobs"]
                     if j.get("stage") == "waiting" and j.get("setup") != "pending" and not j.get("paused")
                     and stalled_since(j, dead_cutoff) and (cause := dead_wait_cause(j, by_id))]
+            queue_cutoff = datetime.now(timezone.utc) - timedelta(hours=QUEUE_WAIT_HOURS)
+            queued = [j for j in board["jobs"] if queue_waiting(j) and stalled_since(j, queue_cutoff)]
+            alive = alive or (session_alive_fn() if queued else None)  # ps only when something could be stuck
+            queued = [j["id"] for j in queued if not alive(j)]
             if not flagged and not requeued:
                 raise _Gone
     except _Gone:
@@ -9100,6 +9109,20 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
             cmd_ask(root, job_id, f"blocked: {cause}, so this job has nothing to wait for.",
                     [f"Put it back on the backlog=abort {job_id} --requeue", f"Remove it=abort {job_id}"],
                     recommend=("a", "Nothing can wake it, so the item goes back to be claimed again"), title="DEPENDENCY")
+        except SystemExit as e:
+            print(f"watchdog: {job_id}: {e}", file=sys.stderr)
+    for job_id in queued:  # once per job: cmd_ask moves it out of the queue wait
+        try:
+            job = find(read_board(root), job_id)
+            if not queue_waiting(job) or not stalled_since(job, queue_cutoff):
+                continue  # resumed or moved on since the snapshot
+            name = next(n for r, n in QUEUE_NAMES.items() if job["reason"].startswith(r))
+            # never `waiting on the ...`: cmd_ask would hold it as a queue wait again
+            cmd_ask(root, job_id, f"blocked: waited on the {name} queue "
+                    f"for over {QUEUE_WAIT_HOURS} h with no live session. Its lock may be held by a dead process.",
+                    [f"Try again=resume {job_id}",
+                     f"Put it back on the backlog=abort {job_id}" + ("" if job.get("parent") else " --requeue")],
+                    recommend=("a", "A fresh start takes the queue lock again once it is free"), title="CHECKS_FAILING")
         except SystemExit as e:
             print(f"watchdog: {job_id}: {e}", file=sys.stderr)
     return flagged  # no sound: a stall is not a human stop, serve.py resumes it
