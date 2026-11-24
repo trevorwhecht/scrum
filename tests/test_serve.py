@@ -9270,6 +9270,35 @@ class CloudPollTest(unittest.TestCase):
         self.assertEqual((job["stage"], job["reason"]), ("aborted", "requeue: shop session ended without a PR"))
         self.assertIn("Leads finder skill text", backlog)
 
+    def test_shop_closed_ignores_negated_wording(self):
+        """Job 1483: a negation word just before `obsolete:` / `looks already fixed:` on the same line is not a close;
+        the last match still wins, and a negation on the line before or inside a longer word does not count."""
+        sc = self.serve.shop_closed
+        for tail in ("Not obsolete: the guard is still missing\n", "**Not obsolete:** still broken\n",
+                     "It isn't obsolete: needs a fix\n", "It isn’t obsolete: needs a fix\n",
+                     "Nothing looks already fixed: repro fails\n", "No longer obsolete: reopened\n",
+                     "Isn't already fixed: still fails\n",
+                     "obsolete: dup\nNot obsolete: actually still broken\n"):
+            with self.subTest(tail=tail):
+                self.assertIsNone(sc(tail))
+        cases = [
+            ("Aborted as obsolete: duplicate of job 1844\n", "obsolete: duplicate of job 1844"),
+            ("**Looks already fixed:** the guard landed in #1341.\n", "looks already fixed: the guard landed in #1341."),
+            ("Notes: obsolete: dup\n", "obsolete: dup"),
+            ("Annotated as obsolete: dup\n", "obsolete: dup"),
+            ("Not obsolete: checking\nobsolete: dup of 1844\n", "obsolete: dup of 1844"),
+            ("This is not\nobsolete: dup of 1844\n", "obsolete: dup of 1844"),
+        ]
+        for tail, reason in cases:
+            with self.subTest(tail=tail):
+                self.assertEqual(sc(tail), reason)
+
+    def test_shop_session_negated_obsolete_still_requeued(self):
+        self.serve.CLOUD_LAST.clear()
+        job, backlog, _ = self.shop_job("Checked main.\nNot obsolete: the bug still reproduces\n")
+        self.assertEqual((job["stage"], job["reason"]), ("aborted", "requeue: shop session ended without a PR"))
+        self.assertIn("Leads finder skill text", backlog)
+
     def test_cloud_poll_runs_for_pending_without_cloud_job(self):
         jobs = [{"id": "003-late", "stage": "done", "artifactsPending": "2026-10-22T00:00:00+00:00"}]
         cs, sp = self.tick(jobs, now=10_000, result={"moved": [], "arrived": ["003-late"], "error": None})

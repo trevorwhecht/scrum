@@ -2545,16 +2545,22 @@ def shop_pr_close(project, root, job_id):
 # fixed:` abort (lanes/cloud.md Needs-human), or newjob.md 3b's `moved to <folder> backlog`
 SHOP_CLOSED_RE = re.compile(r"\b(obsolete|looks already fixed):[*_]*[ \t]+([^\s'\"`*][^\n'\"`]*)"
                             r"|\bmoved (?:the item |this item |it )?to (?:the )?[`*]*([\w.-]+)[`*]* backlog\b", re.I)
+SHOP_NEGATED_RE = re.compile(r"(?:\b(?:not|no|never|nothing|no longer)|n['’]t)[\s*_]*$", re.I)
 
 
 def shop_closed(tail):
     """The abort reason an ended shop session's log tail gives for closing its own job (SHOP_CLOSED_RE's last match,
     so the session's final word wins): `obsolete: <why>`, `looks already fixed: <why>` (prefix lower-cased, the rest
-    through board.clean) or `moved to <folder> backlog`; None when it shows none."""
+    through board.clean) or `moved to <folder> backlog`; None when it shows none. An `obsolete` / `looks already fixed`
+    match whose same-line text before it ends in a negation word (SHOP_NEGATED_RE: `Not obsolete:`, `isn't obsolete:`)
+    counts as "not closed", so a negated last match returns None."""
+    tail = tail or ""
     m = None
-    for m in SHOP_CLOSED_RE.finditer(tail or ""):
+    for m in SHOP_CLOSED_RE.finditer(tail):
         pass
     if m is None:
+        return None
+    if m.group(1) and SHOP_NEGATED_RE.search(tail[tail.rfind("\n", 0, m.start()) + 1:m.start()]):
         return None
     if m.group(3):
         return f"moved to {m.group(3)} backlog"
