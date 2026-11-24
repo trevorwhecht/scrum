@@ -303,8 +303,10 @@ class RunsOnTest(unittest.TestCase):
         self.assertFalse(board.shop_excluded(self.root, jobs[1], jobs), "a fit BigBoy child is not lilguy's")
         self.assertTrue(board.shop_excluded(self.root, jobs[2], jobs), "a fit parentless job is")
 
-    def held_job(self, job_id, gates="vm_pressure\ncpu_load(804%)\n", feature="Fix the widget\n", fit=False, **job):
-        """A job folder with feature.md and, unless gates is None, queue-gates.txt holding `gates`; the board entry."""
+    def held_job(self, job_id, gates="vm_pressure\ncpu_load(804%)\n", feature="Fix the widget\n", fit=False, held=None,
+                 **job):
+        """A job folder with feature.md, queue-gates.txt holding `gates` unless it is None, and current-gates.json from
+        `held`: a {gate head: held secs} dict, or a str written as is; the board entry."""
         d = self.root / "jobs" / job_id
         d.mkdir()
         (d / "feature.md").write_text(feature)
@@ -312,68 +314,95 @@ class RunsOnTest(unittest.TestCase):
             (d / "queue-gates.txt").write_text(gates)
         if fit:
             (d / "lilguy-fit.json").write_text('{"fit": true}')
+        if isinstance(held, dict):
+            held = json.dumps({g: {"at": time.time(), "text": g, "held": s} for g, s in held.items()})
+        if held is not None:
+            (d / "current-gates.json").write_text(held)
         return {"id": job_id, **job}
 
     def test_shop_excluded_lilguy_held_over_2h(self):
-        """Job 1246: a lilguy job this Mac's gates held over 2 h (since play_queued, else updatedAt) may go to the shop."""
-        three_h = self.ago(3 * 3600)
+        """Job 1246: a lilguy job this Mac's gates held over 2 h may go to the shop; job 1518: over 30 min when the
+        hold is swap or vm_pressure, counted from current-gates.json held seconds, never play_queued or updatedAt."""
+        three_h, now = self.ago(3 * 3600), self.ago(0)
         released = {
-            "board lane": self.held_job("010-a", lane="lilguy", play_queued=three_h),
+            "board lane, vm_pressure 31 min": self.held_job("010-a", lane="lilguy", held={"vm_pressure": 1860}),
             "Lane: lilguy in feature.md": self.held_job("011-b", feature="Fix it\n\n## Notes\nLane: lilguy\n",
-                                                        play_queued=three_h),
-            "fit, no parent": self.held_job("012-c", fit=True, play_queued=three_h),
-            "no play_queued, updatedAt 3 h old": self.held_job("013-d", lane="lilguy", updatedAt=three_h),
-            "one gate": self.held_job("014-e", gates="ram_room:1257-other\n", lane="lilguy", play_queued=three_h),
-            "held 2 h 1 min": self.held_job("015-f", lane="lilguy", play_queued=self.ago(2 * 3600 + 60)),
-            "fit, Run-all parent": self.held_job("016-g", fit=True, parent=PAR, play_queued=three_h),
+                                                        held={"vm_pressure": 1860}),
+            "fit, no parent": self.held_job("012-c", fit=True, held={"vm_pressure": 1860}),
+            "swap 31 min": self.held_job("013-d", gates="swap\n", lane="lilguy", held={"swap": 1860}),
+            "one gate, 2 h 1 min": self.held_job("014-e", gates="ram_room:1257-other\n", lane="lilguy",
+                                                 held={"ram_room:1257-other": 7260}),
+            "cpu_load 2 h 1 min": self.held_job("015-f", gates="cpu_load(804%)\n", lane="lilguy",
+                                                held={"cpu_load": 7260}),
+            "fit, Run-all parent": self.held_job("016-g", fit=True, parent=PAR, held={"vm_pressure": 1860}),
+            "play_queued just now, held 31 min": self.held_job("017-h", lane="lilguy", play_queued=now,
+                                                               updatedAt=now, held={"vm_pressure": 1860}),
+            "memory gate named, cpu_load 2 h 1 min": self.held_job("018-i", lane="lilguy",
+                                                                   held={"vm_pressure": 60, "cpu_load": 7260}),
         }
         parent = {"id": PAR, "lane": "runall"}
         for why, job in released.items():
             with self.subTest(why):
                 self.assertFalse(board.shop_excluded(self.root, job, [parent, job]))
         kept = {
-            "held 1 h": self.held_job("020-a", lane="lilguy", play_queued=self.ago(3600)),
-            "held 1 h 59 min": self.held_job("026-g", lane="lilguy", play_queued=self.ago(2 * 3600 - 60)),
-            "Lane: lilguy, held 1 h": self.held_job("021-b", feature="Lane: lilguy\n\nFix it\n",
-                                                    play_queued=self.ago(3600)),
-            "fit, held 1 h": self.held_job("022-c", fit=True, play_queued=self.ago(3600)),
-            "no queue-gates.txt": self.held_job("023-d", gates=None, lane="lilguy", play_queued=three_h),
-            "empty queue-gates.txt": self.held_job("024-e", gates="", lane="lilguy", play_queued=three_h),
-            "blank queue-gates.txt": self.held_job("025-f", gates="\n \n", lane="lilguy", play_queued=three_h),
+            "vm_pressure 29 min": self.held_job("020-a", lane="lilguy", held={"vm_pressure": 1740}),
+            "swap 29 min 50 s": self.held_job("026-g", gates="swap\n", lane="lilguy", held={"swap": 1790}),
+            "Lane: lilguy, vm_pressure 29 min": self.held_job("021-b", feature="Lane: lilguy\n\nFix it\n",
+                                                              held={"vm_pressure": 1740}),
+            "fit, vm_pressure 29 min": self.held_job("022-c", fit=True, held={"vm_pressure": 1740}),
+            "cpu_load 1 h 59 min": self.held_job("027-h", gates="cpu_load(804%)\n", lane="lilguy",
+                                                 held={"cpu_load": 7140}),
+            "memory gate named, cpu_load 1 h": self.held_job("028-i", lane="lilguy",
+                                                             held={"vm_pressure": 60, "cpu_load": 3600}),
+            "vm_pressure 31 min, queue-gates.txt names only cpu_load": self.held_job(
+                "029-j", gates="cpu_load(804%)\n", lane="lilguy", held={"vm_pressure": 1860}),
+            "no queue-gates.txt": self.held_job("023-d", gates=None, lane="lilguy", held={"vm_pressure": 7260}),
+            "empty queue-gates.txt": self.held_job("024-e", gates="", lane="lilguy", held={"vm_pressure": 7260}),
+            "blank queue-gates.txt": self.held_job("025-f", gates="\n \n", lane="lilguy", held={"vm_pressure": 7260}),
             "digest proposals, lilguy lane": self.held_job("030-a", feature="Expand digests/042/proposals.json\n",
-                                                           lane="lilguy", play_queued=three_h),
+                                                           lane="lilguy", held={"vm_pressure": 7260}),
             "digest proposals, Lane: lilguy": self.held_job(
-                "031-b", feature="Lane: lilguy\n\nApply scrum/digests/133/proposals.json\n", play_queued=three_h),
+                "031-b", feature="Lane: lilguy\n\nApply scrum/digests/133/proposals.json\n",
+                held={"vm_pressure": 7260}),
             "digest proposals, fit": self.held_job("032-c", feature="Expand digests/042/proposals.json\n", fit=True,
-                                                   play_queued=three_h),
+                                                   held={"vm_pressure": 7260}),
             "digest proposals, no lane": self.held_job("033-d", feature="Expand digests/042/proposals.json\n",
-                                                       play_queued=three_h),
-            "no play_queued, no updatedAt": self.held_job("040-a", lane="lilguy"),
-            "malformed play_queued, no updatedAt": self.held_job("041-b", lane="lilguy", play_queued="soon"),
-            "no play_queued, malformed updatedAt": self.held_job("042-c", lane="lilguy", updatedAt="yesterday"),
-            "both malformed": self.held_job("043-d", lane="lilguy", play_queued=12345, updatedAt=["x"]),
-            "fit, both missing": self.held_job("044-e", fit=True),
-            "malformed play_queued wins over an old updatedAt": self.held_job("045-f", lane="lilguy",
-                                                                              play_queued="soon", updatedAt=three_h),
+                                                       held={"vm_pressure": 7260}),
+            "no current-gates.json, play_queued 3 h old": self.held_job("040-a", lane="lilguy", play_queued=three_h),
+            "no current-gates.json, updatedAt 3 h old": self.held_job("041-b", lane="lilguy", updatedAt=three_h),
+            "malformed current-gates.json": self.held_job("042-c", lane="lilguy", held="{", play_queued=three_h),
+            "current-gates.json a list": self.held_job("043-d", lane="lilguy", held="[7260]"),
+            "old shape, a bare epoch": self.held_job("044-e", lane="lilguy", held=json.dumps({"vm_pressure": 1.0})),
+            "held a string": self.held_job("045-f", lane="lilguy",
+                                           held=json.dumps({"vm_pressure": {"at": 1.0, "held": "7260"}})),
+            "held true": self.held_job("046-g", lane="lilguy",
+                                       held=json.dumps({"vm_pressure": {"at": 1.0, "held": True}})),
+            "held negative": self.held_job("047-h", lane="lilguy", held={"vm_pressure": -7260}),
+            "no held": self.held_job("048-i", lane="lilguy", held=json.dumps({"vm_pressure": {"at": 1.0}})),
+            "fit, no current-gates.json": self.held_job("049-j", fit=True),
         }
         for why, job in kept.items():
             with self.subTest(why):
                 self.assertTrue(board.shop_excluded(self.root, job, [parent, job]))
-        bigboy = self.held_job("050-a", fit=True, parent="049-p", play_queued=self.ago(3600))
+        bigboy = self.held_job("050-a", fit=True, parent="049-p", held={"vm_pressure": 60})
         self.assertFalse(board.shop_excluded(self.root, bigboy, [{"id": "049-p", "lane": "bigboy"}, bigboy]),
                          "a fit BigBoy child is not lilguy's, held or not")
-        with self.subTest("with room, cmd_ready leaves a lilguy child held 3 h to the shop and claims one held 1 h"):
+        with self.subTest("with room, cmd_ready leaves a lilguy child held 31 min by vm_pressure to the shop and claims"
+                          " one held 10 min"):
             (self.root.parent / "src").mkdir()
-            self.runall(self.kid("060-a", "a", lane="lilguy", play_queued=three_h),
-                        self.kid("061-b", "b", lane="lilguy", play_queued=self.ago(3600)))
-            for job_id in ("060-a", "061-b"):
-                (self.root / "jobs" / job_id / "queue-gates.txt").write_text("cpu_load(804%)\n")
+            self.runall(self.kid("060-a", "a", lane="lilguy", play_queued=now),
+                        self.kid("061-b", "b", lane="lilguy", play_queued=three_h))
+            for job_id, secs in (("060-a", 1860), ("061-b", 600)):
+                (self.root / "jobs" / job_id / "queue-gates.txt").write_text("vm_pressure\n")
+                (self.root / "jobs" / job_id / "current-gates.json").write_text(
+                    json.dumps({"vm_pressure": {"at": time.time(), "held": secs}}))
             self.room()
             self.jev(False)
             self.assertEqual(self.ready(), ["061-b"])
             self.assertEqual(self.job("060-a")["stage"], "waiting")
             self.assertIn("shop_first_since", self.job("060-a"))
         self.assertEqual(board.SHOP_LILGUY_HELD_SECS, 7200)
+        self.assertEqual(board.SHOP_LILGUY_MEM_HELD_SECS, 1800)
 
     def test_ready_claims_after_shop_first_max(self):
         (self.root.parent / "src").mkdir()
