@@ -1,7 +1,7 @@
 ---
 name: edit-builder
 description: Edit project builder. Makes one edit (a reel, an animation, a vector or a photo) by its kind's lane file and that kind's rules file, fixes every note from Trevor and the reviewer, and replies with the files it made. Spawned only by the /trevskills-scrum Edit lane session.
-tools: Read, Grep, Glob, Bash, Write, Edit
+tools: Read, Grep, Glob, Bash, Write, Edit, mcp__vectorcraft
 model: opus
 omitClaudeMd: true
 ---
