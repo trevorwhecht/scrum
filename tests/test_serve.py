@@ -14773,6 +14773,8 @@ class UiSweepTickTest(unittest.TestCase):
 
     def test_skip_machine(self):
         self.assert_skipped(machine="free RAM 5% (< 20%)")
+        with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2"):
+            self.assert_skipped()  # a memory warning that lets a job start never lets a sweep start
 
     def test_skip_while_e2e_lock_held(self):
         """Job 1226: an orphaned full run held the E2E lock while the watchdog started a sweep beside it."""
@@ -15357,15 +15359,15 @@ class StuckAlertTest(unittest.TestCase):
             self.serve.pulse_tick({}, now=self.NOW + t)
 
     def test_pulse_tick_texts_on_a_machine_hold(self):
-        self.pulse(0, SCRUM_VM_PRESSURE="2")
+        self.pulse(0, SCRUM_VM_PRESSURE="2", SCRUM_FREE_RAM="30")
         self.assertEqual(self.sent, [])
-        self.pulse(150, SCRUM_VM_PRESSURE="2")
+        self.pulse(150, SCRUM_VM_PRESSURE="2", SCRUM_FREE_RAM="30")
         self.assertEqual(self.sent, [[str(self.script), "alert-handle", self.LEFTOVER]])
 
     def test_pulse_line_and_stuck_alert_get_the_same_sessions_and_reason(self):
         got = []
         (self.base / "ps.txt").write_text("   00:10 claude -p /trevskills-scrum start 1-a\n")
-        with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2", SCRUM_PS=str(self.base / "ps.txt")), \
+        with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2", SCRUM_FREE_RAM="30", SCRUM_PS=str(self.base / "ps.txt")), \
                 mock.patch.object(self.serve, "stuck_alert", lambda now, why, sessions: got.append((now, why, sessions))):
             self.serve.pulse_tick({}, now=self.NOW)
         line = json.loads((self.base / "pulse.log").read_text())
@@ -15407,7 +15409,7 @@ class StuckAlertTest(unittest.TestCase):
         self.assertTrue(json.loads((self.base / "pulse.log").read_text().splitlines()[-1])["cooldown"])
         (self.base / "ps.txt").write_text("   00:10 claude -p /trevskills-scrum start 1-a\n")
         for t in (1350, 1500, 1650):
-            self.pulse(t, SCRUM_VM_PRESSURE="2", SCRUM_PS=str(self.base / "ps.txt"))
+            self.pulse(t, SCRUM_VM_PRESSURE="2", SCRUM_FREE_RAM="30", SCRUM_PS=str(self.base / "ps.txt"))
         for t in (1800, 1950, 2100):
             self.assertIsNone(self.alert(t, sessions=2))
         self.assertEqual((self.sent, self.ps_calls), ([], []))
