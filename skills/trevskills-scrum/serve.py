@@ -5145,10 +5145,16 @@ def live_checks_read(root: Path, job_id: str) -> list | None:
     return data if isinstance(data, list) else None
 
 
+def live_unfiled(entry: dict) -> bool:
+    """A failed live-checks.json entry that live_check_fail has not yet filed or texted."""
+    return entry.get("state") == "failed" and not entry.get("filed") and not entry.get("texted")
+
+
 def live_check_update(root: Path, job_id: str, index: int, command: str, change) -> dict | None:
     """Under board.locked_board(root): re-read live-checks.json, apply change(entry) to entry `index` only when it
-    still holds command, write the file (tmp + os.replace) and set the job's `liveCheck` (board.live_state). Returns the
-    updated entry, or None when the file or entry is gone."""
+    still holds command, write the file (tmp + os.replace) and set the job's `liveCheck` (board.live_state), and its
+    `liveCheckUnfiled` while any failed entry is neither filed nor texted (live_unfiled). Returns the updated entry, or
+    None when the file or entry is gone."""
     with board.locked_board(root) as b:
         checks = live_checks_read(root, job_id)
         if not checks or index >= len(checks) or not isinstance(checks[index], dict) \
@@ -5162,6 +5168,10 @@ def live_check_update(root: Path, job_id: str, index: int, command: str, change)
         job = next((j for j in b["jobs"] if j.get("id") == job_id), None)
         if job is not None:
             job["liveCheck"] = board.live_state(checks)
+            if any(live_unfiled(c) for c in checks if isinstance(c, dict)):
+                job["liveCheckUnfiled"] = True  # live_check_tick files it on a later tick if live_check_fail failed
+            else:
+                job.pop("liveCheckUnfiled", None)
         return checks[index]
 
 
@@ -5215,7 +5225,8 @@ def live_check_tick(seen, now=None, run=None, send=None) -> str | None:
     board `liveCheck` is "waiting" are looked at, and only their live-checks.json is read, so an idle board opens no
     job folder. A pending check past `by` becomes failed `never happened` and is never run. Of the due checks (now >=
     `from`, last run LIVE_CHECK_EVERY_S or more ago) the first runs, one per tick across every project, and none while
-    board.heavy_hold gives a reason (asked only when one is due). run (live_check_run when None) gives (code, output):
+    board.heavy_hold gives a reason (asked only when one is due). A job with `liveCheckUnfiled` is read too, and each
+    failed entry it holds with no `filed` or `texted` goes to live_check_fail again (a filing that raised is retried). run (live_check_run when None) gives (code, output):
     0 passed, LIVE_CHECK_NOT_YET stays pending, LIVE_CHECK_TIMED_OUT failed `timed out after <n> s`, any other failed.
     The run {at, exit, tail} is appended under the board lock (live_check_update); each new failure goes to
     live_check_fail. Returns the job id it ran, else None."""
@@ -5224,10 +5235,13 @@ def live_check_tick(seen, now=None, run=None, send=None) -> str | None:
     due, failed = None, []
     for project, repo, root, jobs, _flagged in seen:
         for job in jobs:
-            if job.get("liveCheck") != "waiting":
+            if job.get("liveCheck") != "waiting" and not job.get("liveCheckUnfiled"):
                 continue
             job_id = str(job.get("id"))
             for i, c in enumerate(live_checks_read(root, job_id) or []):
+                if isinstance(c, dict) and live_unfiled(c):
+                    failed.append((project, root, job, i, c))  # an earlier tick's filing raised: try again
+                    continue
                 if not isinstance(c, dict) or c.get("state") != "pending" or not board.is_num(c.get("by")):
                     continue
                 if now > c["by"]:

@@ -4,7 +4,8 @@ GAP_S seconds while the Mac is awake.
 
 Reads board.pulse_path() lines from LIVE_CHECK_SINCE (epoch seconds; default now - 24 h) to that time + 24 h.
 Exit 75 while less than 24 h has passed since LIVE_CHECK_SINCE (not yet). Exit 1, printing each gap, when two
-consecutive pulse lines lie more than GAP_S apart and no `Sleep` entry of `pmset -g log` falls inside the gap.
+consecutive pulse lines (the window's start and end count as lines, so a pulse that stops, starts late or never
+writes is a gap) lie more than GAP_S apart and no `Sleep` entry of `pmset -g log` falls inside the gap.
 Exit 0 otherwise. Read-only."""
 import json, os, re, subprocess, sys, time
 from datetime import datetime
@@ -65,7 +66,8 @@ def main(now=None, read_sleeps=pmset_sleeps) -> int:
     if times is None:
         print(f"no pulse log at {board.pulse_path()}")
         return 1
-    gaps = [(a, b) for a, b in zip(times, times[1:]) if b - a > GAP_S]
+    edges = [since, *times, until]  # the window's edges are boundaries: a silence at either end, or all day, is a gap
+    gaps = [(a, b) for a, b in zip(edges, edges[1:]) if b - a > GAP_S]
     sleeps = read_sleeps(since, until) if gaps else []
     awake = [(a, b) for a, b in gaps if not any(s < b and s + secs > a for s, secs in sleeps)]
     stamp = lambda t: datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")  # noqa: E731

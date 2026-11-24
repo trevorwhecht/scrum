@@ -350,6 +350,23 @@ class LiveCheckFailTest(TickBase):
         self.assertEqual(len(self.open_items()), 1)
         self.assertEqual(self.sent, [])
 
+    def test_failed_filing_retried_next_tick(self):
+        """Round 1 finding 4: a failure whose filing raised is filed on the next tick, once."""
+        self.record()
+        self.exit = 1
+        with mock.patch.object(board, "cmd_backlog_add", side_effect=OSError("disk full")), \
+                mock.patch("sys.stderr"):
+            self.tick()
+        self.assertEqual(self.open_items(), [])
+        self.assertEqual(self.job()["liveCheck"], "failed")
+        self.tick(now=self.NOW + 60)
+        self.assertEqual(len(self.open_items()), 1)
+        self.assertEqual(self.checks()[0]["filed"], self.open_items()[0])
+        self.assertNotIn("liveCheckUnfiled", self.job())
+        self.tick(now=self.NOW + 120)
+        self.assertEqual(len(self.open_items()), 1)
+        self.assertEqual(len(self.ran), 1)
+
     def test_long_output_is_cut_to_item_max(self):
         self.record()
         self.exit = 1
@@ -438,6 +455,32 @@ class PulseGapsTest(unittest.TestCase):
         times = [t for t in range(self.SINCE, self.SINCE + 86400, 60) if not self.SINCE + 3600 < t < self.SINCE + 4000]
         self.write(times)
         self.assertEqual(self.main(self.SINCE + 86400 + 60, sleeps=[(self.SINCE + 3700, 200)])[0], 0)
+
+    def test_log_ends_early(self):
+        """Round 1 finding 1: the pulse stopping 1 h after the merge is a gap to the window's end."""
+        self.write(range(self.SINCE, self.SINCE + 3600, 60))
+        code, out = self.main(self.SINCE + 86400 + 60)
+        self.assertEqual(code, 1)
+        self.assertIn(f"{86400 - 3540} s", out)
+
+    def test_log_starts_late(self):
+        self.write(range(self.SINCE + 3600, self.SINCE + 86400, 60))
+        code, out = self.main(self.SINCE + 86400 + 60)
+        self.assertEqual(code, 1)
+        self.assertIn("3600 s", out)
+
+    def test_empty_window(self):
+        self.write([self.SINCE - 7200, self.SINCE + 86400 + 7200])
+        self.assertEqual(self.main(self.SINCE + 86400 + 60)[0], 1)
+
+    def test_single_line(self):
+        self.write([self.SINCE + 43200])
+        self.assertEqual(self.main(self.SINCE + 86400 + 60)[0], 1)
+
+    def test_edge_gap_holding_sleep(self):
+        """A trailing silence is excused by a Sleep inside it, like any other gap."""
+        self.write(range(self.SINCE, self.SINCE + 86400 - 3600, 60))
+        self.assertEqual(self.main(self.SINCE + 86400 + 60, sleeps=[(self.SINCE + 86400 - 3000, 3000)])[0], 0)
 
     def test_too_early(self):
         self.write(range(self.SINCE, self.SINCE + 3600, 60))
