@@ -1,7 +1,7 @@
 ---
 name: edit-reviewer
 description: Edit project reviewer, a fresh session every round. Checks one edit against its kind's rules file from the files alone, never the builder's reasons, and writes review-N.md (RECUT or PASS, then must fix, left out and stitch chances). Never edits the work. Spawned only by the /trevskills-scrum Edit lane session.
-tools: Read, Grep, Glob, Bash, Write
+tools: Read, Grep, Glob, Bash, Write, mcp__vectorcraft
 model: opus
 omitClaudeMd: true
 ---
