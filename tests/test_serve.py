@@ -127,7 +127,13 @@ class ServeTest(unittest.TestCase):
             return e.code, None
 
     def calls(self):
-        return [json.loads(l) for l in self.stub_log.read_text().splitlines()] if self.stub_log.exists() else []
+        out = []
+        for l in self.stub_log.read_text().splitlines() if self.stub_log.exists() else []:
+            try:
+                out.append(json.loads(l))
+            except ValueError:  # the stub is mid-write under load: the next poll sees the whole line
+                pass
+        return out
 
     def wait_for(self, cond, timeout=30):
         end = time.time() + timeout
