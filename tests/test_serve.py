@@ -15582,6 +15582,45 @@ class StuckAlertTest(unittest.TestCase):
         self.assertEqual(json.loads((self.base / "stuck-alert.json").read_text())["sent"], self.NOW + 150)
         self.assertEqual(self.logged(), [{"process": "Stuck alert", "result": "sent", "reason": self.MEM}])
 
+    def _gated_send(self):
+        """A background send held on a gate; returns (gate, started, slow). slow also records its argv in self.sent."""
+        gate, started = threading.Event(), threading.Event()
+
+        def slow(argv):
+            self.sent.append(argv)
+            started.set()
+            gate.wait(10)
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        self.addCleanup(gate.set)
+        return gate, started, slow
+
+    def test_send_finishing_after_one_clear_pulse_marks_sent(self):
+        """Job 1471: a send that outlives one pulse and exits 0 after a clear pulse still writes `sent`."""
+        gate, started, slow = self._gated_send()
+        self.alert(0)
+        self.serve.stuck_alert(self.NOW + 150, self.MEM, 0, send=slow, background=True)
+        self.assertTrue(started.wait(5))
+        self.alert(300, why=None)
+        gate.set()
+        self.serve.STUCK_SEND.join(5)
+        self.assertEqual(json.loads((self.base / "stuck-alert.json").read_text())["sent"], self.NOW + 150)
+        self.alert(450), self.alert(600)
+        self.assertEqual(len(self.sent), 1, "the returning hold sends no second text")
+
+    def test_late_send_after_episode_end_marks_nothing(self):
+        """Job 1471: a send that exits 0 after STUCK_ALERT_CLEAR clear pulses writes no `sent`."""
+        gate, started, slow = self._gated_send()
+        self.alert(0)
+        self.serve.stuck_alert(self.NOW + 150, self.MEM, 0, send=slow, background=True)
+        self.assertTrue(started.wait(5))
+        for i in range(6):
+            self.alert(300 + i * 150, why=None)
+        gate.set()
+        self.serve.STUCK_SEND.join(5)
+        self.assertIsNone(json.loads((self.base / "stuck-alert.json").read_text())["sent"])
+        self.alert(1500), self.alert(1650)
+        self.assertEqual(len(self.sent), 2, "the returning hold texts as a new episode")
+
     def test_nonzero_sender_exit_logs_failed(self):
         """Job 1420: imsg-send.sh that runs but exits nonzero logs failed with its last output line, never sent."""
         def episode(t, code, stdout, stderr):

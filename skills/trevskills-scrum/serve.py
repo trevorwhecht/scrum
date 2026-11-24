@@ -4940,19 +4940,19 @@ def stuck_write(path: Path, state: dict, old: dict) -> None:
 
 
 def stuck_mark(path: Path, now: float) -> None:
-    """Write `sent` = now to stuck-alert.json, when its episode is still held (a send that outlived it marks nothing)."""
+    """Write `sent` = now to stuck-alert.json, when its episode is still live (fewer than STUCK_ALERT_CLEAR clear pulses; a send that outlived it marks nothing)."""
     with STUCK_LOCK:
         try:
             cur = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             cur = {}
-        if isinstance(cur, dict) and board.is_num(cur.get("held")) and cur["held"] > 0:
+        if isinstance(cur, dict) and board.is_num(cur.get("clear")) and cur["clear"] < STUCK_ALERT_CLEAR:
             stuck_write(path, {**cur, "sent": now}, cur)
 
 
 def stuck_deliver(path: Path, now: float, why: str, argv: list, send=None) -> str | None:
     """Run one imsg-send.sh send (STUCK_ALERT_SEND_S timeout; `send` replaces the run) and log it. Only an exit 0
-    writes `sent` to stuck-alert.json (when its episode is still held), so a timed-out or failed text is tried again
+    writes `sent` to stuck-alert.json (when its episode is still live: fewer than STUCK_ALERT_CLEAR clear pulses), so a timed-out or failed text is tried again
     on the next held pulse (job 1458). Returns the text on success, else None; never raises."""
     try:
         result = send(argv) if send else subprocess.run(argv, capture_output=True, text=True, errors="replace",
