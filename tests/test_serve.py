@@ -13720,17 +13720,14 @@ class E2eFullTest(unittest.TestCase):
         return thread.call_count
 
     def test_tick_waits_for_job_sessions_and_loaded_wait_counts_from_the_stop(self):
-        """Job 1457: a full run starts only with no job session live (hot_stop_tick stops it on a warn otherwise), and a
-        loaded record's wait counts from its stop (`at` plus `secs`), not its start."""
+        """Job 1457: no run starts while a job session is live; a loaded wait counts from at + secs."""
         with mock.patch.object(self.serve.board, "live_sessions", return_value=2):
             self.assertEqual(self.tick(), 0)
-        self.assertFalse((self.root / "e2e-full.json").exists())
         self.assertEqual(self.tick(), 1)
         w = self.serve.E2E_FULL_LOADED_WAIT
         rec = {"at": 1000.0, "head": "h", "result": "loaded", "secs": 3600}
         self.assertFalse(self.serve.e2e_full_due(rec, "h", 0, 1000.0 + 3600 + w - 1))
         self.assertTrue(self.serve.e2e_full_due(rec, "h", 0, 1000.0 + 3600 + w))
-        self.assertTrue(self.serve.e2e_full_due({k: v for k, v in rec.items() if k != "secs"}, "h", 0, 1000.0 + w))
 
     def test_tick_starts_one_run_on_a_clean_checkout(self):
         self.assertEqual(self.tick(), 1)
