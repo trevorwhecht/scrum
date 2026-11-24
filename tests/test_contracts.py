@@ -4178,6 +4178,19 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "never reuses a version number", "`edit-builder`", "`edit-reviewer`",
                        "`View: QuickTime Player <the master's absolute path>`"):
             self.assertIn(phrase, animation, phrase)
+        # Trevor 2026-11-24: one storyboard, notes on it start the build, captures are reused, and the reviewer watches
+        # the rendered master, never stills of the page.
+        for step, end, phrases in (
+                ("3. **Storyboard.**", "\n4. **", ("Made once", "`Storyboard: none` (a reframe of an approved film) skips this step",
+                                                  "A rework note does the same", "asks to see a new one re-runs this step")),
+                ("4. **Build.**", "\n5. **", ("Changes from the storyboard", "Use the captures already in the folder")),
+                ("5. **Review.**", "\n6. **", ("Review the rendered video itself, never page stills", "sheet.py <master>",
+                                              "ffmpeg -ss <t> -i <master>", "blackdetect"))):
+            body = self.section(animation, step, end)
+            for phrase in phrases:
+                self.assertIn(phrase, body, (step, phrase))
+        self.assertNotIn("render.mjs stills", animation)
+        self.assertNotIn("Build exactly the approved storyboard", animation)
         # Job 1398: before each VIDEO_REVIEW ask the lane lists the files the phone shows in the stop box.
         for step, end, files in (("3. **Storyboard.**", "\n4. **", "the desktop and phone screenshots"),
                                  ("6. **Version round.**", "\n7. **", "the master clip, then its contact sheet")):
