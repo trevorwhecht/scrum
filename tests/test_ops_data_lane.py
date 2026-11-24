@@ -60,6 +60,38 @@ class OpsDataLane(unittest.TestCase):
         for p in ("PROD_RUN_RE", "prisma migrate", "db:push", "[A-Za-z0-9=_.:/-]"):
             self.assertNotIn(p, text, p)
 
+    def test_merge_prod_refused_offers_ops_data(self):
+        text = (LANE.parent / "merge.md").read_text()
+        s = text[text.index("     5. On any failure"):]
+        s = s[:s.index("\n") if "\n" in s else len(s)]
+        for p in ("prod run refused", 'followup $ID \\"Kind: ops-data run: npm run <script>:prod -- <args>; ...\\"',
+                  "one `npm run` command per refused bullet", "--title PROD_CHECK_FAILED"):
+            self.assertIn(p, s, p)
+
+    def test_prod_refused_followup_option_valid(self):
+        import sys
+        sys.path.insert(0, str(LANE.parents[1]))
+        import board
+        cmd = 'followup 1475-hand-existing-stops "Kind: ops-data run: npm run fix-x:prod -- --limit=5; npm run fix-y:prod"'
+        self.assertTrue(board.ASK_COMMAND_RE.fullmatch(cmd))
+        text = (LANE.parent / "merge.md").read_text()
+        self.assertIn("Kind: ops-data run: npm run <script>:prod -- <args>; ...", text)
+        self.assertNotIn('"', "Kind: ops-data run: npm run <script>:prod -- <args>; ...")
+
+    def test_review_datafix_becomes_ops_data(self):
+        text = (LANE.parent / "review.md").read_text()
+        s = text[text.index("starting `Datafix:`"):]
+        s = s[:s.index("\n")]
+        for p in ("Kind: ops-data datafix:", "--trevor --top", "every single quote removed", "one call per bullet"):
+            self.assertIn(p, s, p)
+        self.assertNotIn("--setup='run /trevskills-datafix", s)
+
+    def test_datafix_job(self):
+        s = step(1)
+        for p in ("`Datafix:` line", "- datafix: <text>", "stage=build", "--title DATA_RUN", "Done, mark finished=approve $ID",
+                  "steps 2 to 6 never run", "`prod-ok` is never called"):
+            self.assertIn(p, s, p)
+
 
 if __name__ == "__main__":
     unittest.main()
