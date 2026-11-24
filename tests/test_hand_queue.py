@@ -161,7 +161,7 @@ class HandQueueTickTest(Base):
     def tick_mocks(self):
         names = ("window_tick", "weekly_tick", "cooldown_chime", "idle_cleanup", "stop_leftovers", "stop_two_sessions",
                  "stop_same_tests", "report_hogs", "e2e_lock_reap", "write_shop_room", "agent_links_tick",
-                 "hot_stop_tick", "hard_stop_tick", "auto_continue_tick", "wake_waiting", "queue_ready_waiting",
+                 "hot_stop_tick", "e2e_runaway_tick", "hard_stop_tick", "auto_continue_tick", "wake_waiting", "queue_ready_waiting",
                  "sweep_parents", "cloud_tick", "project_notes_tick", "shop_tick", "prune_worktrees",
                  "prod_errors_tick", "digest_retry_tick", "actions_alert", "e2e_full_tick", "ui_sweep_tick",
                  "main_ff_tick", "terminal_batch_tick", "claude_migrate", "respawn_exited", "record_outcomes",

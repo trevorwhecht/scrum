@@ -118,6 +118,8 @@
   board.py e2e-budget <id> <log>   print {"over_budget","passed","failed","not_run","slowest","line","backlog"} for a
                                    job E2E run's output; over budget with no failed test files one deduped
                                    "Speed up the slowest job E2E spec files" backlog item (lanes/newjob.md Check gate)
+  board.py e2e-stopped <id>        print {"stopped","count","reason","line"} from jobs/<id>/e2e-stopped.json, the marker
+                                   serve.py's e2e_runaway_tick writes when it stops the job's E2E (lanes/newjob.md Check gate)
   board.py render-paths <id>       print {"paths","skipped"}: the app paths the diff's UI runtime files render plus spec.md
                                    `Render path:` URLs, at most 8, dynamic routes and placeholder URLs skipped, ["/"]
                                    when none maps (lanes/review.md step 2 Shared render)
@@ -1806,6 +1808,7 @@ PROCESSES = (
     ("Same tests", ("stop_same_tests",), ()),
     ("CPU hogs", ("report_hogs",), ()),
     ("E2E lock reaps", ("e2e_lock_reap", "render_reap_tick"), ()),
+    ("E2E runaway stop", ("e2e_runaway_tick",), ()),
     ("Agent links", ("agent_links_tick",), ()),
     ("Digest retry", ("digest_retry_tick",), ()),
     ("Weekly digest", ("weekly_tick",), ()),
@@ -1813,7 +1816,7 @@ PROCESSES = (
                     "project_notes_tick"), ()),
     ("Usage windows", ("window_tick", "hard_stop_tick"), ("windows",)),
     ("Pulse", ("pulse_tick", "publish_busy", "record_cpu_sample", "cooldown_chime"), ()),
-    ("Stuck alert", ("stuck_alert", "stuck_process"), ()),
+    ("Stuck alert", ("stuck_alert", "stuck_process", "disk_alert_tick", "claude_missing_tick"), ()),
     ("Live checks", ("live_check_tick",), ("jobs/*/live-checks.json",)),
     ("Run all and triage", ("cmd_runall_start", "cmd_triage_start", "cmd_triage_apply"), ("triage/*",)),
     ("Roadmap and BigBoy", ("cmd_roadmap_next",), ("roadmap.md", "jobs/*/track-*.md", "jobs/*/bigboy-review.md")),
@@ -4286,6 +4289,24 @@ def e2e_budget(text: str) -> dict:
     slowest = [[f, round(t, 1)] for f, t in sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))[:5]]
     return {"over_budget": bool(PW_TIMEOUT_RE.search(text)), "passed": passed, "failed": counts.get("failed", 0),
             "not_run": not_run, "slowest": slowest, "line": f"E2E: over budget, {passed} passed, {not_run} not run"}
+
+
+def cmd_e2e_stopped(root, job_id) -> dict:
+    """{"stopped", "count", "reason", "line"} from jobs/<id>/e2e-stopped.json (serve.py e2e_runaway_tick's marker).
+    Missing, unreadable or malformed: {"stopped": False, "count": 0, "reason": None, "line": None}. `line` is the
+    check.md line: `E2E stopped: <reason>` for count 1, `E2E: not run, stopped: <reason> twice` for 2 or more."""
+    job_id = check_id(job_id)
+    out = {"stopped": False, "count": 0, "reason": None, "line": None}
+    try:
+        rec = json.loads((Path(root) / "jobs" / job_id / "e2e-stopped.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return out
+    if not isinstance(rec, dict) or not is_num(rec.get("count")) or rec["count"] < 1 or rec.get("reason") not in ("memory", "disk"):
+        return out
+    count = int(rec["count"])
+    out.update(stopped=True, count=count, reason=rec["reason"],
+               line=f"E2E stopped: {rec['reason']}" if count == 1 else f"E2E: not run, stopped: {rec['reason']} twice")
+    return out
 
 
 def cmd_e2e_budget(root, job_id, log) -> dict:
@@ -9536,6 +9557,7 @@ def main(argv=None):
     eb = sub.add_parser("e2e-budget")
     eb.add_argument("id")
     eb.add_argument("log")
+    sub.add_parser("e2e-stopped").add_argument("id")
     sub.add_parser("check-reuse").add_argument("id")
     sub.add_parser("render-paths").add_argument("id")
     sub.add_parser("ui-sweep-record").add_argument("review")
@@ -9703,6 +9725,8 @@ def main(argv=None):
             raise SystemExit("e2e-specs needs <id>, or --worktree, --base and --project")
     elif a.cmd == "e2e-budget":
         print(json.dumps(cmd_e2e_budget(a.dir, a.id, a.log)))
+    elif a.cmd == "e2e-stopped":
+        print(json.dumps(cmd_e2e_stopped(a.dir, a.id)))
     elif a.cmd == "check-reuse":
         print(json.dumps(cmd_check_reuse(a.dir, a.id)))
     elif a.cmd == "render-paths":

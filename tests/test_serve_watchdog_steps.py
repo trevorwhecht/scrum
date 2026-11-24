@@ -75,7 +75,7 @@ class PulseTimerTest(unittest.TestCase):
                 mock.patch.multiple(serve, window_tick=mock.DEFAULT, weekly_tick=mock.DEFAULT, cooldown_chime=mock.DEFAULT,
                                     idle_cleanup=mock.DEFAULT, stop_leftovers=mock.DEFAULT, stop_two_sessions=mock.DEFAULT,
                                     stop_same_tests=mock.DEFAULT, report_hogs=mock.DEFAULT, e2e_lock_reap=mock.DEFAULT, render_reap_tick=mock.DEFAULT,
-                                    write_shop_room=mock.DEFAULT, agent_links_tick=mock.DEFAULT, hot_stop_tick=mock.DEFAULT,
+                                    write_shop_room=mock.DEFAULT, agent_links_tick=mock.DEFAULT, hot_stop_tick=mock.DEFAULT, e2e_runaway_tick=mock.DEFAULT,
                                     hard_stop_tick=mock.DEFAULT, auto_continue_tick=mock.DEFAULT), \
                 mock.patch.object(serve.board, "record_cpu_sample"), mock.patch("sys.stderr", new=io.StringIO()):
             serve.watchdog_tick()
@@ -112,7 +112,7 @@ class RenderReapTickTest(unittest.TestCase):
     STEPS = dict(window_tick=mock.DEFAULT, weekly_tick=mock.DEFAULT, cooldown_chime=mock.DEFAULT,
                  idle_cleanup=mock.DEFAULT, stop_leftovers=mock.DEFAULT, stop_two_sessions=mock.DEFAULT,
                  stop_same_tests=mock.DEFAULT, report_hogs=mock.DEFAULT, e2e_lock_reap=mock.DEFAULT,
-                 write_shop_room=mock.DEFAULT, agent_links_tick=mock.DEFAULT, hot_stop_tick=mock.DEFAULT,
+                 write_shop_room=mock.DEFAULT, agent_links_tick=mock.DEFAULT, hot_stop_tick=mock.DEFAULT, e2e_runaway_tick=mock.DEFAULT,
                  hard_stop_tick=mock.DEFAULT, auto_continue_tick=mock.DEFAULT)
 
     def tick(self, reap):
@@ -143,6 +143,7 @@ class RenderReapTickTest(unittest.TestCase):
                     serve.watchdog_tick()
                 self.assertIn(f"watchdog: render reap: {exc}\n", err.getvalue())
                 m["hot_stop_tick"].assert_called_once_with()
+                m["e2e_runaway_tick"].assert_called_once_with()
 
     def test_render_reap_logs_only_when_it_reaped(self):
         _, err = self.tick({"return_value": [11, 12]})
@@ -187,7 +188,7 @@ class PulseLockTest(unittest.TestCase):
                 mock.patch.multiple(serve, window_tick=mock.DEFAULT, weekly_tick=mock.DEFAULT, cooldown_chime=mock.DEFAULT,
                                     idle_cleanup=mock.DEFAULT, stop_leftovers=mock.DEFAULT, stop_two_sessions=mock.DEFAULT,
                                     stop_same_tests=mock.DEFAULT, report_hogs=mock.DEFAULT, e2e_lock_reap=mock.DEFAULT, render_reap_tick=mock.DEFAULT,
-                                    write_shop_room=mock.DEFAULT, agent_links_tick=mock.DEFAULT, hot_stop_tick=mock.DEFAULT,
+                                    write_shop_room=mock.DEFAULT, agent_links_tick=mock.DEFAULT, hot_stop_tick=mock.DEFAULT, e2e_runaway_tick=mock.DEFAULT,
                                     hard_stop_tick=mock.DEFAULT, auto_continue_tick=mock.DEFAULT), \
                 mock.patch.object(serve.board, "record_cpu_sample"), mock.patch("sys.stderr", new=io.StringIO()):
             serve.watchdog_tick()
