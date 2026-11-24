@@ -3419,6 +3419,12 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
     rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*") if re.fullmatch(r"round-\d+", p.name) and p.is_dir())
     start = _build_start(root, job_id)
     qfrom = spec_at or created  # no spec.md (a lilguy job): feature.md to the first run log is Queue
+    pre_human = 0  # a shop job that stopped needs-human before its home build: the shop run and the wait are not Queue (job 1508)
+    if cloud and start and start >= qfrom:
+        stop = min((a for a, _ in human if qfrom <= a < start), default=None)
+        rework = next((r for r in _run_starts(root, job_id) if stop is not None and stop < r <= start), None)
+        if rework:
+            pre_human, qfrom = rework - stop, rework
     if qfrom and start and start >= qfrom:
         queue = start - qfrom
     else:  # no start log (a Run all or BigBoy child): round 1 starts at the claim or first run log after spec.md, the gap is Queue
@@ -3438,7 +3444,7 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
         machine = _waited(prev, end, waits, mtimes, qspans) if end and prev else 0
         both = _waited(prev, end, waits, mtimes, [*qspans, *human]) if end and prev else 0
         times.append(_mins(end - prev - both if end and prev else None))
-        hwaits.append(_mins(both - machine))
+        hwaits.append(both - machine)
         prev = end or prev
         try:
             heads.append((rd / "head.txt").read_text(encoding="utf-8", errors="replace").strip())
@@ -3489,12 +3495,16 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
         stall_cell.append("?" if at is None else "open" if nxt is None else _mins(nxt - at))
         resume += nxt - at if nxt else 0
     paused = "paused " if job.get("autoPlayed") and times else ""  # sat paused until serve.py auto_play played it
+    if pre_human:  # the stop-to-rework span lies before round 1: it is the first round's Human wait
+        hwaits = [(hwaits[0] if hwaits else 0) + pre_human, *hwaits[1:]]
+    if queue and wall is not None:  # Queue is part of Wall, never more
+        queue = min(queue, wall)
     queue_cell = _mins(queue)
     if queue is not None and (blocked := _deps_done_at(job, by_id)) is not None:  # the part after the planned wait
         after = min(sum(max(b - max(a, blocked), 0) for a, b in pieces), queue)
         queue_cell += f" ({_mins(after)} after depends_on)"
     cells = [job_id, _mins(wall), _mins(spec), queue_cell, gates, str(len(rounds)), paused + ", ".join(times) or "-",
-             ", ".join(hwaits) or "-", f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0",
+             ", ".join(map(_mins, hwaits)) or "-", f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0",
              _mins(done - cloud if cloud and done and done >= cloud else None)]
     try:  # serve.py note_stall_hold: what held its stalls
         held = (folder / "stall-holds.txt").read_text(encoding="utf-8", errors="replace").split()
