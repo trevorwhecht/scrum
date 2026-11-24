@@ -1259,7 +1259,7 @@ class ShopTickTest(unittest.TestCase):
     def test_new_work_skips_items_the_shop_never_takes(self):
         root = self.project("mm", [], AUTO)
         skipped = ["Lane: lilguy, fix the typo {p:5}", "Apply scrum/digests/012/proposals.json {p:5}",
-                   "Tiny spec fix {p:5}"]
+                   "Tiny spec fix {p:5}", "Fix the mac thing. Runs on: main. {p:5}"]
         self.backlog(root, *skipped, "Fix the gadget {p:3}",
                      specs={"Tiny spec fix": "# Spec\nLane: lilguy\n\n## Likely files\n- `src/z.py`\n"})
         self.assertEqual(self.tick(), (True, "shop: mm: 001-fix-the-gadget: started on shopmac (pid 4242, account owa)\n", ""))

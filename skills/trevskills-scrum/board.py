@@ -4702,17 +4702,22 @@ def header_value(path: Path, key: str, words: tuple[str, ...]) -> str | None:
         text = Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+    return header_in(text, key, words)
+
+
+def header_in(text: str, key: str, words: tuple[str, ...]) -> str | None:
+    """header_value over text already read."""
     m = re.search(rf"^{key}:\s*({'|'.join(words)})\b", re.split(r"^## ", text, maxsplit=1, flags=re.M)[0], re.M | re.I)
     return m[1].lower() if m else None
 
 
 def feature_text(text: str) -> str:
-    """text as a feature.md body: an inline `Lane:` / `Complex:` clause (a backlog item is one line) is also written on its
-    own header line after the first line, where header_value reads it. The last valid clause of each key wins."""
+    """text as a feature.md body: an inline `Lane:` / `Complex:` / `Runs on:` clause (a backlog item is one line) is also
+    written on its own header line after the first line, where header_value reads it. The last valid clause of each key wins."""
     hdr = {}
-    for m in re.finditer(r"\b(Lane|Complex):\s*(\w+\b.*?)(?=\s+(?:Lane|Complex):|\Z)", text, re.S):
-        key, rest = m[1].title(), " ".join(m[2].split())
-        if re.match(r"\w+", rest)[0].lower() in (LANES if key == "Lane" else ("yes", "no")):  # "debug," / "no." count
+    for m in re.finditer(r"\b(Lane|Complex|Runs on):\s*(\w+\b.*?)(?=\s+(?:Lane|Complex|Runs on):|\Z)", text, re.S):
+        key, rest = m[1], " ".join(m[2].split())
+        if re.match(r"\w+", rest)[0].lower() in {"Lane": LANES, "Complex": ("yes", "no")}.get(key, RUNS_ON):  # "debug," / "no." count
             hdr[key] = rest
     first, _, more = text.rstrip("\n").partition("\n")
     return first + "\n" + "".join(f"{k}: {v}\n" for k, v in hdr.items()) + (more + "\n" if more else "")

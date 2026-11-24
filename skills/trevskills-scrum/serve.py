@@ -2658,6 +2658,7 @@ def shop_tick(project, repo, root) -> bool:
             text = spec.read_text(encoding="utf-8", errors="replace") if spec.is_file() else None
             if re.search(r"\bLane:\s*lilguy\b", item["text"], re.I) or board.DIGEST_PROPOSALS_RE.search(item["text"]) \
                     or board.header_value(spec, "Lane", board.LANES) == "lilguy" \
+                    or board.header_in(board.feature_text(item["text"]), "Runs on", board.RUNS_ON) == "main" \
                     or board.names_main_only(item["text"] + "\n" + (text or ""), terms):
                 return False
             if full and board.heavy_job(root, item):  # job 1314: this worker already runs its heavy job

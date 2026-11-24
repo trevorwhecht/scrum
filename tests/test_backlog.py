@@ -146,6 +146,19 @@ class BacklogTest(unittest.TestCase):
             self.assertEqual(board.header_value(d / "feature.md", key, words), want)
         self.assertEqual(board.feature_text("Plain item"), "Plain item\n")
 
+    def test_inline_runs_on_becomes_header_line_and_tags_without_jev(self):
+        item = "Fix the thing. Lane: lilguy. Runs on: main."
+        d = self.root / "jobs" / "103-x"
+        d.mkdir(parents=True)
+        (d / "feature.md").write_text(board.feature_text(item))
+        self.assertEqual(board.header_value(d / "feature.md", "Runs on", board.RUNS_ON), "main")
+        self.assertEqual(board.header_in(board.feature_text(item), "Runs on", board.RUNS_ON), "main")
+        self.assertEqual(board.feature_text("Fix it. Runs on: nowhere."), "Fix it. Runs on: nowhere.\n")
+        job_id = board.cmd_new(self.root, "Fix the thing")
+        (self.root / "jobs" / job_id / "feature.md").write_text(board.feature_text(item))
+        with mock.patch.object(board, "jev_main_only", side_effect=AssertionError("Jev asked")):
+            self.assertEqual(board.tag_runs_on(self.root, job_id), "main")
+
     def test_inline_lane_and_complex_with_trailing_punctuation(self):
         item = "Fix it. Lane: debug, re-report of job 583. Lane: standard, about 150+ lines. Complex: no."
         d = self.root / "jobs" / "101-x"
