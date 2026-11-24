@@ -62,7 +62,7 @@ class PulseTimerTest(unittest.TestCase):
                 mock.patch.object(serve, "pulse_tick") as pulse, \
                 mock.patch.multiple(serve, window_tick=mock.DEFAULT, weekly_tick=mock.DEFAULT, cooldown_chime=mock.DEFAULT,
                                     idle_cleanup=mock.DEFAULT, stop_leftovers=mock.DEFAULT, stop_two_sessions=mock.DEFAULT,
-                                    stop_same_tests=mock.DEFAULT, report_hogs=mock.DEFAULT, e2e_lock_reap=mock.DEFAULT,
+                                    stop_same_tests=mock.DEFAULT, report_hogs=mock.DEFAULT, e2e_lock_reap=mock.DEFAULT, render_reap_tick=mock.DEFAULT,
                                     write_shop_room=mock.DEFAULT, agent_links_tick=mock.DEFAULT, hot_stop_tick=mock.DEFAULT,
                                     hard_stop_tick=mock.DEFAULT, auto_continue_tick=mock.DEFAULT), \
                 mock.patch.object(serve.board, "record_cpu_sample"), mock.patch("sys.stderr", new=io.StringIO()):
@@ -94,6 +94,49 @@ class PulseTimerTest(unittest.TestCase):
                 serve.pulse_loop()
         self.assertEqual(pulse.call_count, 2)
         self.assertIn("watchdog: pulse: bad", err.getvalue())
+
+
+class RenderReapTickTest(unittest.TestCase):
+    STEPS = dict(window_tick=mock.DEFAULT, weekly_tick=mock.DEFAULT, cooldown_chime=mock.DEFAULT,
+                 idle_cleanup=mock.DEFAULT, stop_leftovers=mock.DEFAULT, stop_two_sessions=mock.DEFAULT,
+                 stop_same_tests=mock.DEFAULT, report_hogs=mock.DEFAULT, e2e_lock_reap=mock.DEFAULT,
+                 write_shop_room=mock.DEFAULT, agent_links_tick=mock.DEFAULT, hot_stop_tick=mock.DEFAULT,
+                 hard_stop_tick=mock.DEFAULT, auto_continue_tick=mock.DEFAULT)
+
+    def tick(self, reap):
+        with mock.patch.object(serve.board, "projects", return_value={}), \
+                mock.patch.object(serve, "render_reap_tick", **reap) as step, \
+                mock.patch.multiple(serve, **self.STEPS), \
+                mock.patch.object(serve.board, "record_cpu_sample"), mock.patch("sys.stderr", new=io.StringIO()) as err:
+            serve.watchdog_tick()
+        return step, err.getvalue()
+
+    def test_render_reap_tick_calls_reap(self):
+        with mock.patch.object(serve.render, "reap", return_value=[7, 8]) as reap:
+            self.assertEqual(serve.render_reap_tick(), [7, 8])
+        reap.assert_called_once_with()
+
+    def test_tick_runs_render_reap_once(self):
+        step, _ = self.tick({"return_value": []})
+        step.assert_called_once_with()
+
+    def test_render_reap_failure_does_not_stop_tick(self):
+        for exc in (RuntimeError("boom"), SystemExit("bye")):
+            with self.subTest(exc=exc):
+                with mock.patch.object(serve.render, "reap", side_effect=exc), \
+                        mock.patch.object(serve.board, "projects", return_value={}), \
+                        mock.patch.multiple(serve, **self.STEPS) as m, \
+                        mock.patch.object(serve.board, "record_cpu_sample"), \
+                        mock.patch("sys.stderr", new=io.StringIO()) as err:
+                    serve.watchdog_tick()
+                self.assertIn(f"watchdog: render reap: {exc}\n", err.getvalue())
+                m["hot_stop_tick"].assert_called_once_with()
+
+    def test_render_reap_logs_only_when_it_reaped(self):
+        _, err = self.tick({"return_value": [11, 12]})
+        self.assertIn("watchdog: reaped render chromes [11, 12]\n", err)
+        _, err = self.tick({"return_value": []})
+        self.assertNotIn("reaped render", err)
 
 
 class PulseLockTest(unittest.TestCase):
@@ -131,7 +174,7 @@ class PulseLockTest(unittest.TestCase):
                 mock.patch.object(serve, "publish_busy") as publish, \
                 mock.patch.multiple(serve, window_tick=mock.DEFAULT, weekly_tick=mock.DEFAULT, cooldown_chime=mock.DEFAULT,
                                     idle_cleanup=mock.DEFAULT, stop_leftovers=mock.DEFAULT, stop_two_sessions=mock.DEFAULT,
-                                    stop_same_tests=mock.DEFAULT, report_hogs=mock.DEFAULT, e2e_lock_reap=mock.DEFAULT,
+                                    stop_same_tests=mock.DEFAULT, report_hogs=mock.DEFAULT, e2e_lock_reap=mock.DEFAULT, render_reap_tick=mock.DEFAULT,
                                     write_shop_room=mock.DEFAULT, agent_links_tick=mock.DEFAULT, hot_stop_tick=mock.DEFAULT,
                                     hard_stop_tick=mock.DEFAULT, auto_continue_tick=mock.DEFAULT), \
                 mock.patch.object(serve.board, "record_cpu_sample"), mock.patch("sys.stderr", new=io.StringIO()):

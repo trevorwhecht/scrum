@@ -42,6 +42,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent.parent / "local"))  # HERE is resolved, so this is the real repo's local/
 import board  # noqa: E402
 import buildlock  # noqa: E402
+import render  # noqa: E402
 import route  # noqa: E402
 import shop  # noqa: E402
 
@@ -4336,7 +4337,7 @@ TIMED_STEPS = ("claude_migrate", "respawn_exited", "record_outcomes", "board_bus
                "main_ff_tick", "terminal_batch_tick", "e2e_full_tick", "ui_sweep_tick", "idle_claim", "sweep_parents",
                "cloud_tick", "project_notes_tick", "shop_tick", "prune_worktrees", "prod_errors_tick", "digest_retry_tick",
                "actions_alert", "idle_cleanup", "stop_leftovers", "report_hogs", "auto_continue_tick", "window_tick",
-               "weekly_tick", "e2e_lock_reap", "hot_stop_tick")  # watchdog_tick steps timed_step names when slow
+               "weekly_tick", "e2e_lock_reap", "render_reap_tick", "hot_stop_tick")  # watchdog_tick steps timed_step names when slow
 
 
 def time_steps(names=TIMED_STEPS, scope=None):
@@ -4402,7 +4403,7 @@ def watchdog_tick():
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     6. Pulse: pulse_loop runs pulse_tick on its own 60 s timer thread (job 1429, so a slow step here never delays its
        stuck_alert); this tick only publishes its busy map to PULSE_BUSY. Slow steps are named on stderr by TIMED_STEPS' wrappers.
-    Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard, then runs e2e_lock_reap,
+    Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard, then runs e2e_lock_reap and render_reap_tick (stops orphaned render Chromes),
     then write_shop_room (shop-room.json, which cmd_ready reads), written again after a shop_tick that dispatched,
     then agent_links_tick (re-runs install.sh when a scrum agent link is bad, in its own guard), then hot_stop_tick once,
     before the per-project loop (stops a running UI sweep or full E2E while board.heavy_hold gives a reason, in its own
@@ -4418,6 +4419,11 @@ def watchdog_tick():
         e2e_lock_reap(time.time())  # frees e2e.lock (dead, out-of-check, orphaned holder), stops orphaned E2E dev servers
     except Exception as e:
         print(f"watchdog: e2e lock reap: {e}", file=sys.stderr, flush=True)
+    try:
+        if (reaped := render_reap_tick()):
+            print(f"watchdog: reaped render chromes {reaped}", file=sys.stderr, flush=True)
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: render reap: {e}", file=sys.stderr, flush=True)
     try:
         write_shop_room()  # before any cmd_ready reads it this tick
     except (Exception, SystemExit) as e:
@@ -6129,6 +6135,11 @@ def e2e_dev_orphan_stop(now) -> list[int]:
     except Exception as e:
         print(f"e2e_dev_orphan_stop: {e!r}", file=sys.stderr)
     return stopped
+
+
+def render_reap_tick() -> list[int]:
+    """Stop orphaned scrum-render Chromes (render.py died) and remove their temp dirs; return the pids reaped."""
+    return render.reap()
 
 
 def e2e_lock_reap(now):
