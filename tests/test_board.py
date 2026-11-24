@@ -7884,7 +7884,14 @@ print("stub err", file=sys.stderr)
         # hold the launch, so only the hot CPU is under test.
         with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400", SCRUM_FREE_RAM="90", SCRUM_SWAP_PCT="0",
                              SCRUM_VM_PRESSURE="1"):
-            out = self.cli(job_id, "start")
+            # The CLI child scans real `ps` (hot_job's mock does not reach it): under full-suite load that scan times out
+            # (every job then reads alive) or sees another test's process line holding the id. Only the hold is under
+            # test, so the child runs with no live session, not on a ps reading that load can change.
+            shim = (f"import sys; sys.path.insert(0, {str(BOARD_PY.parent)!r}); import board; "
+                    "board.session_alive_fn = lambda skip=None: (lambda job: False); "
+                    f"sys.exit(board.main(['--dir', {str(self.root)!r}, 'spawn', {job_id!r}, 'start']))")
+            out = subprocess.run([sys.executable, "-c", shim], capture_output=True, text=True,
+                                 env={**os.environ, "CLAUDE_NOTIFIER_DISABLE": ""})
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(len(self.records()), 1)
         self.assertNotIn("queued_launch", self.job_row(job_id))
