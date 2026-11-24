@@ -1052,7 +1052,7 @@ class ContractTest(unittest.TestCase):
         text = (SKILL_DIR / "lanes" / "newjob.md").read_text()
         rule = text[text.index("Delete `jobs/$ID/e2e-stopped.json`"):]
         rule = rule[:rule.index("`B e2e-budget $ID")]
-        for phrase in ("S=$(date +%s)", "`B e2e-stopped $ID --since $S`", "stale stop", "`count` 1", "no `CHECK: FAIL`", "no **E2E triage**", "no rework and no backlog item",
+        for phrase in ("`B e2e-stopped $ID --since $S`", "stale stop", "only before the check's first E2E run", "the retry keeps it", "a fresh `S=$(date +%s)`", "`count` 1", "no `CHECK: FAIL`", "no **E2E triage**", "no rework and no backlog item",
                        "re-run the E2E command once", "`E2E stopped: <reason>`",
                        "`E2E: not run, stopped: <reason> twice`", "deletes `jobs/$ID/e2e-stopped.json` when the E2E exits 0"):
             self.assertIn(phrase, rule)
