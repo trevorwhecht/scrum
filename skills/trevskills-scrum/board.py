@@ -5407,6 +5407,9 @@ def cmd_triage_apply(root, triage_id):
                     lines[got[0]["line"]] = gone(got[0]["text"]) + f" <!-- retired: {reason} -->"
                     dropped.add(got[0]["id"])
                     report["Retired"].append(f"- {got[0]['text']} — {reason}\n")
+                    if got[0]["by"] in ("t", "back"):  # Trevor's own item: he sees the retire in manual-checks.md too
+                        manual.append(got[0]["text"])
+                        report["Manual"].append(f"- {got[0]['text']} — retired, check: {reason}\n")
                 elif kind == "manual":
                     reason = clean(e["reason"])
                     lines[got[0]["line"]] = gone(got[0]["text"]) + f" <!-- manual check: {reason} -->"

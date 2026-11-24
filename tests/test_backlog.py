@@ -297,6 +297,23 @@ class BacklogTest(unittest.TestCase):
         self.assertEqual(self.merged_line("# Backlog\n- [ ] Aa {p:5}\n- [ ] Bb {p:2}\n", ["Aa", "Bb"]),
                          "- [ ] Merged thing {p:5}")
 
+    def test_triage_retire_trevor_item_adds_manual_check(self):
+        self.triage("# Backlog\n- [ ] Watch the reel {by:t}\n- [ ] Other {by:back}\n",
+                    {"retire": [{"item": "Watch the reel", "reason": "done in 010-x"},
+                                {"item": "Other", "reason": "done in 011-y"}]})
+        res = board.cmd_triage_apply(self.root, "001")
+        self.assertEqual(res, {"merged": 0, "retired": 2, "manual": 2, "estimated": 0, "depends": 0, "skipped": 0})
+        self.assertIn("- [x] Watch the reel", self.text())
+        self.assertIn("<!-- retired: done in 010-x -->", self.text())
+        self.assertEqual((self.root / "manual-checks.md").read_text(), "# Manual checks\n- [ ] Watch the reel\n- [ ] Other\n")
+
+    def test_triage_retire_agent_item_no_manual_check(self):
+        self.triage("# Backlog\n- [ ] Agent item\n", {"retire": [{"item": "Agent item", "reason": "done in 010-x"},
+                                                               {"item": "Gone item {by:t}", "reason": "stale"}]})
+        res = board.cmd_triage_apply(self.root, "001")
+        self.assertEqual((res["retired"], res["manual"], res["skipped"]), (1, 0, 1))
+        self.assertFalse((self.root / "manual-checks.md").exists())
+
     def test_triage_merge_retire_estimate(self):
         out = self.triage(
             "# Backlog\n"

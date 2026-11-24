@@ -1100,7 +1100,7 @@ class ContractTest(unittest.TestCase):
             bash = next(l for l in text.splitlines() if "Bash is read-only, with one exception" in l)
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
-            self.assertLessEqual(len(path.read_text()), 22200, path.name)
+            self.assertLessEqual(len(path.read_text()), 22800, path.name)
         self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 30000, "newjob.md")  # +runaway E2E stop rule, job 1497; +inline ops-data rewrite, job 1475; +wrong-project move, job 1319; +load wait ask, job 1316; +job E2E budget, job 1311; +lilguy hand-off, job 1261; +fast lane Out of scope, job 1257; +debug E2E in background, Build queue, job 1250; +Build hold, job 1227; +follow-up option on resume/abort-only asks, job 1203; +digest 094 p3, job 1061; +digest 025 p1, job 1055; +shop runs take Lilguy route, job 1053; +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
@@ -1239,6 +1239,19 @@ class ContractTest(unittest.TestCase):
                     if l.startswith("- **Obsolete requests.**"))
         for phrase in ("OBSOLETE: needs Trevor — <that step>", "the main Mac"):
             self.assertIn(phrase, line, phrase)
+
+    def test_spec_writer_reads_video_transcripts(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        bullets = [l for l in text.splitlines() if "**Obsolete requests.**" in l]
+        self.assertEqual(len(bullets), 1)
+        for phrase in ("~/Developer/claude/video-transcripts", "~/.claude/scripts/video-transcript.sh",
+                       "Never write OBSOLETE because the video could not be watched"):
+            self.assertIn(phrase, bullets[0], phrase)
+
+    def test_newjob_obsolete_trevor_item_goes_to_manual(self):
+        step = next(l for l in (SKILL_DIR / "lanes" / "newjob.md").read_text().splitlines() if "**Obsolete:**" in l)
+        self.assertIn("B manual-add 'Closed unwatched, check: <rest of line> (from $ID)'", step)
+        self.assertLess(step.index("Closed unwatched"), step.index("B abort $ID"))
 
     def test_cloud_sync_needs_trevor_manual_add(self):
         cloud = (SKILL_DIR / "lanes" / "cloud.md").read_text()

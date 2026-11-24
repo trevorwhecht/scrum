@@ -23,6 +23,7 @@ Only the main Mac has these, so the main Mac's scrum never sends a job that need
 - .env.prod, prod data, /trevskills-migrate, /trevskills-datafix
 - printer, film printing
 - iMessage, Messages, Contacts
+- instagram.com, youtu.be, youtube.com, tiktok.com
 - Keychain, Homebrew, brew, PR merge
 - scrum/briefs, scroll-lab, agent draft API, AGENT_API_TOKEN
 - Blender, saas-animation, vid-img-editing, Video folder
