@@ -613,6 +613,29 @@ def wake_waiting(project, root):
         approve_job(project, root, job_id)
 
 
+def queue_ready_waiting(project, root):
+    """Job 1428: a tick holding the claim (a queued launch waits on a slot) still queues each parentless plain waiting job whose
+    depends_on are all done: stage -> spec, play_queued = its last blocker's updatedAt, queued_launch start, never manual, so
+    play_queue_tick's order decides and every start gate holds. Cool-down, finish_first, heavy_cap and `wake` jobs stay waiting.
+    Returns the queued ids."""
+    if not any(map(board.parked_waiting, board.read_board(root)["jobs"])) or board.machine_ok(root, claim=True) \
+            or board.finish_first(root):
+        return []
+    queued = []
+    with board.locked_board(root) as b:
+        by_id = {j["id"]: j for j in b["jobs"]}
+        for j in filter(board.parked_waiting, b["jobs"]):
+            deps = [by_id.get(d) for d in j["depends_on"]]
+            if j.get("wake") or any(d is None or d["stage"] != "done" for d in deps) or board.heavy_cap_reason(root, j):
+                continue
+            j.update(stage="spec", reason=None, updatedAt=board.now(), started_by="wake",
+                     play_queued=max(d.get("updatedAt") or board.now() for d in deps),
+                     queued_launch={"action": "start", "prompt": f"/trevskills-scrum start {j['id']}", "stage": "spec"})
+            j.pop("play_queued_manual", None)
+            queued.append(j["id"])
+    return queued
+
+
 def resume_job(project, root, job, jobs, manual=False, note=None):
     """Restart a watchdog-flagged or paused job (the Resume and Play buttons, and the auto-resume sweep). Play on a
     paused parent resumes its paused children that resume_refusal lets through and starts whatever is ready instead. A
@@ -755,7 +778,7 @@ def play_queue_tick(project, root, jobs) -> bool:
     of a job tagged Runs on shop (board.stored_runs_on) is skipped and stays queued for shop_tick. True when it
     started one or one waits on a slot. While RESUME_ONLY names a queued solo holder, every other job is skipped and
     stays queued (solo_only, job 1375)."""
-    started = False
+    started = waits = False
     # cpu_held first, so the order agrees with cpu_first(): spawn holds every other start while it waits
     for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: (not cpu_held(root, j), *held_order(root, j))):
         if solo_only(root, job["id"]):
@@ -780,7 +803,8 @@ def play_queue_tick(project, root, jobs) -> bool:
                         note_hold(root, f"queued_launch:{job['id']}")
                 except (SystemExit, OSError, ValueError):
                     pass  # gone from the board meanwhile: nothing holds it
-                return True
+                waits = True  # job 1428: a heavy_cap or RAM hold on this launch never stops a later one the gates let through
+                continue
             started = True
             continue
         answered = job["stage"] == "needs-human" and job.get("options")  # a resume pick answer_job queued
@@ -798,7 +822,7 @@ def play_queue_tick(project, root, jobs) -> bool:
             return True
         unqueue(root, job)
         started = True
-    return started
+    return started or waits
 
 
 def held_work(project, jobs) -> list[dict]:
@@ -4403,6 +4427,11 @@ def watchdog_tick():
                     wake_waiting(project, root)
                 except (Exception, SystemExit) as e:
                     print(f"watchdog: {project}: wake waiting: {e}", file=sys.stderr, flush=True)
+            else:
+                try:  # job 1428: a ready blocker-done job joins the play queue instead of starving behind it
+                    queue_ready_waiting(project, root)
+                except (Exception, SystemExit) as e:
+                    print(f"watchdog: {project}: queue ready waiting: {e}", file=sys.stderr, flush=True)
             try:  # its own guard: a sweep failure must not skip the cloud poll
                 sweep_parents(project, root, jobs, alive, claim=claim)
             except (Exception, SystemExit) as e:

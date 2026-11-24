@@ -1306,9 +1306,26 @@ class ServeTest(unittest.TestCase):
     def test_play_queue_tick_ram_hold_after_refused_spawn(self):
         first = self.queued_launch_job("Refused first", 3)
         later = self.queued_launch_job("Waits behind", 2)
-        self.assertTrue(self.tick_ram([first, later])[0])
-        self.assertNotIn("ram_hold", self.stage_of(first))  # spawn ruled on it
-        self.assertEqual(self.stage_of(later)["ram_hold"], "14 sessions running, 12% RAM free")
+        self.assertTrue(self.tick_ram([first, later])[0])  # job 1428: spawn rules on each launch in turn
+        for job_id in (first, later):  # each refused launch marks the others it stops beside
+            self.assertEqual(self.stage_of(job_id)["ram_hold"], "14 sessions running, 12% RAM free")
+
+    def test_play_queue_tick_held_launch_does_not_stop_later_launch(self):
+        """Job 1428: a launch held by heavy_cap or RAM stays queued while a later queued launch the gates let through starts."""
+        first, later = self.queued_launch_job("Held by gate", 3), self.queued_launch_job("Gate lets it through", 2)
+        s, started = self.serve, []
+
+        def fake_spawn(project, root, job_id, *a, **k):
+            if job_id == first:
+                return None
+            started.append(job_id)
+            return f"runs/{job_id}.log"
+        jobs = [j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] in (first, later)]
+        with mock.patch.object(s, "running", return_value=False), mock.patch.object(s, "take_room", return_value=True), \
+                mock.patch.object(s.board, "stored_runs_on", return_value=None), \
+                mock.patch.object(s, "spawn", side_effect=fake_spawn), contextlib.redirect_stderr(io.StringIO()):
+            self.assertTrue(s.play_queue_tick("repo", self.root, jobs))
+        self.assertEqual(started, [later])
 
     def test_play_queue_tick_ram_hold_machine_wait(self):
         ids = []
@@ -9601,6 +9618,50 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual([c.args for c in spawn.call_args_list],
                          [("idle", self.root, "002-second", "start", "/trevskills-scrum start 002-second")])
         self.assertEqual((self.job("002-second")["stage"], self.job("002-second")["reason"]), ("spec", None))
+
+    def test_ready_waiting_job_joins_queue_while_queue_holds_claim(self):
+        """Job 1428: a parentless waiting job whose blocker is done is queued (play_queued = when the blocker finished,
+        queued_launch start, not manual) on a tick whose queue still waits on a slot, ahead of a job queued later."""
+        s = self.serve
+        self.queue_board({"id": "001-first", "stage": "done", "updatedAt": "2026-11-22T16:28:00+00:00"},
+                         {"id": "002-ready", "stage": "waiting", "depends_on": ["001-first"]},
+                         {"id": "003-later", "stage": "spec", "play_queued": "2026-11-22T18:06:00+00:00",
+                          "queued_launch": {"action": "start", "prompt": "/trevskills-scrum start 003-later", "stage": "spec"}})
+        with mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "finish_first", return_value=None), \
+                mock.patch.object(self.board, "heavy_cap_reason", return_value=None):
+            self.assertEqual(s.queue_ready_waiting("idle", self.root), ["002-ready"])
+        job = self.job("002-ready")
+        self.assertEqual((job["stage"], job["play_queued"], job["queued_launch"], "play_queued_manual" in job),
+                         ("spec", "2026-11-22T16:28:00+00:00",
+                          {"action": "start", "prompt": "/trevskills-scrum start 002-ready", "stage": "spec"}, False))
+        jobs = json.loads((self.root / "board.json").read_text())["jobs"]
+        order = [j["id"] for j in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: s.held_order(self.root, j))]
+        self.assertEqual(order, ["002-ready", "003-later"])
+
+    def test_ready_waiting_queue_keeps_wake_cooldown_and_open_blockers_waiting(self):
+        s = self.serve
+        self.queue_board({"id": "001-first", "stage": "done"}, {"id": "009-open", "stage": "build"},
+                         {"id": "002-wake", "stage": "waiting", "depends_on": ["001-first"], "wake": True},
+                         {"id": "003-open", "stage": "waiting", "depends_on": ["009-open"]},
+                         {"id": "004-ready", "stage": "waiting", "depends_on": ["001-first"]})
+        with mock.patch.object(self.board, "machine_ok", return_value=self.board.COOLING):
+            self.assertEqual(s.queue_ready_waiting("idle", self.root), [])
+        with mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "finish_first", return_value=None):
+            self.assertEqual(s.queue_ready_waiting("idle", self.root), ["004-ready"])
+        self.assertEqual([self.job(i)["stage"] for i in ("002-wake", "003-open", "004-ready")], ["waiting", "waiting", "spec"])
+
+    def test_watchdog_queues_ready_waiting_job_when_queue_holds_claim(self):
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-ready", "stage": "waiting", "depends_on": ["001-first"]})
+        with mock.patch.object(self.serve, "play_queue_tick", return_value=True), \
+                mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "finish_first", return_value=None), \
+                mock.patch.object(self.board, "heavy_cap_reason", return_value=None):
+            spawn, _, _ = self.tick()
+        spawn.assert_not_called()
+        self.assertTrue(self.job("002-ready").get("play_queued"))
 
     def test_wake_waiting_failure_still_sweeps_parents(self):
         self.queue_board({"id": "001-first", "stage": "done"},
