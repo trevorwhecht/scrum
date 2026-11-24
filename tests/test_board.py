@@ -8782,6 +8782,47 @@ class CloudSyncTest(unittest.TestCase):
                 self.assertEqual(self.backlog_texts(), [])
                 self.assertEqual(self.open_manual(), [])
 
+    def test_moved_comment_aborts_without_requeue(self):
+        """Job 1521: New job 3b's cloud Wrong-project abort comes home as an abort, so cloud-home files its followups."""
+        out = self.self_abort("moved to otherrepo backlog")
+        self.assertEqual(out["moved"], [{"id": self.job, "state": "ABORTED", "pr": self.URL,
+                                         "reason": "moved to otherrepo backlog", "worktree": None, "artifacts": False}])
+        job = self.get()
+        self.assertEqual((job["stage"], job["pr"], job["reason"]),
+                         ("aborted", self.URL, "moved to otherrepo backlog"))
+        self.assertEqual(self.backlog_texts(), [])
+        self.assertEqual(self.open_manual(), [])
+        self.assertIn("artifactsPending", job)
+        self.assertEqual(board.CLOUD_SELF_ABORT, ("requeue:", "obsolete:", "looks already fixed:"))
+
+    def test_moved_comment_other_shape_stays_needs_human(self):
+        for line in ("moved to Terminal batch 12", "moved to otherrepo backlog, then more"):
+            with self.subTest(line=line):
+                self.setUp()
+                labelled = self.pr(labels=[{"name": "scrum:needs-human"}])
+                comments = [{"user": self.TREV, "body": f"{line}\n<!-- scrum needs-human -->"}]
+                with self.gh([labelled], comments), \
+                        mock.patch.object(board, "cloud_worktree", return_value="/tmp/wt-1521") as wt:
+                    out = board.cmd_cloud_sync(self.root)
+                wt.assert_called_once()
+                self.assertEqual(out["moved"][0]["state"], "NEEDS-HUMAN")
+                job = self.get()
+                self.assertEqual((job["stage"], job["reason"], job["worktree"]), ("needs-human", line, "/tmp/wt-1521"))
+                self.assertNotIn("state=closed", [c[-1] for c in self.calls])
+
+    def test_moved_comment_rerun_leaves_job(self):
+        self.self_abort("moved to otherrepo backlog")
+        before = self.get()
+        self.calls = []
+        labelled = self.pr(labels=[{"name": "scrum:needs-human"}])
+        comments = [{"user": self.TREV, "body": "moved to otherrepo backlog\n<!-- scrum needs-human -->"}]
+        with self.gh([labelled], comments):
+            out = board.cmd_cloud_sync(self.root)
+        self.assertEqual(out["moved"], [])
+        self.assert_untouched(before)
+        self.assertEqual((before["stage"], before["reason"]), ("aborted", "moved to otherrepo backlog"))
+        self.assertNotIn("state=closed", [c[-1] for c in self.calls])
+
     TREVOR = "obsolete: needs Trevor — add a global CLAUDE.md line"
 
     def open_manual(self):

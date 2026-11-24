@@ -4900,6 +4900,20 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, tail, phrase)
         self.assertLessEqual(len(self.lane("newjob")), 30000)
 
+    def test_cloud_needs_human_reports_moved_abort(self):
+        """Job 1521: a cloud Wrong-project move reaches GitHub, and Sync turns it into an abort with no requeue."""
+        cloud = self.lane("cloud")
+        job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
+        needs = next(l for l in job.splitlines() if l.lstrip().startswith("- **Needs-human:**"))
+        self.assertIn("a `moved to <folder> backlog` abort from New job 3b", needs)
+        sync = cloud[cloud.index("3. **Sync**"):]
+        labelled = next(l for l in sync.splitlines()
+                        if l.lstrip().startswith("- PR `OPEN` with label `scrum:needs-human`"))
+        for phrase in ("a first line of exactly `moved to <folder> backlog`",
+                       "`moved to <folder> backlog` becomes `B abort $ID --reason '<line>'` with no requeue"):
+            self.assertIn(phrase, labelled, phrase)
+        self.assertIn("closes the PR", labelled[labelled.index("exactly `moved to <folder> backlog`"):])
+
     def test_skill_cloud_artifacts_come_home(self):
         cloud = self.lane("cloud")
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
