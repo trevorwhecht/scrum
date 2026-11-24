@@ -91,6 +91,7 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 **Backlog fallback.** When no agent, lane or `SKILL.md` text edit would fix an entry's cause:
 - Write `{"id": "pN", "kind": "backlog", "why": "...", "backlog": "<one line>"}` with no `target`, `old` or `new`.
 - The `backlog` line names the cause, its count, its job ids and the pipeline change in board.py, serve.py or the dashboard, with each file it changes and its test file as a backticked repo path (`skills/trevskills-scrum/board.py`, `tests/test_board.py`), never a possessive like board.py's.
+- When the change adds logic plus its tests, likely over 30 added lines, end the line with `Lane: fast.`: a line naming files otherwise starts in the lilguy lane on a 10-lines-per-file estimate and is promoted mid-job (jobs 1458 and 1460, 128 and 87 lines).
 - Skip the entry when `scrum/backlog.md` already holds an open `- [ ]` item for that cause (read it first).
 - It counts toward the at-most-8 cap.
 
