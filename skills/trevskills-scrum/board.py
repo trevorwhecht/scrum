@@ -8923,6 +8923,29 @@ def last_log_line(root, runlog):
     return next((l.strip()[:300] for l in reversed(tail.splitlines()) if l.strip()), None)
 
 
+DEAD_HOURS = 24  # job 1498: no board update this long, no live session and not held by anything: dead, whatever skipped it
+
+
+def dead_net_job(job):
+    """job 1498 (a): a WATCHED job the watchdog's skip reasons passed over that is nobody's to wait for: not paused or
+    stalled, no wait on Trevor, no queue wait (it starts itself), no shop or cloud worker holding it, no future
+    limitResetAt and no play queue holding it. Its age is the caller's test."""
+    return job.get("stage") in WATCHED and not job.get("paused") and not job.get("stalled") and not job.get("waiting") \
+        and not queue_waiting(job) and not (job.get("shop") or job.get("worker") or job.get("cloud")) \
+        and not job.get("play_queued") and not job.get("queued_launch") \
+        and not (is_num(job.get("limitResetAt")) and job["limitResetAt"] > time.time())
+
+
+def dead_wait_cause(job, by_id):
+    """job 1498 (b): why a `waiting` job can never wake (its parent is done, aborted or missing; a depends_on id is
+    aborted or missing), else None. A live or unmerged sibling is no cause."""
+    parent = job.get("parent")
+    if parent and (by_id.get(parent) or {}).get("stage") in (None, "done", "aborted"):
+        return f"its parent {parent} is {(by_id.get(parent) or {}).get('stage') or 'gone'}"
+    gone = next((d for d in job.get("depends_on") or () if (by_id.get(d) or {}).get("stage") in (None, "aborted")), None)
+    return f"{gone} was aborted or removed" if gone else None
+
+
 def cmd_watchdog(root, alive=None, exits=None, hold=None):
     """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session (for a parent,
     a live child session or its live chain lock counts as its own): it keeps
@@ -8944,6 +8967,11 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
             stale = [j for j in board["jobs"] if j.get("stage") in WATCHED and not j.get("waiting") and not queue_waiting(j)
                      and not j.get("paused") and not lilguy_in_checkout(j) and not no_pr_job(j) and not j.get("limitResetAt") and not j.get("play_queued")
                      and not j.get("stalled") and stalled_since(j, cutoff)]
+            # job 1498: a net for a job that sat DEAD_HOURS with no update under any skip reason above
+            dead_cutoff = datetime.now(timezone.utc) - timedelta(hours=DEAD_HOURS)
+            net = [j for j in board["jobs"] if j not in stale and dead_net_job(j) and stalled_since(j, dead_cutoff)]
+            net_ids = {j["id"] for j in net}
+            stale += net
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             idle_cutoff = datetime.now(timezone.utc) - timedelta(hours=IDLE_HOURS)
             for job in stale:
@@ -8956,6 +8984,8 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
                 # a parent's final review runs in its child's session (onewitharts 1091): its family counts as its own
                 kids = [j for j in board["jobs"] if j["id"] in (job.get("children") or ())]
                 if alive(job) or (kids and (chain_lock_live(root, job["id"]) or any(alive(k) for k in kids))):
+                    if job["id"] in net_ids:
+                        continue  # a live session is no dead job; the 2 h idle rule is for the jobs above
                     if not (stalled_since(job, idle_cutoff) and job_dir_idle(root, job["id"], idle_cutoff.timestamp())):
                         continue
                     live_idle = True
@@ -8972,15 +9002,28 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
                     requeued.append(job["id"])
                 else:
                     job.update(stalled=True, updatedAt=now(), reason=f"{STALL}no board update "
-                               f"for {STALL_MINUTES} min and no live session")
+                               + (f"for {DEAD_HOURS} h" if job["id"] in net_ids else f"for {STALL_MINUTES} min") + " and no live session")
                     log_stop(root, job["id"], "stall", job["reason"], auto=auto,
                              exit=(exits or {}).get(job.get("runlog")), last_log=last_log_line(root, job.get("runlog")))
                     roadmap_stall_locked(root, job)
                     flagged.append(job["id"])
+            by_id = {j["id"]: j for j in board["jobs"]}
+            lost = [(j["id"], cause) for j in board["jobs"]
+                    if j.get("stage") == "waiting" and j.get("setup") != "pending" and not j.get("paused")
+                    and stalled_since(j, dead_cutoff) and (cause := dead_wait_cause(j, by_id))]
             if not flagged and not requeued:
                 raise _Gone
     except _Gone:
         pass
+    for job_id, cause in lost:  # once per job: cmd_ask moves it out of `waiting`
+        try:
+            if find(read_board(root), job_id).get("stage") != "waiting":
+                continue  # moved on since the snapshot
+            cmd_ask(root, job_id, f"blocked: {cause}, so this job has nothing to wait for.",
+                    [f"Put it back on the backlog=abort {job_id} --requeue", f"Remove it=abort {job_id}"],
+                    recommend=("a", "Nothing can wake it, so the item goes back to be claimed again"), title="DEPENDENCY")
+        except SystemExit as e:
+            print(f"watchdog: {job_id}: {e}", file=sys.stderr)
     return flagged  # no sound: a stall is not a human stop, serve.py resumes it
 
 

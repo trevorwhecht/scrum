@@ -4899,6 +4899,8 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
         print(f"watchdog: pulse: guard: {e}", file=sys.stderr, flush=True)
         guard = None
     sessions = board.live_sessions()
+    global PULSE_SNAPSHOT
+    PULSE_SNAPSHOT = (now, projects)  # stuck_alert's idle text names the gates this pulse recorded
     try:
         stuck_alert(now, why, sessions)
     except (Exception, SystemExit) as e:
@@ -4931,6 +4933,9 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
 STUCK_ALERT_PULSES = 2  # stuck_alert: held pulses in a row with 0 sessions before it texts (about 5 minutes)
 STUCK_ALERT_CLEAR = 6  # stuck_alert: clear pulses in a row that end an episode (a one-pulse dip never texts twice)
 STUCK_ALERT_REPEAT_S = 3 * 3600  # stuck_alert: still held this long after the last text: text once more
+STUCK_IDLE_S = 15 * 60  # stuck_alert (job 1498): 0 sessions and nothing holding or running this long: text that nothing is running
+STUCK_IDLE_REPEAT_S = 24 * 3600  # stuck_alert: the idle text repeats at most once in this long
+PULSE_SNAPSHOT: tuple | None = None  # (now, projects) of the pulse_tick that is calling stuck_alert
 DEV_SERVER_RE = re.compile(r"\bnext(-server\b| dev\b)|\bvite\b|\b(npm|pnpm|yarn|bun) (run )?dev\b|webpack-dev-server")
 SYSTEM_PATHS = ("/System/", "/usr/libexec/", "/usr/sbin/", "/sbin/", "/Library/Apple/")  # stuck_process: never kill
 
@@ -4991,18 +4996,18 @@ def stuck_write(path: Path, state: dict, old: dict) -> None:
         os.replace(tmp, path)
 
 
-def stuck_mark(path: Path, now: float) -> None:
-    """Write `sent` = now to stuck-alert.json, when its episode is still live (fewer than STUCK_ALERT_CLEAR clear pulses; a send that outlived it marks nothing)."""
+def stuck_mark(path: Path, now: float, key: str = "sent") -> None:
+    """Write `sent` = now to stuck-alert.json, when its episode is still live (fewer than STUCK_ALERT_CLEAR clear pulses; a send that outlived it marks nothing). key="isent" (the idle text) is written without that check: its episode is the quiet stretch."""
     with STUCK_LOCK:
         try:
             cur = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             cur = {}
-        if isinstance(cur, dict) and board.is_num(cur.get("clear")) and cur["clear"] < STUCK_ALERT_CLEAR:
-            stuck_write(path, {**cur, "sent": now}, cur)
+        if isinstance(cur, dict) and (key == "isent" or board.is_num(cur.get("clear")) and cur["clear"] < STUCK_ALERT_CLEAR):
+            stuck_write(path, {**cur, key: now}, cur)
 
 
-def stuck_deliver(path: Path, now: float, why: str, argv: list, send=None) -> str | None:
+def stuck_deliver(path: Path, now: float, why: str, argv: list, send=None, key: str = "sent") -> str | None:
     """Run one imsg-send.sh send (STUCK_ALERT_SEND_S timeout; `send` replaces the run) and log it. Only an exit 0
     writes `sent` to stuck-alert.json (when its episode is still live: fewer than STUCK_ALERT_CLEAR clear pulses), so a timed-out or failed text is tried again
     on the next held pulse (job 1458). Returns the text on success, else None; never raises."""
@@ -5020,7 +5025,7 @@ def stuck_deliver(path: Path, now: float, why: str, argv: list, send=None) -> st
         print(f"watchdog: stuck alert: imsg-send.sh exit {result.returncode}: {last}", file=sys.stderr, flush=True)
         board.log_process("Stuck alert", "failed", reason=why, error=last, exit=result.returncode)
         return None
-    stuck_mark(path, now)
+    stuck_mark(path, now, key)
     board.log_process("Stuck alert", "sent", reason=why)
     return argv[-1]
 
@@ -5049,6 +5054,53 @@ def alert_argv(text: str) -> list | None:
     return None if alert_missing() else [str(alert_script()), alert_handle(), text]
 
 
+def stuck_idle_ok(now: float) -> bool:
+    """True when nothing explains zero sessions: cool down off, no usage hold (board.pick_account has an account and its
+    allowance is not 0) and no shop or cloud job running on any registered board. Any raise counts as not ok."""
+    try:
+        if board.cooling_down():
+            return False
+        acc, allow = board.pick_account(now, 0)
+        if acc is None or allow is not None and allow <= 0:
+            return False
+        return not any(j.get("stage") == "cloud" or j.get("shop") or j.get("worker") for r in board.projects().values()
+                       for j in board.read_board(r / "scrum")["jobs"] if j.get("stage") not in ("done", "aborted", "needs-human"))
+    except (Exception, SystemExit):
+        return False
+
+
+def stuck_idle_facts(now: float) -> tuple[int, list, list, int]:
+    """(claimable items in the auto projects, names of what waits on Trevor (needs-human jobs, then setup items), the
+    recorded gates, auto project count) read from every registered board; the gates the calling pulse recorded come from PULSE_SNAPSHOT."""
+    claim, names, autos = 0, [], 0
+    for project, repo in board.projects().items():
+        root = repo / "scrum"
+        try:
+            jobs = board.read_board(root)["jobs"]
+            if auto_continue(root) is not None:
+                autos += 1
+                claim += claimable_count(root)
+        except (Exception, SystemExit):
+            continue
+        short = lambda j: " ".join(str(j.get("title") or j.get("id")).split())[:40]
+        names += [short(j) for j in jobs if j.get("stage") == "needs-human"]
+        names += [short(j) for j in jobs if j.get("setup") == "pending" and j.get("stage") not in ("needs-human", "done", "aborted")]
+    gates = []
+    if PULSE_SNAPSHOT and PULSE_SNAPSHOT[0] == now:
+        for p in PULSE_SNAPSHOT[1].values():
+            gates += [g for g in (p.get("gates") or []) if g not in gates]
+    return claim, names, gates, autos
+
+
+def stuck_idle_text(now: float) -> str:
+    """The idle trigger's one-line text: what waits on Trevor when nothing can start, else how many items could start and
+    the gates the pulse recorded. Never starts `<word>:` (messageManager reads that as a command)."""
+    claim, names, gates, autos = stuck_idle_facts(now)
+    if claim == 0:
+        return f"Nothing is running and nothing can start: {len(names)} items wait on you" + (": " + ", ".join(names[:3]) if names else "")
+    return f"Nothing is running though {claim} items could start: {', '.join(gates) or 'no gate shown'}"
+
+
 def stuck_alert(now: float, why: str | None, sessions: int, send=None, background=None) -> str | None:
     """Text Trevor when this Mac holds every start with nothing running (job 1413). why is the first project's
     board.machine_ok(claim=False) refusal (pulse_tick; never COOLING, never a usage hold). It fires when why is set
@@ -5069,7 +5121,11 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None, backgroun
     board.log_process("Stuck alert", sent / unsent / failed, reason=why); an imsg-send.sh that exits nonzero also logs
     failed, with its last output line (stderr, else stdout, else `exit <code>`) as error and exit=<code>, prints one
     `watchdog: stuck alert:` line and returns None (job 1420). Under unittest nothing is sent or run without `send`.
-    Returns the text it sent inline, else None."""
+    Returns the text it sent inline, else None.
+    Job 1498 adds a second trigger in this function: no `why`, 0 sessions, cool down off, no usage hold and no shop or cloud job
+    running (stuck_idle_ok) for STUCK_IDLE_S in a row texts stuck_idle_text once (state keys `idle` = the stretch's start,
+    `isent` = its last text, repeated after STUCK_IDLE_REPEAT_S at most; a session clears `isent`). It never fires on a pulse where
+    the why text fires, and that text gains " Nothing is left to start either." when every auto project has 0 claimable."""
     global STUCK_SEND
     path = board.pulse_path().parent / "stuck-alert.json"
     with STUCK_LOCK:
@@ -5083,25 +5139,42 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None, backgroun
         clear = 0 if held else min((num("clear") or 0) + 1, STUCK_ALERT_CLEAR)
         sent = None if sessions > 0 or clear >= STUCK_ALERT_CLEAR else num("sent")  # the episode ended
         fire = held >= STUCK_ALERT_PULSES and (sent is None or now - sent >= STUCK_ALERT_REPEAT_S)
-        stuck_write(path, {"held": held, "clear": clear, "sent": sent}, old)
+        # job 1498: the idle trigger: 0 sessions, no `why` and nothing holding or running work, STUCK_IDLE_S in a row
+        quiet = not why and sessions == 0 and stuck_idle_ok(now)
+        idle = (num("idle") if num("idle") is not None else now) if quiet else None
+        isent = None if sessions > 0 else num("isent")
+        idle_fire = quiet and not fire and now - idle >= STUCK_IDLE_S and (isent is None or now - isent >= STUCK_IDLE_REPEAT_S)
+        state = {"held": held, "clear": clear, "sent": sent}
+        state.update({k: v for k, v in (("idle", idle), ("isent", isent)) if v is not None})
+        stuck_write(path, state, old)
         busy = STUCK_SEND is not None and STUCK_SEND.is_alive()
-    if not fire or busy or send is None and "unittest" in sys.modules:
+    if not (fire or idle_fire) or busy or send is None and "unittest" in sys.modules:
         return None
+    key, why = ("sent", why) if fire else ("isent", "idle")
     if missing := alert_missing():
-        stuck_mark(path, now)  # nothing to retry: one line per episode, not one per pulse
+        stuck_mark(path, now, key)  # nothing to retry: one line per episode, not one per pulse
         print(f"watchdog: stuck alert: no {missing}, not texted: {why}", file=sys.stderr, flush=True)
         board.log_process("Stuck alert", "unsent", reason=why, missing=missing)
         return None
-    clause = stuck_process(why)
-    argv = alert_argv(f"This Mac stopped starting scrum jobs and none are running. Cause: {why}.{' ' + clause if clause else ''}")
+    if fire:
+        clause = stuck_process(why)
+        try:
+            claim, _, _, autos = stuck_idle_facts(now)
+        except (Exception, SystemExit):
+            claim, autos = 1, 0
+        left = " Nothing is left to start either." if autos and claim == 0 else ""
+        text = f"This Mac stopped starting scrum jobs and none are running. Cause: {why}.{' ' + clause if clause else ''}{left}"
+    else:
+        text = stuck_idle_text(now)
+    argv = alert_argv(text)
     if background is None:
         background = send is None
     if not background:
-        return stuck_deliver(path, now, why, argv, send)
+        return stuck_deliver(path, now, why, argv, send, key)
     with STUCK_LOCK:
         if STUCK_SEND is not None and STUCK_SEND.is_alive():
             return None
-        STUCK_SEND = threading.Thread(target=stuck_deliver, args=(path, now, why, argv, send), daemon=True)
+        STUCK_SEND = threading.Thread(target=stuck_deliver, args=(path, now, why, argv, send, key), daemon=True)
         STUCK_SEND.start()
     return None
 

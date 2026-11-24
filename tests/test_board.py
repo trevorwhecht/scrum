@@ -6644,6 +6644,85 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.get(wt)["reason"], "stalled: no board update for 30 min and no live session")
         self.assertEqual(self.get(here)["stage"], "build")
 
+    def test_watchdog_net_flags_a_day_old_lilguy_job_that_died_in_spec(self):
+        """Job 1498, onewitharts 1510: lilguy, spec, runlog, no worktree, 24 h old, nothing alive."""
+        dead = self.aged("Dead lilguy", 25 * 60, stage="spec", lane="lilguy", runlog="runs/x.log")
+        fresh = self.aged("Fresh lilguy", 23 * 60, stage="spec", lane="lilguy")
+        for jid in (dead, fresh):
+            (self.root / "jobs" / jid).mkdir(parents=True, exist_ok=True)
+            (self.root / "jobs" / jid / "feature.md").write_text("x\n")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [dead])
+        self.assertTrue(self.get(dead)["stalled"])
+        by_hand = self.aged("Hand-run", 25 * 60, stage="spec", lane="lilguy")
+        (self.root / "jobs" / by_hand).mkdir(parents=True, exist_ok=True)
+        (self.root / "jobs" / by_hand / "feature.md").write_text("x\n")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [by_hand])
+        self.assertEqual(self.get(by_hand)["reason"], "stalled: no board update for 24 h and no live session")
+        self.assertNotIn("stalled", self.get(fresh))
+
+    def test_watchdog_net_marks_a_day_old_job_under_every_skip_reason_except_the_excused(self):
+        by_hand = self.aged("By hand", 25 * 60, stage="build", lane="lilguy")
+        ops = self.aged("Ops", 25 * 60, stage="build", lane="ops")
+        past = self.aged("Past reset", 25 * 60, stage="review", limitResetAt=1)
+        future = self.aged("Future reset", 25 * 60, stage="review", limitResetAt=4_000_000_000)
+        paused = self.aged("Paused", 25 * 60, stage="review", paused=True)
+        shop = self.aged("Shop", 25 * 60, stage="review", lane="lilguy", shop="123", worker="shopmac")
+        queued = self.aged("Queued", 25 * 60, stage="check", reason="waiting: E2E queue")
+        live = self.aged("Live", 25 * 60, stage="build", lane="lilguy")
+        got = board.cmd_watchdog(self.root, alive=lambda job: job["id"] == live)
+        self.assertEqual(sorted(got), sorted([by_hand, ops, past]))
+        for jid in (future, paused, shop, queued, live):
+            self.assertNotIn("stalled", self.get(jid), jid)
+
+    def test_watchdog_net_play_queued_job_is_held_by_the_queue(self):
+        queued = self.aged("Queued launch", 25 * 60, stage="build", play_queued=True)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertNotIn("stalled", self.get(queued))
+
+    def test_watchdog_net_asks_once_for_a_waiting_job_whose_parent_is_done(self):
+        """onewitharts 177: waiting since 10/25 under a parent that is done."""
+        parent = self.aged("Parent", 1, stage="done")
+        kid = self.aged("Kid", 25 * 60, stage="waiting", parent=parent)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        got = self.get(kid)
+        self.assertEqual((got["stage"], got["stopTitle"]), ("needs-human", "DEPENDENCY"))
+        self.assertEqual([(o["label"], o["command"]) for o in got["options"]],
+                         [("Put it back on the backlog", f"abort {kid} --requeue"), ("Remove it", f"abort {kid}")])
+        self.assertEqual(got["recommend"]["key"], "a")
+        before = self.jobs()
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertEqual(self.jobs(), before, "the second pass asks nothing")
+
+    def test_watchdog_net_asks_for_a_waiting_job_whose_dependency_is_aborted_or_missing(self):
+        gone = self.aged("Gone dep", 1, stage="aborted")
+        a = self.aged("On aborted", 25 * 60, stage="waiting", depends_on=[gone])
+        b = self.aged("On missing", 25 * 60, stage="waiting", depends_on=["999-nothing"])
+        board.cmd_watchdog(self.root, alive=lambda job: False)
+        self.assertEqual([self.get(j)["stage"] for j in (a, b)], ["needs-human", "needs-human"])
+
+    def test_watchdog_net_leaves_live_waiting_shapes_alone(self):
+        """onewitharts 1215, 1763, 1765: a live sibling unmerged, setup pending; a paused job; one updated 23 h ago."""
+        sib = self.aged("Sibling", 25 * 60, stage="build", paused=True)
+        parent = self.aged("Parent", 1, stage="running")
+        shapes = [self.aged("On sibling", 25 * 60, stage="waiting", depends_on=[sib]),
+                  self.aged("Setup", 25 * 60, stage="waiting", setup="pending", parent=parent),
+                  self.aged("Under running", 25 * 60, stage="waiting", parent=parent),
+                  self.aged("Paused", 25 * 60, stage="waiting", paused=True, parent="999-nothing"),
+                  self.aged("Recent", 23 * 60, stage="waiting", parent="999-nothing")]
+        before = self.jobs()
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertEqual(self.jobs(), before)
+        self.assertEqual(len(shapes), 5)
+
+    def test_watchdog_net_runs_ps_only_for_a_candidate(self):
+        self.aged("Fresh", 1, stage="build")
+        with mock.patch.object(board, "session_alive_fn", side_effect=AssertionError("ps")):
+            self.assertEqual(board.cmd_watchdog(self.root), [])
+        dead = self.aged("Dead", 25 * 60, stage="build")
+        with mock.patch.object(board, "session_alive_fn", return_value=lambda job: False) as fn:
+            self.assertEqual(board.cmd_watchdog(self.root), [dead])
+        fn.assert_called_once()
+
     @mock.patch.object(board, "session_alive_fn", lambda: (lambda job: True))  # the build/review siblings run
     def test_resume_blocker_fast_child_skips_unknown_file_holder(self):
         stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
