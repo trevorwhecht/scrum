@@ -6323,6 +6323,24 @@ JOB_COST_BUSY = [False]  # True while one refresh reads; a poll that finds it se
 REAL_TRANSCRIPT_TOKENS = board.transcript_tokens  # job_costs skips the real read under unittest unless a test replaced it
 
 
+def job_costs(project):
+    """{job: (tokens, usd)} for project from board.transcript_tokens over the last board.JOB_COST_DAYS days (summed by
+    board.cost_by_job), one read for every project per JOB_COST_TTL seconds. A poll never waits on the read: past the
+    TTL it starts one refresh in a daemon thread (job 1429; under unittest the caller runs it, so tests see the result)
+    and returns the last known costs ({} before the first read). Under unittest with the real reader and no
+    SCRUM_TRANSCRIPTS it reads nothing (Trevor's transcripts)."""
+    with JOB_COST_LOCK:
+        if JOB_COST_CACHE and time.monotonic() - JOB_COST_CACHE["at"] < JOB_COST_TTL or JOB_COST_BUSY[0]:
+            return JOB_COST_CACHE.get("costs", {}).get(project, {})
+        JOB_COST_BUSY[0] = True
+    if "unittest" in sys.modules:
+        refresh_job_costs()
+    else:
+        threading.Thread(target=refresh_job_costs, daemon=True).start()
+    with JOB_COST_LOCK:
+        return JOB_COST_CACHE.get("costs", {}).get(project, {})
+
+
 def refresh_job_costs():
     """One transcript read (no lock held), then store it. A failed read logs to stderr and keeps the last known costs
     (no costs when there are none); either way `at` moves on, so a failing read is not retried every poll."""
@@ -6340,24 +6358,6 @@ def refresh_job_costs():
     finally:
         with JOB_COST_LOCK:
             JOB_COST_BUSY[0] = False
-
-
-def job_costs(project):
-    """{job: (tokens, usd)} for project from board.transcript_tokens over the last board.JOB_COST_DAYS days (summed by
-    board.cost_by_job), one read for every project per JOB_COST_TTL seconds. A poll never waits on the read: past the
-    TTL it starts one refresh in a daemon thread (job 1429; under unittest the caller runs it, so tests see the result)
-    and returns the last known costs ({} before the first read). Under unittest with the real reader and no
-    SCRUM_TRANSCRIPTS it reads nothing (Trevor's transcripts)."""
-    with JOB_COST_LOCK:
-        if JOB_COST_CACHE and time.monotonic() - JOB_COST_CACHE["at"] < JOB_COST_TTL or JOB_COST_BUSY[0]:
-            return JOB_COST_CACHE.get("costs", {}).get(project, {})
-        JOB_COST_BUSY[0] = True
-    if "unittest" in sys.modules:
-        refresh_job_costs()
-    else:
-        threading.Thread(target=refresh_job_costs, daemon=True).start()
-    with JOB_COST_LOCK:
-        return JOB_COST_CACHE.get("costs", {}).get(project, {})
 
 
 PREVIEW_TYPES = {".mp4": ("video", "video/mp4"), ".m4v": ("video", "video/mp4"), ".mov": ("video", "video/quicktime"),

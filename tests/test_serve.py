@@ -10952,6 +10952,12 @@ class WatchdogIdleClaimableTest(unittest.TestCase):
         return [c.args[2:4] for c in sp.call_args_list]
 
     def gates(self):
+        s, b = self.serve, self.board  # job 1429: pulse_tick runs on pulse_loop's timer, so call it after the tick
+        with mock.patch.object(b, "projects", return_value={"app": self.repo}), \
+                mock.patch.object(b, "machine_ok", return_value=None), \
+                mock.patch.object(b, "pick_account", return_value=("main", None)), \
+                mock.patch("sys.stderr", new=io.StringIO()):
+            s.pulse_tick({})
         line = json.loads(self.pulse.read_text().splitlines()[-1])
         return line["projects"]["app"]["gates"]
 
@@ -14956,6 +14962,8 @@ class PulseTest(unittest.TestCase):
                 mock.patch.object(s, "actions_alert"), mock.patch.object(s.board, "record_cpu_sample"), \
                 mock.patch("sys.stderr", new=io.StringIO()):
             s.watchdog_tick()
+            with mock.patch.object(s.time, "sleep", side_effect=StopIteration), self.assertRaises(StopIteration):
+                s.pulse_loop()  # job 1429: the pulse runs on its own timer, not inside the tick
         (line,) = self.lines()  # one watchdog tick, one line
         self.assertEqual(sorted(line["projects"]), ["app", "lib"])
 
@@ -15108,6 +15116,8 @@ class PulseTest(unittest.TestCase):
                 mock.patch.object(s, "weekly_tick") as weekly, mock.patch.object(s, "cooldown_chime") as chime, \
                 mock.patch("sys.stderr", new=io.StringIO()) as err:
             s.watchdog_tick()
+            with mock.patch.object(s.time, "sleep", side_effect=StopIteration), self.assertRaises(StopIteration):
+                s.pulse_loop()  # a failing pulse is logged by its own loop and never reaches the tick
         self.assertIn("watchdog: pulse: ", err.getvalue())
         weekly.assert_called_once()
         chime.assert_called_once()
