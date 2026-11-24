@@ -4925,58 +4925,38 @@ def stuck_process(why: str) -> str:
     return f"{lead}, {keep}." if keep else f"{lead}. Fix: kill {pid}"
 
 
-def stuck_alert(now: float, why: str | None, sessions: int, send=None) -> str | None:
-    """Text Trevor when this Mac holds every start with nothing running (job 1413). why is the first project's
-    board.machine_ok(claim=False) refusal (pulse_tick; never COOLING, never a usage hold). It fires when why is set
-    and sessions is 0 on STUCK_ALERT_PULSES pulses in a row, once an episode: a pulse with sessions > 0, or
-    STUCK_ALERT_CLEAR clear pulses in a row, ends it, and a hold still on STUCK_ALERT_REPEAT_S after the last text texts
-    once more. The state {"held", "clear", "sent"} (pulse counts in a row, capped at STUCK_ALERT_PULSES and
-    STUCK_ALERT_CLEAR; the last text's time) lives in stuck-alert.json beside pulse.log, so a reload neither repeats
-    nor forgets; an unreadable file is no state. It is written (tmp + os.replace) only when it changed (so a long hold
-    or a quiet day writes nothing), before any send. The one-line text starts `This Mac stopped
-    starting scrum jobs` (no `<word>:` before it: messageManager reads `<project>: <text>` self-texts as commands),
-    names why, then stuck_process's clause (its one ps runs only on the pulse that fires), and goes to the first line
-    of alert-to.txt (beside pulse.log) through ~/.claude/scripts/imsg-send.sh by argv, 30 s timeout, check=False. A
-    missing or empty alert-to.txt, or a missing script, sends nothing and prints one `watchdog: stuck alert:` line, as
-    a send that raises does. Each fire logs board.log_process("Stuck alert", sent / unsent / failed, reason=why); an
-    imsg-send.sh that exits nonzero also logs failed, with its last output line (stderr, else stdout, else `exit <code>`)
-    as error and exit=<code>, prints one `watchdog: stuck alert:` line and returns None (job 1420). send
-    (tests) replaces the run; under unittest nothing is sent or run without it. Returns the text it sent, else None."""
-    path = board.pulse_path().parent / "stuck-alert.json"
-    try:
-        old = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        old = {}  # unreadable: no state
-    old = old if isinstance(old, dict) else {}
-    num = lambda k: old[k] if board.is_num(old.get(k)) else None
-    held = min((num("held") or 0) + 1, STUCK_ALERT_PULSES) if why and why != board.COOLING and sessions == 0 else 0
-    clear = 0 if held else min((num("clear") or 0) + 1, STUCK_ALERT_CLEAR)
-    sent = None if sessions > 0 or clear >= STUCK_ALERT_CLEAR else num("sent")  # the episode ended
-    fire = held >= STUCK_ALERT_PULSES and (sent is None or now - sent >= STUCK_ALERT_REPEAT_S)
-    state = {"held": held, "clear": clear, "sent": now if fire else sent}
+STUCK_ALERT_SEND_S = 120  # stuck_alert: imsg-send.sh timeout (job 1458: 30 s timed out 3 of 3 under memory pressure)
+STUCK_LOCK = threading.Lock()  # stuck_alert: guards stuck-alert.json's read-modify-write and STUCK_SEND
+STUCK_SEND: threading.Thread | None = None  # the one send in flight, else None or a finished thread
+
+
+def stuck_write(path: Path, state: dict, old: dict) -> None:
+    """Write stuck-alert.json (tmp + os.replace) only when state differs from old. The caller holds STUCK_LOCK."""
     if state != old:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name("stuck-alert.json.tmp")
         tmp.write_text(json.dumps(state))
         os.replace(tmp, path)
-    if not fire or send is None and "unittest" in sys.modules:
-        return None
+
+
+def stuck_mark(path: Path, now: float) -> None:
+    """Write `sent` = now to stuck-alert.json, when its episode is still held (a send that outlived it marks nothing)."""
+    with STUCK_LOCK:
+        try:
+            cur = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cur = {}
+        if isinstance(cur, dict) and board.is_num(cur.get("held")) and cur["held"] > 0:
+            stuck_write(path, {**cur, "sent": now}, cur)
+
+
+def stuck_deliver(path: Path, now: float, why: str, argv: list, send=None) -> str | None:
+    """Run one imsg-send.sh send (STUCK_ALERT_SEND_S timeout; `send` replaces the run) and log it. Only an exit 0
+    writes `sent` to stuck-alert.json (when its episode is still held), so a timed-out or failed text is tried again
+    on the next held pulse (job 1458). Returns the text on success, else None; never raises."""
     try:
-        handle = path.with_name("alert-to.txt").read_text(encoding="utf-8").splitlines()[0].strip()
-    except (OSError, IndexError):
-        handle = ""
-    script = Path.home() / ".claude" / "scripts" / "imsg-send.sh"
-    missing = "alert-to.txt" if not handle else "imsg-send.sh" if not script.is_file() else None
-    if missing:
-        print(f"watchdog: stuck alert: no {missing}, not texted: {why}", file=sys.stderr, flush=True)
-        board.log_process("Stuck alert", "unsent", reason=why, missing=missing)
-        return None
-    clause = stuck_process(why)
-    text = f"This Mac stopped starting scrum jobs and none are running. Cause: {why}.{' ' + clause if clause else ''}"
-    try:
-        argv = [str(script), handle, text]
         result = send(argv) if send else subprocess.run(argv, capture_output=True, text=True, errors="replace",
-                                                        timeout=30, check=False)
+                                                        timeout=STUCK_ALERT_SEND_S, check=False)
     except (OSError, subprocess.SubprocessError) as e:
         print(f"watchdog: stuck alert: {e}", file=sys.stderr, flush=True)
         board.log_process("Stuck alert", "failed", reason=why, error=str(e))
@@ -4988,8 +4968,73 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None) -> str | 
         print(f"watchdog: stuck alert: imsg-send.sh exit {result.returncode}: {last}", file=sys.stderr, flush=True)
         board.log_process("Stuck alert", "failed", reason=why, error=last, exit=result.returncode)
         return None
+    stuck_mark(path, now)
     board.log_process("Stuck alert", "sent", reason=why)
-    return text
+    return argv[-1]
+
+
+def stuck_alert(now: float, why: str | None, sessions: int, send=None, background=None) -> str | None:
+    """Text Trevor when this Mac holds every start with nothing running (job 1413). why is the first project's
+    board.machine_ok(claim=False) refusal (pulse_tick; never COOLING, never a usage hold). It fires when why is set
+    and sessions is 0 on STUCK_ALERT_PULSES pulses in a row, once an episode: a pulse with sessions > 0, or
+    STUCK_ALERT_CLEAR clear pulses in a row, ends it, and a hold still on STUCK_ALERT_REPEAT_S after the last text texts
+    once more. The state {"held", "clear", "sent"} (pulse counts in a row, capped at STUCK_ALERT_PULSES and
+    STUCK_ALERT_CLEAR; the last text's time) lives in stuck-alert.json beside pulse.log, so a reload neither repeats
+    nor forgets; an unreadable file is no state. It is written (tmp + os.replace, under STUCK_LOCK) only when it
+    changed (so a long hold or a quiet day writes nothing). `sent` is written only after a send exits 0 (stuck_deliver),
+    so a timed-out or failed text fires again on the next held pulse (job 1458). The one-line text starts `This Mac
+    stopped starting scrum jobs` (no `<word>:` before it: messageManager reads `<project>: <text>` self-texts as
+    commands), names why, then stuck_process's clause (its one ps runs only on the pulse that fires), and goes to the
+    first line of alert-to.txt (beside pulse.log) through ~/.claude/scripts/imsg-send.sh by argv, with a
+    STUCK_ALERT_SEND_S timeout, check=False. The send runs on a background thread, one in flight at a time (a pulse
+    that fires while one runs does nothing), so its wait never blocks a pulse and returns None; with `send` (tests) it
+    runs inline and returns the text unless background is True. A missing or empty alert-to.txt, or a missing script,
+    sends nothing, writes `sent` (nothing to retry) and prints one `watchdog: stuck alert:` line, as a send that raises does. Each send logs
+    board.log_process("Stuck alert", sent / unsent / failed, reason=why); an imsg-send.sh that exits nonzero also logs
+    failed, with its last output line (stderr, else stdout, else `exit <code>`) as error and exit=<code>, prints one
+    `watchdog: stuck alert:` line and returns None (job 1420). Under unittest nothing is sent or run without `send`.
+    Returns the text it sent inline, else None."""
+    global STUCK_SEND
+    path = board.pulse_path().parent / "stuck-alert.json"
+    with STUCK_LOCK:
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            old = {}  # unreadable: no state
+        old = old if isinstance(old, dict) else {}
+        num = lambda k: old[k] if board.is_num(old.get(k)) else None
+        held = min((num("held") or 0) + 1, STUCK_ALERT_PULSES) if why and why != board.COOLING and sessions == 0 else 0
+        clear = 0 if held else min((num("clear") or 0) + 1, STUCK_ALERT_CLEAR)
+        sent = None if sessions > 0 or clear >= STUCK_ALERT_CLEAR else num("sent")  # the episode ended
+        fire = held >= STUCK_ALERT_PULSES and (sent is None or now - sent >= STUCK_ALERT_REPEAT_S)
+        stuck_write(path, {"held": held, "clear": clear, "sent": sent}, old)
+        busy = STUCK_SEND is not None and STUCK_SEND.is_alive()
+    if not fire or busy or send is None and "unittest" in sys.modules:
+        return None
+    try:
+        handle = path.with_name("alert-to.txt").read_text(encoding="utf-8").splitlines()[0].strip()
+    except (OSError, IndexError):
+        handle = ""
+    script = Path.home() / ".claude" / "scripts" / "imsg-send.sh"
+    missing = "alert-to.txt" if not handle else "imsg-send.sh" if not script.is_file() else None
+    if missing:
+        stuck_mark(path, now)  # nothing to retry: one line per episode, not one per pulse
+        print(f"watchdog: stuck alert: no {missing}, not texted: {why}", file=sys.stderr, flush=True)
+        board.log_process("Stuck alert", "unsent", reason=why, missing=missing)
+        return None
+    clause = stuck_process(why)
+    text = f"This Mac stopped starting scrum jobs and none are running. Cause: {why}.{' ' + clause if clause else ''}"
+    argv = [str(script), handle, text]
+    if background is None:
+        background = send is None
+    if not background:
+        return stuck_deliver(path, now, why, argv, send)
+    with STUCK_LOCK:
+        if STUCK_SEND is not None and STUCK_SEND.is_alive():
+            return None
+        STUCK_SEND = threading.Thread(target=stuck_deliver, args=(path, now, why, argv, send), daemon=True)
+        STUCK_SEND.start()
+    return None
 
 
 COOLDOWN_CHIMED = False  # ponytail: in memory, so a serve.py restart during an idle cool-down may chime once more
