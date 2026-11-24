@@ -62,6 +62,54 @@ class AgentModelClampTest(unittest.TestCase):
     def test_builder_on_opus_is_untouched(self):
         self.assert_untouched(self.event("scrum-builder", "opus"))
 
+    # Job 1438: a model-less builder call follows its job's Model decision.
+    def job(self, feature="Do a thing\n\n## Goal\nx\n", spec=None, log=None):
+        d = self.home / "jobs" / "1"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "feature.md").write_text(feature)
+        if spec is not None:
+            (d / "spec.md").write_text(spec)
+        if log is not None:
+            (d / "jev.log").write_text(log)
+        return d
+
+    def builder(self, d):
+        stdin = json.dumps({"tool_name": "Agent", "tool_input": {
+            "subagent_type": "scrum-builder", "description": "Build", "prompt": f"JOB_DIR={d}\nBuild it."}})
+        out = self.run_hook(stdin)
+        self.assertEqual((out.returncode, out.stderr), (0, ""))
+        return json.loads(out.stdout)["hookSpecificOutput"]["updatedInput"].get("model") if out.stdout else None
+
+    def test_builder_sonnet_when_jev_log_last_model_line_says_sonnet(self):
+        d = self.job(log="t\tmodel\tq\traw\topus\t1\nt\tspec-model\tq\traw\topus\t1\nt\tmodel\tq\traw\tsonnet\t1\n")
+        self.assertEqual(self.builder(d), "sonnet")
+
+    def test_builder_opus_when_last_model_line_says_opus_even_if_complex_no(self):
+        d = self.job(feature="Complex: no\nx\n", log="t\tmodel\tq\traw\topus\t1\n")
+        self.assertIsNone(self.builder(d))
+
+    def test_builder_sonnet_from_complex_no_header_and_logs_it(self):
+        d = self.job(feature="Complex: no\nx\n## Goal\n")
+        self.assertEqual(self.builder(d), "sonnet")
+        fields = (d / "jev.log").read_text().splitlines()[-1].split("\t")
+        self.assertEqual((fields[1], fields[4]), ("model", "sonnet"))
+
+    def test_builder_complex_no_from_spec_when_feature_has_no_header(self):
+        self.assertEqual(self.builder(self.job(spec="Complex: no\n## AC\n")), "sonnet")
+
+    def test_builder_untouched_without_no_header_or_with_yes(self):
+        for feature in ("Plain\n## Goal\n", "Complex: yes\n## Goal\n"):
+            self.assertIsNone(self.builder(self.job(feature=feature)))
+
+    def test_builder_with_model_or_bad_job_dir_is_untouched(self):
+        d = self.job(feature="Complex: no\n")
+        stdin = json.dumps({"tool_name": "Agent", "tool_input": {
+            "subagent_type": "scrum-builder", "model": "opus", "prompt": f"JOB_DIR={d}"}})
+        self.assert_untouched(stdin)
+        for prompt in ("no job dir here", "JOB_DIR=/nonexistent/zzz"):
+            self.assert_untouched(json.dumps({"tool_name": "Agent", "tool_input": {
+                "subagent_type": "scrum-builder", "prompt": prompt}}))
+
     def test_non_scrum_agent_is_untouched(self):
         self.assert_untouched(self.event("general-purpose", "opus"))
 
