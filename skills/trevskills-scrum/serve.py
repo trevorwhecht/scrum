@@ -4534,6 +4534,7 @@ def watchdog_tick():
        tick, with shop_tick (one held job to the shop Mac) between the last two in its own guard, and actions_alert
        refreshes the ACTIONS_ALERT cache once every ACTIONS_ALERT_EVERY seconds per project.
        Before it, prod_errors_tick sweeps an opted-in project's Vercel production errors into its backlog once a day.
+    Then live_check_tick runs at most one due `## Live checks` command across every project (job 1496).
     Then idle_cleanup stops leaked dev servers of idle projects and quits Docker Desktop once its projects idle 10 min.
     Then stop_leftovers stops claude sessions still running a test, server or build after their job family finished.
     Then stop_two_sessions keeps one owner when two claude sessions work one job and stops the rest (asks when unclear).
@@ -4701,6 +4702,10 @@ def watchdog_tick():
                 print(f"watchdog: {project}: actions alert: {e}", file=sys.stderr, flush=True)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
+    try:  # its own guard, after the per-project loop: one due `## Live checks` command across every project
+        live_check_tick(seen)
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: live checks: {e}", file=sys.stderr, flush=True)
     try:
         idle_cleanup(busy)
     except (Exception, SystemExit) as e:
@@ -5016,6 +5021,30 @@ def stuck_deliver(path: Path, now: float, why: str, argv: list, send=None) -> st
     return argv[-1]
 
 
+def alert_script() -> Path:
+    """~/.claude/scripts/imsg-send.sh, the sender stuck_alert and live_check_fail text Trevor through (HOME read per call)."""
+    return Path.home() / ".claude" / "scripts" / "imsg-send.sh"
+
+
+def alert_handle() -> str:
+    """The first line of alert-to.txt beside pulse.log, stripped; "" when the file is missing or empty."""
+    try:
+        return board.pulse_path().with_name("alert-to.txt").read_text(encoding="utf-8").splitlines()[0].strip()
+    except (OSError, IndexError):
+        return ""
+
+
+def alert_missing() -> str | None:
+    """What a text to Trevor lacks: "alert-to.txt" (no handle), "imsg-send.sh" (no ~/.claude/scripts sender), else None."""
+    return "alert-to.txt" if not alert_handle() else None if alert_script().is_file() else "imsg-send.sh"
+
+
+def alert_argv(text: str) -> list | None:
+    """The imsg-send.sh argv that texts text to alert-to.txt's handle (stuck_alert, live_check_fail), or None when
+    alert_missing names a missing piece. text never starts `<word>: `: messageManager reads those self-texts as commands."""
+    return None if alert_missing() else [str(alert_script()), alert_handle(), text]
+
+
 def stuck_alert(now: float, why: str | None, sessions: int, send=None, background=None) -> str | None:
     """Text Trevor when this Mac holds every start with nothing running (job 1413). why is the first project's
     board.machine_ok(claim=False) refusal (pulse_tick; never COOLING, never a usage hold). It fires when why is set
@@ -5054,20 +5083,13 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None, backgroun
         busy = STUCK_SEND is not None and STUCK_SEND.is_alive()
     if not fire or busy or send is None and "unittest" in sys.modules:
         return None
-    try:
-        handle = path.with_name("alert-to.txt").read_text(encoding="utf-8").splitlines()[0].strip()
-    except (OSError, IndexError):
-        handle = ""
-    script = Path.home() / ".claude" / "scripts" / "imsg-send.sh"
-    missing = "alert-to.txt" if not handle else "imsg-send.sh" if not script.is_file() else None
-    if missing:
+    if missing := alert_missing():
         stuck_mark(path, now)  # nothing to retry: one line per episode, not one per pulse
         print(f"watchdog: stuck alert: no {missing}, not texted: {why}", file=sys.stderr, flush=True)
         board.log_process("Stuck alert", "unsent", reason=why, missing=missing)
         return None
     clause = stuck_process(why)
-    text = f"This Mac stopped starting scrum jobs and none are running. Cause: {why}.{' ' + clause if clause else ''}"
-    argv = [str(script), handle, text]
+    argv = alert_argv(f"This Mac stopped starting scrum jobs and none are running. Cause: {why}.{' ' + clause if clause else ''}")
     if background is None:
         background = send is None
     if not background:
@@ -5078,6 +5100,186 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None, backgroun
         STUCK_SEND = threading.Thread(target=stuck_deliver, args=(path, now, why, argv, send), daemon=True)
         STUCK_SEND.start()
     return None
+
+
+# --- live_check_tick: the `## Live checks` commands board.py live-record stored at Mark done (jobs/<id>/live-checks.json)
+LIVE_CHECK_EVERY_S = 3600  # a pending check runs again at most once an hour
+LIVE_CHECK_TIMEOUT_S = 60  # a run is killed (its whole process group) after this long and counts as failed
+LIVE_CHECK_NOT_YET = 75  # exit code a check gives while its window has not finished: it stays pending
+LIVE_CHECK_TIMED_OUT = -1  # live_check_run's code for a run it killed at the timeout
+LIVE_CHECK_TAIL = 20  # output lines kept per run
+
+
+def live_check_run(repo: Path, argv: list, since: int) -> tuple[int, str]:
+    """Run argv from repo as `nice -n 19 <argv>` in its own session, env LIVE_CHECK_SINCE=<since>, stdout and stderr
+    merged. Returns (exit code, output). At LIVE_CHECK_TIMEOUT_S the whole process group is killed and the code is
+    LIVE_CHECK_TIMED_OUT, the output ending `timed out after <n> s`; a start that fails returns (127, the error)."""
+    env = {**os.environ, "LIVE_CHECK_SINCE": str(int(since))}
+    try:
+        proc = subprocess.Popen(["nice", "-n", "19", *argv], cwd=str(repo), env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True, errors="replace",
+                                start_new_session=True)
+    except OSError as e:
+        return 127, str(e)
+    try:
+        out, _ = proc.communicate(timeout=LIVE_CHECK_TIMEOUT_S)
+        return proc.returncode, out or ""
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass  # already gone
+        try:
+            out, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            out = ""
+        return LIVE_CHECK_TIMED_OUT, (out or "") + f"\ntimed out after {LIVE_CHECK_TIMEOUT_S} s\n"
+
+
+def live_checks_read(root: Path, job_id: str) -> list | None:
+    """jobs/<id>/live-checks.json as a list, or None when it is missing or unreadable."""
+    try:
+        data = json.loads((root / "jobs" / job_id / "live-checks.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, list) else None
+
+
+def live_unfiled(entry: dict) -> bool:
+    """A failed live-checks.json entry that live_check_fail has not yet filed or texted."""
+    return entry.get("state") == "failed" and not entry.get("filed") and not entry.get("texted")
+
+
+def live_check_update(root: Path, job_id: str, index: int, command: str, change) -> dict | None:
+    """Under board.locked_board(root): re-read live-checks.json, apply change(entry) to entry `index` only when it
+    still holds command, write the file (tmp + os.replace) and set the job's `liveCheck` (board.live_state), and its
+    `liveCheckUnfiled` while any failed entry is neither filed nor texted (live_unfiled). Returns the updated entry, or
+    None when the file or entry is gone."""
+    with board.locked_board(root) as b:
+        checks = live_checks_read(root, job_id)
+        if not checks or index >= len(checks) or not isinstance(checks[index], dict) \
+                or checks[index].get("command") != command:
+            return None
+        change(checks[index])
+        path = root / "jobs" / job_id / "live-checks.json"
+        tmp = path.with_name("live-checks.json.tmp")
+        tmp.write_text(json.dumps(checks, indent=1) + "\n")
+        os.replace(tmp, path)
+        job = next((j for j in b["jobs"] if j.get("id") == job_id), None)
+        if job is not None:
+            job["liveCheck"] = board.live_state(checks)
+            if any(live_unfiled(c) for c in checks if isinstance(c, dict)):
+                job["liveCheckUnfiled"] = True  # live_check_tick files it on a later tick if live_check_fail failed
+            else:
+                job.pop("liveCheckUnfiled", None)
+        return checks[index]
+
+
+def live_check_text(job_id: str, pr, entry: dict) -> str:
+    """The `Live check failed: ` backlog item for a failed entry, within board.ITEM_MAX: when it is longer, the last
+    output is cut at a ` / ` and marked `… more in live-checks.json`, never cut silently."""
+    runs = entry.get("runs") or []
+    why = entry.get("reason") or (f"exit {runs[-1].get('exit')}" if runs else "failed")
+    head = f"Live check failed: {job_id} {f'(PR #{pr})' if pr else '(no PR)'}: {entry.get('proves')}; " \
+           f"command {entry.get('command')}; {why}; last output: "
+    tail, end = " / ".join(runs[-1].get("tail") or []) if runs else "", "; Lane: debug"
+    if len(head + tail + end) > board.ITEM_MAX:
+        more = " … more in live-checks.json"
+        tail = tail[:board.ITEM_MAX - len(head + end + more)].rsplit(" / ", 1)[0] + more
+    return head + (tail or "none") + end
+
+
+def live_check_fail(project: str, root: Path, job: dict, index: int, entry: dict, now: float, send=None) -> None:
+    """A check just became failed: file one debug backlog item through board.cmd_backlog_add (unless_open on
+    `Live check failed: <id> `) and store `filed`; when the job's own feature.md holds `Live check failed: ` (it came
+    from an earlier failed live check) file nothing and text Trevor once through alert_argv instead, then store
+    `texted`. An entry with `filed` or `texted` set does nothing. Under unittest nothing is sent without `send`."""
+    if entry.get("filed") or entry.get("texted"):
+        return
+    job_id = str(job.get("id"))
+    try:
+        chained = "Live check failed: " in (root / "jobs" / job_id / "feature.md").read_text(encoding="utf-8",
+                                                                                              errors="replace")
+    except OSError:
+        chained = False
+    if chained:
+        argv = alert_argv(f"Live check failed again after a fix: {project} {job_id}: {entry.get('proves')}")
+        if argv is None:
+            print(f"watchdog: live check: no {alert_missing()}, not texted: {job_id}", file=sys.stderr, flush=True)
+        elif send is not None:
+            send(argv)
+        elif "unittest" not in sys.modules:
+            threading.Thread(target=subprocess.run, args=(argv,), daemon=True,
+                             kwargs={"capture_output": True, "timeout": STUCK_ALERT_SEND_S, "check": False}).start()
+        live_check_update(root, job_id, index, entry.get("command"), lambda e: e.update(texted=int(now)))
+        board.log_process("Live checks", "texted" if argv else "unsent", job=job_id)
+        return
+    text = live_check_text(job_id, job.get("pr"), entry)
+    board.cmd_backlog_add(root, [text], unless_open=f"Live check failed: {job_id} ")
+    live_check_update(root, job_id, index, entry.get("command"), lambda e: e.update(filed=text))
+    board.log_process("Live checks", "filed", job=job_id)
+
+
+def live_check_tick(seen, now=None, run=None, send=None) -> str | None:
+    """One watchdog pass over `seen` (watchdog_tick's (project, repo, root, jobs, flagged) list). Only jobs whose
+    board `liveCheck` is "waiting" are looked at, and only their live-checks.json is read, so an idle board opens no
+    job folder. A pending check past `by` becomes failed `never happened` and is never run. Of the due checks (now >=
+    `from`, last run LIVE_CHECK_EVERY_S or more ago) the first runs, one per tick across every project, and none while
+    board.heavy_hold gives a reason (asked only when one is due). A job with `liveCheckUnfiled` is read too, and each
+    failed entry it holds with no `filed` or `texted` goes to live_check_fail again (a filing that raised is retried). run (live_check_run when None) gives (code, output):
+    0 passed, LIVE_CHECK_NOT_YET stays pending, LIVE_CHECK_TIMED_OUT failed `timed out after <n> s`, any other failed.
+    The run {at, exit, tail} is appended under the board lock (live_check_update); each new failure goes to
+    live_check_fail. Returns the job id it ran, else None."""
+    now = time.time() if now is None else now
+    run = run or live_check_run
+    due, failed = None, []
+    for project, repo, root, jobs, _flagged in seen:
+        for job in jobs:
+            if job.get("liveCheck") != "waiting" and not job.get("liveCheckUnfiled"):
+                continue
+            job_id = str(job.get("id"))
+            for i, c in enumerate(live_checks_read(root, job_id) or []):
+                if isinstance(c, dict) and live_unfiled(c):
+                    failed.append((project, root, job, i, c))  # an earlier tick's filing raised: try again
+                    continue
+                if not isinstance(c, dict) or c.get("state") != "pending" or not board.is_num(c.get("by")):
+                    continue
+                if now > c["by"]:
+                    e = live_check_update(root, job_id, i, c.get("command"),
+                                          lambda e: e.update(state="failed", reason="never happened"))
+                    if e:
+                        failed.append((project, root, job, i, e))
+                    continue
+                ats = [r["at"] for r in c.get("runs") or [] if isinstance(r, dict) and board.is_num(r.get("at"))]
+                if due is None and board.is_num(c.get("from")) and now >= c["from"] \
+                        and (not ats or now - max(ats) >= LIVE_CHECK_EVERY_S):
+                    due = (project, repo, root, job, i, c)
+    ran = None
+    if due and not (hold := board.heavy_hold()):
+        project, repo, root, job, i, c = due
+        argv = c["command"].split(" ")
+        code, out = run(repo, argv, c.get("done_at") or 0)
+        tail = [ln for ln in (out or "").splitlines() if ln.strip()][-LIVE_CHECK_TAIL:]
+        state = "passed" if code == 0 else "pending" if code == LIVE_CHECK_NOT_YET else "failed"
+
+        def change(e):
+            e.setdefault("runs", []).append({"at": int(now), "exit": code, "tail": tail})
+            e["state"] = state
+            if code == LIVE_CHECK_TIMED_OUT:
+                e["reason"] = f"timed out after {LIVE_CHECK_TIMEOUT_S} s"
+        e = live_check_update(root, str(job.get("id")), i, c["command"], change)
+        board.log_process("Live checks", state, repo=repo, job=job.get("id"), exit=code)
+        if e and state == "failed":
+            failed.append((project, root, job, i, e))
+        ran = str(job.get("id"))
+    elif due:
+        print(f"watchdog: live check held: {hold}", file=sys.stderr, flush=True)
+    for project, root, job, i, e in failed:
+        try:  # its own guard: one filing failure never skips the next
+            live_check_fail(project, root, job, i, e, now, send=send)
+        except (Exception, SystemExit) as err:
+            print(f"watchdog: {project}: live check fail: {err}", file=sys.stderr, flush=True)
+    return ran
 
 
 COOLDOWN_CHIMED = False  # ponytail: in memory, so a serve.py restart during an idle cool-down may chime once more
@@ -6747,7 +6949,8 @@ def board_with_activity(root, project):
     (job_costs). A needs-human job in lane `edit` with files in its preview.md gets `preview` (edit_preview). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
     cannot go live, or None), `hogAlert` (hog_alert, or None), `actionsAlert` (actions_alert's last result from the watchdog's ACTIONS_ALERT cache, or
     None), `e2eFull` (the full-E2E record's at, head, result, failed, or None), `uiSweep` (the UI sweep record's at,
-    head, result, findings, and `open`: open backlog lines starting `UI sweep`; or None) and `autoOff` (auto_off). board.json comes from cached_board, and each job is a fresh shallow copy, so
+    head, result, findings, and `open`: open backlog lines starting `UI sweep`; or None) and `autoOff` (auto_off).
+    A job with a board `liveCheck` gets `liveCheckInfo` (live_check_info, from its live-checks.json only). board.json comes from cached_board, and each job is a fresh shallow copy, so
     no live field outlives the poll that computed it."""
     cached = cached_board(root)
     stage = {j.get("id"): j.get("stage") for j in cached.get("jobs", [])}
@@ -6806,6 +7009,8 @@ def board_with_activity(root, project):
             job["view"] = True  # the stop box's View button (job 1363)
         if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
             job["waitingOn"] = {**job["waitingOn"], "titles": [title.get(i, "") for i in job["waitingOn"]["ids"]]}
+        if job.get("liveCheck") and (info := live_check_info(root, job)):
+            job["liveCheckInfo"] = info  # the card's and modal's "Live check: ..." line (job 1496)
     data["checkoutAlert"] = checkout_alert(root.parent, data.get("jobs", []))
     data["hogAlert"] = hog_alert()  # machine-wide, so every board carries the same line; the dashboard shows it once
     data["actionsAlert"] = (ACTIONS_ALERT.get(str(root.parent)) or (0, None))[1]  # the watchdog's cache; never gh here
@@ -6818,6 +7023,27 @@ def board_with_activity(root, project):
                                       if not i["done"] and i["text"].startswith("UI sweep"))
     data["autoOff"] = auto_off(project, root)  # the dashboard's "Auto continue off since" header line
     return data
+
+
+def live_check_info(root: Path, job: dict) -> dict | None:
+    """The dashboard's live-check line for a job with a board `liveCheck`, from its live-checks.json only (state by
+    board.live_state): {"state": "waiting", "until": latest by among pending}, {"state": "passed", "at": latest pass
+    time}, {"state": "failed", "item": "Live check failed: <id>"} or {"state": "refused", "reason": ...}; None when
+    the file is missing or unreadable."""
+    job_id = str(job.get("id"))
+    checks = [c for c in live_checks_read(root, job_id) or [] if isinstance(c, dict)]
+    if not checks:
+        return None
+    state = board.live_state(checks)
+    if state == "waiting":
+        return {"state": state, "until": max(c.get("by") or 0 for c in checks if c.get("state") == "pending")}
+    if state == "passed":
+        return {"state": state, "at": max([r.get("at") or 0 for c in checks if c.get("state") == "passed"
+                                           for r in c.get("runs") or [] if isinstance(r, dict) and r.get("exit") == 0]
+                                          or [0])}
+    if state == "failed":
+        return {"state": state, "item": f"Live check failed: {job_id}"}
+    return {"state": state, "reason": next(c.get("reason") or "" for c in checks if c.get("state") == "refused")}
 
 
 BOARD_ACTIVITY_TTL = 3  # seconds a board.json response is reused; counted from when its compute finished

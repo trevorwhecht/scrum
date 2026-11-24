@@ -189,6 +189,8 @@
   board.py prod-ok <id> '<bullet>'  gate one decision.md `## Prod runs` bullet: print dev or ok, else exit non-zero
                                    (schema/deploy/fixture scripts always; a :prod run without a passing dev dry run
                                    and apply recorded in jobs/<id>/prod.md)
+  board.py live-record <id>        Mark done: write jobs/<id>/live-checks.json from decision.md's `## Live checks`, else
+                                   spec.md's, and set the job's liveCheck; print the count (0: nothing, or already recorded)
   board.py statusline              Claude Code status line: save stdin's rate_limits to <CLAUDE_CONFIG_DIR or ~/.claude>/usage.json, print "5h N% · 7d N%"
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
@@ -1694,6 +1696,7 @@ PROCESSES = (
     ("Usage windows", ("window_tick", "hard_stop_tick"), ("windows",)),
     ("Pulse", ("pulse_tick", "publish_busy", "record_cpu_sample", "cooldown_chime"), ()),
     ("Stuck alert", ("stuck_alert", "stuck_process"), ()),
+    ("Live checks", ("live_check_tick",), ("jobs/*/live-checks.json",)),
     ("Run all and triage", ("cmd_runall_start", "cmd_triage_start", "cmd_triage_apply"), ("triage/*",)),
     ("Roadmap and BigBoy", ("cmd_roadmap_next",), ("roadmap.md", "jobs/*/track-*.md", "jobs/*/bigboy-review.md")),
     ("Backlog ranking", ("cmd_rank_backlog",), ("jev.log",)),
@@ -9331,6 +9334,7 @@ def main(argv=None):
     po = sub.add_parser("prod-ok")
     po.add_argument("id")
     po.add_argument("bullet")
+    sub.add_parser("live-record").add_argument("id")
     pa = sub.add_parser("plan-apply")
     pa.add_argument("id")
     pa.add_argument("--fix", action="store_true")
@@ -9536,6 +9540,8 @@ def main(argv=None):
         print(json.dumps(cmd_spec_models(a.dir, a.ids)))
     elif a.cmd == "prod-ok":
         print(cmd_prod_ok(a.dir, a.id, a.bullet))
+    elif a.cmd == "live-record":
+        print(cmd_live_record(a.dir, a.id))
     elif a.cmd == "spawn":
         proc, log = spawn(a.dir, a.id, a.action, a.prompt, model=a.model, caller=caller_claude_pid(), hot_hold=False)
         print(json.dumps({"log": log, "pid": proc.pid}))
@@ -9729,6 +9735,114 @@ def cmd_prod_ok(root: Path, job_id: str, bullet: str) -> str:
     if missing:
         raise SystemExit("prod-ok: " + "; ".join(f"no passing dev run of {b!r} in prod.md" for b in missing))
     return "ok"
+
+
+# --- live-record: a decision.md or spec.md `## Live checks` bullet, run after the merge by serve.py live_check_tick ---
+LIVE_DENY_RE = re.compile(r"(?i)prisma|migrate|db:push|playwright|next (build|dev)|vercel|npm run (build|dev)")
+LIVE_BULLET_RE = re.compile(r"- `([^`]+)` \| from (merge|\+6h|\+1d) \| by (\+1d|\+7d) \| (.+)")
+LIVE_OFFSETS = {"merge": 0, "+6h": 6 * 3600, "+1d": 86400, "+7d": 7 * 86400}
+LIVE_SHAPE = "not in the shape - `<command>` | from <merge|+6h|+1d> | by <+1d|+7d> | <proves>"
+
+
+def live_check_bullets(text: str) -> list[dict]:
+    """The `## Live checks` bullets of text as {command, from, by, proves}, from and by as seconds after Mark done.
+    No section, or only `- none`, gives []. A bullet in another shape gives {command: <bullet>, from 0, by 0, proves
+    "", refused: LIVE_SHAPE}, so it is stored as refused instead of vanishing."""
+    out = []
+    for line in (md_section(text, "Live checks") or "").splitlines():
+        line = line.strip()
+        if not line.startswith("- ") or line.lower() in ("- none", "- none."):
+            continue
+        if m := LIVE_BULLET_RE.fullmatch(line):
+            out.append({"command": m[1].strip(), "from": LIVE_OFFSETS[m[2]], "by": LIVE_OFFSETS[m[3]],
+                        "proves": m[4].strip()})
+        else:
+            out.append({"command": line[2:].strip(), "from": 0, "by": 0, "proves": "", "refused": LIVE_SHAPE})
+    return out
+
+
+def live_command_refusal(repo: Path, command: str) -> str | None:
+    """None when a live check may run command from repo, else why not. Two shapes only: `npm run <script>[ -- <args>]`
+    (prod_bullet: PROD_TOKEN_RE tokens; the script is in repo/package.json and neither its name, args nor command
+    matches LIVE_DENY_RE) and `python3 <path>[ <args>]` (PROD_TOKEN_RE tokens; a relative path with no `..` part that
+    git tracks in repo)."""
+    if command.startswith("npm run "):
+        try:
+            script, args = prod_bullet(command)
+        except SystemExit:
+            return "not an npm run command with plain arguments"
+        try:
+            scripts = json.loads((Path(repo) / "package.json").read_text()).get("scripts")
+        except (OSError, ValueError, AttributeError):
+            return "cannot read scripts from package.json"
+        if not isinstance(scripts, dict) or script not in scripts:
+            return f"{script} is not a package.json script"
+        if m := LIVE_DENY_RE.search(" ".join([script, *args, str(scripts[script])])):
+            return f"{script} runs {m[0]}, which a live check never may"
+        return None
+    tokens = command.split(" ")
+    if tokens[0] != "python3" or len(tokens) < 2:
+        return "only npm run <script> or python3 <tracked file> may run"
+    if not all(PROD_TOKEN_RE.fullmatch(t) for t in tokens[1:]):
+        return "an argument holds a character other than letters, digits or = _ . : / -"
+    path = tokens[1]
+    if path.startswith(("/", "-")) or ".." in path.split("/"):
+        return f"{path} is not a relative path inside the repo"
+    r = subprocess.run(["git", "-C", str(repo), "ls-files", "--error-unmatch", "--", path], capture_output=True,
+                       timeout=60)
+    return None if r.returncode == 0 else f"{path} is not a file git tracks"
+
+
+def live_state(checks: list) -> str:
+    """The board `liveCheck` for a live-checks.json list: failed when any check failed, else waiting while any is
+    pending, else refused when any was refused, else passed."""
+    states = {c.get("state") for c in checks if isinstance(c, dict)}
+    return next((s for s, k in (("failed", "failed"), ("waiting", "pending"), ("refused", "refused")) if k in states),
+                "passed")
+
+
+def cmd_live_record(root: Path, job_id: str) -> int:
+    """live-record (Merge's Mark done): write jobs/<id>/live-checks.json from decision.md's `## Live checks` section,
+    else spec.md's, and set the board job's `liveCheck` (live_state) under locked_board. Each entry: command, from and
+    by as epoch seconds counted from now, proves, state pending (refused, with reason, when live_command_refusal or the
+    bullet shape refuses it), runs [] and done_at. Writes nothing for no section, only `- none`, a job not at stage
+    done, a `merged, not live` reason, or an existing live-checks.json (a resumed Merge keeps its runs). Returns the
+    number of checks recorded."""
+    root = Path(root)
+    d = root / "jobs" / check_id(job_id)
+    path = d / "live-checks.json"
+    recordable = lambda j: j.get("stage") == "done" and not str(j.get("reason") or "").startswith("merged, not live") \
+        and not path.exists()
+    if not recordable(find(read_board(root), job_id)):
+        return 0  # no lock taken, so board.json is not rewritten
+    text = ""
+    for name in ("decision.md", "spec.md"):
+        try:
+            body = (d / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if md_section(body, "Live checks") is not None:
+            text = body
+            break
+    bullets = live_check_bullets(text)
+    if not bullets:
+        return 0
+    now = int(time.time())
+    checks = []
+    for b in bullets:
+        reason = b.get("refused") or live_command_refusal(root.parent, b["command"])
+        checks.append({"command": b["command"], "from": now + b["from"], "by": now + b["by"], "proves": b["proves"],
+                       "state": "refused" if reason else "pending", **({"reason": reason} if reason else {}),
+                       "runs": [], "done_at": now})
+    with locked_board(root) as board:
+        job = find(board, job_id)
+        if not recordable(job):  # re-checked under the lock: a racing live-record or stage change wins
+            return 0
+        tmp = path.with_name("live-checks.json.tmp")
+        tmp.write_text(json.dumps(checks, indent=1) + "\n")
+        os.replace(tmp, path)
+        job["liveCheck"] = live_state(checks)
+    return len(checks)
 
 
 def orchestrator_model(root: Path, job_id: str | None = None) -> str | None:
