@@ -423,13 +423,16 @@ class ContractTest(unittest.TestCase):
 
     def test_spec_writer_requires_prod_run_for_real_data(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
-        for phrase in ("real business data", "never lists its prod run under Out", "test fixtures", "## Prod runs"):
+        for phrase in ("real business data", "never lists its prod run under Out", "test fixtures", "## Prod runs",
+                       "for each `:prod` script", "own dev dry run and dev apply bullets", "never build steps"):
             self.assertIn(phrase, text, phrase)
         self.assertEqual(text.count("real business data"), 1)
 
     def test_approver_requires_prod_run_for_real_data(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
-        for phrase in ("real business data", "prod run", "REWORK", "test fixtures", "## Prod runs", "Prod check:"):
+        for phrase in ("real business data", "prod run", "REWORK", "test fixtures", "## Prod runs", "Prod check:",
+                       "For each `:prod` script named", "its own dev dry run bullet", "its own dev apply bullet",
+                       "`:prod` stripped", "without `--apply` or `--prod`", "dev runs done in the build never count"):
             self.assertIn(phrase, text, phrase)
         self.assertNotIn("Follow-up for the prod run", text)
         self.assertEqual(text.count("real business data"), 1)
