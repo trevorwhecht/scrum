@@ -2,7 +2,7 @@
 
 1. `ID=$(B new "<title>")`. The title is the feature's first line, at most 60 characters.
    1b. Write the full feature text to `$F/jobs/$ID/feature.md`. You may add `Lane: <lane> — <reason>` and `Complex: yes|no — <reason>` lines under its title.
-   1c. **Askme** (only for `askme` or `start <id> askme`; otherwise skip to step 2). An interactive question round with Trevor, run like **discuss**. **Record your terminal** first. Read `feature.md`, `$F/project.md` and just enough of the repo to know what is unclear. The level sets how many questions; you pick the number within it:
+   1c. **Askme** (only for `askme` or `start <id> askme`; otherwise skip to step 1d). An interactive question round with Trevor, run like **discuss**. **Record your terminal** first. Read `feature.md`, `$F/project.md` and just enough of the repo to know what is unclear. The level sets how many questions; you pick the number within it:
       - level 1 asks only what blocks the build;
       - level 2 asks a moderate number;
       - level 3 is thorough.
@@ -13,8 +13,8 @@
       - Q: <question>
         A: <Trevor's answer>
       ```
-      If Trevor says to skip or stop, write the pairs answered so far and carry on. The same session then runs the rest of the job (step 2 onward).
-   1d. **Ops route.** Run `B ops-kind $ID`; on `ops-data` or `ops-content`, run `B set $ID lane=ops kind=<kind>`, follow `$HOME/.claude/skills/trevskills-scrum/lanes/ops.md` and stop New job.
+      If Trevor says to skip or stop, write the pairs answered so far and carry on. The same session then runs the rest of the job (step 1d onward).
+   1d. **Ops route.** Run `B ops-kind $ID`; on `ops-data` or `ops-content`, append the line `Kind: <kind>` to `$F/jobs/$ID/feature.md` when it has none, run `B set $ID lane=ops kind=<kind>`, follow `$HOME/.claude/skills/trevskills-scrum/lanes/ops.md` and stop New job.
 2. **Base:** first **record your terminal** (Setup). Then run `git fetch origin`. Read the optional base branch: `BB=$(sed -n 's/^- Base branch: *//p' "$F/project.md" | head -1 | sed 's/[[:space:]]*$//')`.
    - **`BB` empty (line missing or blank):** `DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#^origin/##')`. If `symbolic-ref` fails (no `origin/HEAD`), run `git remote set-head origin -a` and try `symbolic-ref` again.
    - **`BB` set:** if it does not match `^[A-Za-z0-9._/-]+$`, run `B ask $ID "Base branch line in the project profile is malformed, so the job cannot tell which branch to start from; fix or remove that line, then pick Carry on." --a "Carry on=resume $ID" --b "Remove this job=abort $ID --cascade" --c "File the fix as a follow-up=followup $ID \"<fix>\"" --title WRONG_BRANCH --recommend <key> '<why>'`. If `git rev-parse --verify -q "origin/$BB"` fails, run `B ask $ID 'Base branch <BB> not found on origin, so the job has no branch to start from; push it to GitHub or remove the Base branch line from the project profile, then pick Carry on.' --a "Carry on=resume $ID" --b "Remove this job=abort $ID --cascade" --c "File the fix as a follow-up=followup $ID \"<fix>\"" --title WRONG_BRANCH --recommend <key> '<why>'`. Either ask stops before the spec writer; otherwise `DEFAULT=$BB`.

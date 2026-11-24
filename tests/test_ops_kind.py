@@ -140,6 +140,36 @@ class OpsRouteTextTest(unittest.TestCase):
         self.assertLess(text.index("1d. **Ops route"), text.index("2. **Base:**"))
         self.assertNotIn("ops-kind", (SKILL / "lanes" / "edit.md").read_text())
 
+    def test_askme_skip_reaches_ops_route(self):
+        """Round 1: a job with no askme, and one whose question round ended, go on to 1d, never straight to step 2."""
+        text = (SKILL / "lanes" / "newjob.md").read_text()
+        askme = text[text.index("   1c. **Askme**"):text.index("   1d. **Ops route")]
+        self.assertIn("otherwise skip to step 1d)", askme)
+        self.assertIn("the rest of the job (step 1d onward)", askme)
+        self.assertNotIn("step 2", askme)
+
+    def test_ops_route_writes_kind_line(self):
+        """Round 1: ops.md step 1 reads only feature.md, so a Jev-sorted kind is written there before ops.md runs."""
+        text = (SKILL / "lanes" / "newjob.md").read_text()
+        route = text[text.index("   1d. **Ops route"):text.index("\n2. **Base:**")]
+        self.assertIn("append the line `Kind: <kind>` to `$F/jobs/$ID/feature.md` when it has none", route)
+        self.assertLess(route.index("`Kind: <kind>`"), route.index("B set $ID lane=ops"))
+        self.assertLess(route.index("B set $ID lane=ops"), route.index("lanes/ops.md"))
+        self.assertEqual(board.ops_kind("Re-run the backfill on prod\nRun: npm run backfill\n" + "Kind: ops-data\n"),
+                         "ops-data")  # the appended line is one ops.md step 1 accepts
+
+    def test_start_runs_ops_route_first(self):
+        """Round 1: serve.py starts backlog jobs as `start <id>`, which enters New job at step 2: it runs 1d first."""
+        start = next(l for l in (SKILL / "lanes" / "commands.md").read_text().splitlines()
+                     if l.startswith("- **`/trevskills-scrum start <id>`**"))
+        self.assertIn("first run **New job** step 1d", start)
+        self.assertLess(start.index("step 1d"), start.index("B lilguy-fit $ID"))
+        pattern = re.search(r"`grep -F '([^']+)' \"\$HOME/\.claude/skills/trevskills-scrum/lanes/newjob\.md\"`", start)
+        self.assertIsNotNone(pattern, start)
+        lines = [l for l in (SKILL / "lanes" / "newjob.md").read_text().splitlines() if pattern.group(1) in l]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("B ops-kind $ID", lines[0])
+
     def test_skill_ops_lane_section(self):
         text = (SKILL / "SKILL.md").read_text()
         sec = text[text.index("\n## Ops lane\n"):]
