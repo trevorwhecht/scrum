@@ -1366,7 +1366,7 @@ def e2e_full_tick(project, repo, root) -> None:
     head = board._git(repo, "rev-parse", "HEAD").decode().strip()
     merges = merges_since(repo, record)
     settled = board.cooling_down() and not [b for b in restart_blockers(project) if b != f"{project}/{E2E_FULL_BLOCKER}"]
-    if not e2e_full_due(record, head, merges, now, settled) or board.machine_ok(root):
+    if not e2e_full_due(record, head, merges, now, settled) or board.machine_ok(root) or board.vm_pressure_reason():
         return
     last_green = (record or {}).get("lastGreen")
     loads = (record or {}).get("loads") if (record or {}).get("head") == head else None  # run's loaded count carries
@@ -1658,7 +1658,7 @@ def hard_stop_tick() -> list[str]:
 
 
 def hot_stop_tick() -> list[str]:
-    """While board.heavy_hold() gives a reason, stop the two maintenance runs on a main checkout (job 1312): a running
+    """While board.heavy_hold() or board.vm_pressure_reason() gives a reason, stop the two maintenance runs on a main checkout (job 1312): a running
     UI sweep session (RUNS `<project>/ui-sweep`, live) and a full E2E in flight (E2E_FULL["pid"], its buildlock child).
     Each group gets TERM, then KILL after HOT_STOP_WAIT (stop_group). The E2E sets E2E_FULL["hot_stop"] to the reason
     first, so e2e_full_run records `loaded` and files nothing; with no job session live (board.live_sessions() is 0) a
@@ -1666,7 +1666,7 @@ def hot_stop_tick() -> list[str]:
     UI_SWEEP_BEFORE[project] (e2e_full_stop_new_servers) and, only while ui-sweep.json still holds the same running
     record, rewrites it `loaded` with the reason and no `dir`, so it reruns and files nothing. One processes.log line
     per stop. Job sessions are never signalled. Returns the `<project>/ui-sweep` and `<project>/e2e-full` names stopped."""
-    why = board.heavy_hold()
+    why = board.heavy_hold() or board.vm_pressure_reason()
     if not why:
         return []
     stopped = []
@@ -2044,7 +2044,7 @@ def ui_sweep_tick(project, repo, root) -> None:
             return
     if not e2e_queue_free() or e2e_job_waiting() or board.solo_hold() \
             or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip() \
-            or board.machine_ok(root, claim=True):
+            or board.machine_ok(root, claim=True) or board.vm_pressure_reason():
         return
     record = ui_sweep_record(root)
     if now - ((record or {}).get("at") or 0) < E2E_FULL_EVERY and not (
