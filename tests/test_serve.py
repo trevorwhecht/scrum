@@ -9856,6 +9856,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
         spawn.assert_not_called()
         self.assertEqual(self.job("002-second")["stage"], "waiting")
         self.assertEqual((self.gate_text("002-second"), self.gate_text("003-third")), ("heavy_cap\n", None))
+        self.assertEqual(self.current_gates("002-second")["heavy_cap"]["text"], "heavy_cap(2/2)")
 
     def test_held_by_drops_done_blocker_gate(self):
         """Job 1406: a waiting job whose depends_on are all done gets heldBy from fresh gates, minus depends_on:<done id>."""
@@ -9873,9 +9874,10 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual(jobs["002-second"]["heldBy"], "heavy_cap")
         self.assertNotIn("heldBy", jobs["003-third"])  # its blocker is open: waitingOn names it
         self.assertEqual(jobs["003-third"]["waitingOn"]["ids"], ["009-open"])
-        self.assertNotIn("heldBy", jobs["004-fourth"])  # only the done blocker's gate: nothing to name
+        self.assertEqual(jobs["004-fourth"]["heldBy"], "No hold recorded: the queue has not picked it up yet")  # only the done blocker's gate
         states = {j["id"]: j for j in self.serve.job_states(self.root, None)}
-        self.assertEqual((states["002-second"]["heldBy"], states["004-fourth"]["heldBy"]), ("heavy_cap", None))
+        self.assertEqual((states["002-second"]["heldBy"], states["004-fourth"]["heldBy"]),
+                         ("heavy_cap", "No hold recorded: the queue has not picked it up yet"))
 
     def current_gates(self, job_id):
         return json.loads((self.root / "jobs" / job_id / "current-gates.json").read_text())
@@ -9886,12 +9888,16 @@ class WatchdogIdleParentTest(unittest.TestCase):
         with mock.patch("time.time", return_value=1000.0):
             self.serve.note_queue_gate(self.root, "002-second", "ram_room(free=10%)")
             self.board.note_queue_gate(self.root, "002-second", "depends_on:001-first")
-        self.assertEqual(self.current_gates("002-second"), {"ram_room": 1000.0, "depends_on:001-first": 1000.0})
+        self.assertEqual(self.current_gates("002-second"), {"ram_room": {"at": 1000.0, "text": "ram_room(free=10%)"},
+                                                            "depends_on:001-first": {"at": 1000.0, "text": "depends_on:001-first"}})
         with mock.patch("time.time", return_value=2000.0):
-            self.serve.note_queue_gate(self.root, "002-second", "ram_room(free=5%)")
-            self.board.note_queue_gate(self.root, "002-second", "depends_on:001-first")
-        self.assertEqual(self.current_gates("002-second"), {"ram_room": 2000.0, "depends_on:001-first": 2000.0})
-        self.assertEqual(self.gate_text("002-second"), "ram_room(free=10%)\ndepends_on:001-first\n")
+            self.serve.note_queue_gate(self.root, "002-second", "ram_room(free=5%)", reason="ram_room(free=5%): low")
+            self.board.note_queue_gate(self.root, "002-second", "depends_on:001-first", "waits for 001-first")
+            self.board.note_queue_gate(self.root, "002-second", "heavy_cap", reason="heavy_cap(2/2): ids")
+        self.assertEqual(self.current_gates("002-second"), {"ram_room": {"at": 2000.0, "text": "ram_room(free=5%): low"},
+                                                            "depends_on:001-first": {"at": 2000.0, "text": "waits for 001-first"},
+                                                            "heavy_cap": {"at": 2000.0, "text": "heavy_cap(2/2): ids"}})
+        self.assertEqual(self.gate_text("002-second"), "ram_room(free=10%)\ndepends_on:001-first\nheavy_cap\n")
         (self.root / "jobs" / "003-third").mkdir(parents=True)
         self.serve.note_stall_hold(self.root, "003-third", "ram_room(free=10%)")
         self.assertFalse((self.root / "jobs" / "003-third" / "current-gates.json").exists())
@@ -9904,11 +9910,57 @@ class WatchdogIdleParentTest(unittest.TestCase):
         d.mkdir(parents=True, exist_ok=True)
         (d / "queue-gates.txt").write_text("ram_room(free=10%)\nheavy_cap\n")
         now = time.time()
-        (d / "current-gates.json").write_text(json.dumps({"ram_room": now - 1200, "heavy_cap": now - 10}))
+        (d / "current-gates.json").write_text(json.dumps({
+            "ram_room": {"at": now - 1200, "text": "ram_room(old)"}, "heavy_cap": {"at": now - 10, "text": "heavy_cap(2/2): two jobs (7, 8)"},
+            "cpu_load": now - 5, "depends_on:001-first": {"at": now - 5, "text": "depends_on:001-first"}}))
         jobs = {j["id"]: j for j in self.serve.board_with_activity(self.root, "repo")["jobs"]}
-        self.assertEqual(jobs["002-second"]["heldBy"], "heavy_cap")
+        self.assertEqual(jobs["002-second"]["heldBy"], "cpu_load; heavy_cap(2/2): two jobs (7, 8)")  # old number shape reads; stale and done-blocker gates drop
         states = {j["id"]: j for j in self.serve.job_states(self.root, None)}
-        self.assertEqual(states["002-second"]["heldBy"], "heavy_cap")
+        self.assertEqual(states["002-second"]["heldBy"], "cpu_load; heavy_cap(2/2): two jobs (7, 8)")
+
+    def test_held_by_plain_reason_without_gate(self):
+        """Job 1437: a waiting job with done dependencies and no fresh gate says so; an open blocker or another stage gets None."""
+        self.queue_board({"id": "001-first", "stage": "done"}, {"id": "009-open", "stage": "running"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]},
+                         {"id": "003-third", "stage": "waiting", "depends_on": ["009-open"]},
+                         {"id": "004-fourth", "stage": "build", "depends_on": ["001-first"]})
+        stage = {"001-first": "done", "009-open": "running"}
+        got = [self.serve.held_by(self.root, j, stage) for j in
+               ({"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]},
+                {"id": "003-third", "stage": "waiting", "depends_on": ["009-open"]},
+                {"id": "004-fourth", "stage": "build", "depends_on": ["001-first"]})]
+        self.assertEqual(got, ["No hold recorded: the queue has not picked it up yet", None, None])
+        paused = {"id": "002-second", "stage": "waiting", "paused": True, "depends_on": ["001-first"]}
+        self.assertIsNone(self.serve.held_by(self.root, paused, stage))  # Trevor's pause is its own reason
+
+    def test_held_by_none_for_setup_pending_and_shop_jobs(self):
+        """Job 1437 round 2: a setup-pending or shop-tagged waiting job keeps its own card line, so no heldBy."""
+        self.queue_board({"id": "002-second", "stage": "waiting", "setup": "pending"},
+                         {"id": "003-third", "stage": "waiting", "runs_on": "shop"})
+        for j in self.serve.board_with_activity(self.root, "repo")["jobs"]:
+            self.assertIsNone(self.serve.held_by(self.root, j, {}), j["id"])
+            self.assertNotIn("heldBy", j)
+
+    def test_held_by_text_for_each_gate(self):
+        """Job 1437: each held-gate writer records the full why text on the waiting job's card."""
+        self.waiting_pair()
+        with mock.patch.object(self.serve, "spawn"), mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", return_value=2), \
+                mock.patch.object(self.board, "usage_allowance", return_value=None), \
+                mock.patch.object(self.board, "heavy_cap_reason",
+                                  return_value="heavy_cap(2/2): 2 heavy jobs on this Mac (001-a, 002-b)"):
+            self.serve.wake_waiting("idle", self.root)
+        self.assertEqual(self.current_gates("002-second")["heavy_cap"]["text"],
+                         "heavy_cap(2/2): 2 heavy jobs on this Mac (001-a, 002-b)")
+        why = "vm pressure: memory pressure is critical (swap used 9 GB)"
+        self.serve.note_held(self.root, "vm_pressure", ["003-third"], why)
+        self.serve.note_held(self.root, "finish_first", ["003-third"], "finish 009-x first")
+        self.assertEqual({k: v["text"] for k, v in self.current_gates("003-third").items()},
+                         {"vm_pressure": why, "finish_first": "finish 009-x first"})
+        with mock.patch.object(self.board, "cpu_load_pct", return_value=612.0):
+            self.serve.note_held(self.root, self.serve.cpu_token(), ["003-third"], self.serve.cpu_text())
+        self.assertEqual(self.current_gates("003-third")["cpu_load"]["text"],
+                         f"cpu_load(612%): CPU load is over the {self.board.MAX_LAUNCH_CPU_LOAD_PCT}% launch limit")
 
     def test_cpu_held_ignores_stale_gate_in_current_record(self):
         """Job 1408: cpu_load last hit 20 min ago is no CPU hold, even with ram_room fresh in the same record."""

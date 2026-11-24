@@ -7535,6 +7535,23 @@ class BoardTest(unittest.TestCase):
         self.assertNotIn("wake", job)
 
 
+class CurrentGateTextTest(unittest.TestCase):
+    def test_note_current_gate_stores_text(self):
+        """Job 1437: each head keeps {"at", "text"}: the reason, else the full gate string; a second call updates it."""
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / "jobs" / "002-x").mkdir(parents=True)
+            read = lambda: json.loads((Path(t) / "jobs" / "002-x" / "current-gates.json").read_text())
+            with mock.patch("time.time", return_value=50.0):
+                board.note_current_gate(t, "002-x", "ram_room(free=10%)")
+                board.note_current_gate(t, "002-x", "heavy_cap", "heavy_cap(2/2): 2 heavy jobs on this Mac (a, b)")
+            self.assertEqual(read(), {"ram_room": {"at": 50.0, "text": "ram_room(free=10%)"},
+                                      "heavy_cap": {"at": 50.0, "text": "heavy_cap(2/2): 2 heavy jobs on this Mac (a, b)"}})
+            with mock.patch("time.time", return_value=60.0):
+                board.note_queue_gate(t, "002-x", "ram_room(free=4%)", reason="low RAM")
+            self.assertEqual(read()["ram_room"], {"at": 60.0, "text": "low RAM"})
+            self.assertEqual(read()["heavy_cap"]["at"], 50.0)
+
+
 class SpawnTest(unittest.TestCase):
     """B spawn: the one headless `claude -p` launcher. SCRUM_CLAUDE / board.CLAUDE point at a stub that records how it ran."""
     STUB = """import json, os, sys
