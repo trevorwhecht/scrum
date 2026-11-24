@@ -24,8 +24,8 @@ Every row has exactly these fields, no more:
 |---|---|
 | clip | file name, e.g. `"IMG_3002.MOV"` |
 | in, out | seconds, numbers, in < out |
-| stage | one of `exposure` (light table / exposure unit), `washout` (spraying the screen), `setup` (registering screens, taping, loading shirts, a screen with ink and nobody printing), `flood` (floodbar stroke), `pull` (squeegee stroke printing), `lift` (screen lifted off the pallet showing the print so far, not every colour down yet), `dryer` (shirt on the conveyor dryer), `reveal` (a finished print with every colour down: a test print, peeling the shirt off, hanging, on a mannequin), `other` (anything else) |
-| colour | the ink being printed, flooded or just lifted, one word from `black white red orange yellow green blue purple pink brown grey` (other loggers name the same inks, so never a shade like "teal"), else `null` |
+| stage | one of `exposure` (light table / exposure unit), `washout` (spraying the screen), `setup` (registering screens, taping, loading shirts, a screen with ink and nobody printing), `flood` (floodbar stroke), `pull` (squeegee stroke printing), `lift` (screen lifted off the pallet showing the print so far, not every colour down yet), `spin` (he turns the carousel from one colour's head to the next), `dryer` (shirt on the conveyor dryer), `reveal` (a finished print with every colour down: a test print, peeling the shirt off, hanging, on a mannequin), `other` (anything else) |
+| colour | the ink being printed, flooded or just lifted, one word from `black white red orange yellow green blue purple pink brown grey` (other loggers name the same inks, so never a shade like "teal"); one ink keeps one word in every clip (Reef Dwellers: one logger called the red ink `red`, the rest `orange`, and the check counted five colours), else `null` |
 | blank | what is printed on (`"white tee"`, `"acid wash hoodie"`, `"ringer"`, `"test paper"`), else `null` |
 | camera | `"still"` when the background (press, wall, pallet) stays put from frame to frame, else `"moving"` (handheld, walk, orbit, whip, push in) |
 | angle | `"top"`, `"side"`, `"blade close"`, `"wide"`, `"window"` or `"other"` |

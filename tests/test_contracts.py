@@ -4320,6 +4320,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         logger = read("edit-logger")
         for phrase in ("Write `<project>/log/rows/<clip stem>.json`", "Reply with one line per clip: `<clip> <rows> rows`, then `DONE`."):
             self.assertIn(phrase, logger, phrase)
+        for phrase in ("`spin` (he turns the carousel from one colour's head to the next)",
+                       "one ink keeps one word in every clip (Reef Dwellers: one logger called the red ink `red`, the rest `orange`, and the check counted five colours)"):
+            self.assertIn(phrase, logger, phrase)
         for name in ("edit-builder", "edit-reviewer", "edit-logger"):
             text = read(name)
             self.assertNotIn("general-purpose", text, name)
