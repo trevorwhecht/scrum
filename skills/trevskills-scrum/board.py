@@ -7359,8 +7359,10 @@ def cmd_chain_unlock(root, parent_id, holder):
 
 def lilguy_in_checkout(job: dict) -> bool:
     """True for a manual lilguy job: it runs in the main checkout with no worktree, builder or PR to wait on. A lilguy
-    job with a worktree (Lilguy lane Worktree mode) is a normal PR job."""
-    return job.get("lane") == "lilguy" and not job.get("worktree")
+    job with a worktree (Lilguy lane Worktree mode) is a normal PR job. A job with a runlog was launched by the
+    pipeline (`spawn` writes it on every headless launch), so one that died before `B set worktree=` is stalled, not
+    hand-run."""
+    return job.get("lane") == "lilguy" and not job.get("worktree") and not job.get("runlog")
 
 
 def no_pr_job(job: dict) -> bool:

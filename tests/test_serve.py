@@ -7873,7 +7873,7 @@ class AutoResumeTest(unittest.TestCase):
         for jid in ("kid", "sib"):
             (self.root / "jobs" / jid / "spec.md").write_text(f"# x\n## Likely files\n- `src/shared.py`: why\n- `src/{jid}.py`: why\n")
         self.jobs = [{"id": "par", "stage": "running", "lane": "runall", "reason": None, "children": ["kid", "sib"]},
-                     {"id": "lil", "stage": "needs-human", "lane": "lilguy", "reason": stalled, "runlog": "runs/lil.log"},
+                     {"id": "lil", "stage": "needs-human", "lane": "lilguy", "reason": stalled},
                      {"id": "kid", "stage": "needs-human", "parent": "par", "parallel": True, "reason": stalled,
                       "runlog": "runs/kid.log"},
                      {"id": "sib", "stage": "build", "parent": "par", "parallel": True, "reason": None}]
@@ -8246,7 +8246,7 @@ class AutoResumeTest(unittest.TestCase):
         (self.root / "runs" / "crash.log").write_text("Traceback: something else broke")
         self.jobs = [{"id": "solo", "stage": "needs-human", "reason": stalled, "runlog": "runs/crash.log"},
                      {"id": "pz", "stage": "needs-human", "paused": True, "reason": stalled, "runlog": "runs/crash.log"},
-                     {"id": "lil", "stage": "needs-human", "lane": "lilguy", "reason": stalled, "runlog": "runs/crash.log"}]
+                     {"id": "lil", "stage": "needs-human", "lane": "lilguy", "reason": stalled}]
         self.assertEqual(self.sweep(), ["solo"])
         self.assertEqual(self.sweep(), [], "same stage: once only")
         self.jobs[0]["reason"] = "stalled in check: no board update for 30 min and no live session. Fix: click Resume."
