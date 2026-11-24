@@ -1312,7 +1312,7 @@ def e2e_full_due(record, head, merges, now, settled=False) -> bool:
     24 h+ old is due whatever the HEAD, so a failed or orphaned run is retried. A `busy` record (another dev server
     held the checkout) is due at once, or, when it names a `pid` still alive, once that pid exits or
     E2E_FULL_BUSY_WAIT passed since its start (job 1352); a `loaded` one (a fail under load, or hot stopped) once its wait has passed
-    since its start, whatever the HEAD or merges: E2E_FULL_LOADED_WAIT doubled per loaded stop counted in its `loads`
+    since its stop (`at` plus `secs`, job 1457), whatever the HEAD or merges: E2E_FULL_LOADED_WAIT doubled per loaded stop counted in its `loads`
     on this head (job 1345), capped at E2E_FULL_EVERY; a record of another HEAD waits the first one."""
     if not record:
         return True
@@ -1322,7 +1322,7 @@ def e2e_full_due(record, head, merges, now, settled=False) -> bool:
     if record.get("result") == "loaded":
         loads = record.get("loads") if head == record.get("head") else None  # a moved HEAD starts the waits over
         wait = min(E2E_FULL_EVERY, E2E_FULL_LOADED_WAIT * 2 ** (max(int(loads or 1), 1) - 1))
-        return now - (record.get("at") or 0) >= wait
+        return now - ((record.get("at") or 0) + (record.get("secs") or 0)) >= wait  # from its stop, not its start (job 1457)
     if record.get("result") in ("error", "running") and now - (record.get("at") or 0) >= E2E_FULL_EVERY:
         return True
     return head != record.get("head") and (settled or merges >= E2E_FULL_MERGES
@@ -1412,7 +1412,8 @@ def e2e_job_waiting() -> bool:
 def e2e_full_tick(project, repo, root) -> None:
     """Start one background full E2E run on repo's main checkout when project.md has an E2E command, no full run is in
     flight in this serve (E2E_FULL), this project's UI sweep is not running (its dev server holds the checkout's dev
-    lock), the E2E lock is free, no job waits on the E2E queue (e2e_job_waiting), no solo run holds the Mac or waits
+    lock), the E2E lock is free, no job waits on the E2E queue (e2e_job_waiting), no job session is live
+    (board.live_sessions() is 0, the condition under which hot_stop_tick lets a run ride out a warn, job 1457), no solo run holds the Mac or waits
     for it (board.solo_hold, job 1361), the tracked tree is clean, e2e_full_due holds (watchdog_tick pass 1) and
     board.machine_ok passes (without claim=True, so cool-down never stops it). During
     cool down, once no job on this project blocks a restart, any new HEAD is due: the merges bundled into one run.
@@ -1439,7 +1440,7 @@ def e2e_full_tick(project, repo, root) -> None:
     if sweep and sweep.get("result") == "running" and (now - (sweep.get("at") or 0) < E2E_FULL_STALE or (
             sweep.get("dir") and board.session_alive_fn()({"id": sweep["dir"]}))):
         return
-    if not e2e_queue_free() or e2e_job_waiting() or board.solo_hold() \
+    if not e2e_queue_free() or e2e_job_waiting() or board.solo_hold() or board.live_sessions() \
             or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip():
         return
     record = e2e_full_record(root)
@@ -1491,7 +1492,8 @@ def e2e_full_stop_orphan(repo, root, rec) -> dict | None:
             e2e_full_term_kill(list(dict.fromkeys(p for p, _, c in listening if p not in keep
                                                   and (c == wt or c.startswith(wt + os.sep)))), 5.0)
             why = "serve.py restarted while the full run was in flight"
-            new = {**rec, "result": "loaded", "reason": why, "loads": int(rec.get("loads") or 0) + 1}
+            new = {**rec, "result": "loaded", "reason": why, "loads": int(rec.get("loads") or 0) + 1,
+                   "secs": max(int(time.time() - (rec.get("at") or time.time())), 0)}
             write_e2e_full(root, new)
             board.log_process("Full E2E on main", "stopped", repo=str(repo), reason=why)
             return new
@@ -1980,7 +1982,7 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False, attach=No
         prior = (e2e_full_record(root) or {}).get("loads") or 0  # the tick's running record carries this head's count
         rec = {"at": at, "head": head, "result": result, "exit": code, "failed": failed,
                "lastGreen": head if code == 0 and not hot else last_green, **({"reason": hot} if hot else {}),
-               **({"loads": prior + 1} if result == "loaded" else {}),
+               **({"loads": prior + 1, "secs": int(time.time() - at)} if result == "loaded" else {}),
                **({"pid": lock[0]} if result == "busy" and lock and lock[0] else {})}
         write_e2e_full(root, rec)
         named = lock or stopped
@@ -1991,7 +1993,8 @@ def e2e_full_run(repo, root, cmd, head, at, last_green, retried=False, attach=No
             mine = [f for f in failed if f["spec"] not in owned]
             again, output = e2e_full_rerun(wt, root, cmd, env, mine, test_dir) if mine else (None, "")
             if again is None and E2E_FULL.get("hot_stop"):  # stopped during the re-run: loaded, nothing filed
-                rec = {**rec, "result": "loaded", "reason": E2E_FULL["hot_stop"], "loads": prior + 1}
+                rec = {**rec, "result": "loaded", "reason": E2E_FULL["hot_stop"], "loads": prior + 1,
+                       "secs": int(time.time() - at)}
                 write_e2e_full(root, rec)
             if again is not None:
                 flaky = [s for s in dict.fromkeys(f["spec"] for f in mine) if s not in {f["spec"] for f in again}]

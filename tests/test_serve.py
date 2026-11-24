@@ -13304,6 +13304,9 @@ class E2eFullTest(unittest.TestCase):
         self.wt = serve.e2e_full_worktree(self.repo, self.root, self.base)
         serve.E2E_FULL["running"] = None
         self.addCleanup(serve.E2E_FULL.update, running=None)
+        p = mock.patch.object(serve.board, "live_sessions", return_value=0)  # this Mac's own job sessions never count
+        p.start()
+        self.addCleanup(p.stop)
         p = mock.patch.object(serve.board, "listeners", return_value=[])  # e2e_full_run never signals a real process
         p.start()
         self.addCleanup(p.stop)
@@ -13716,6 +13719,16 @@ class E2eFullTest(unittest.TestCase):
             self.serve.e2e_full_tick(project, self.repo, self.root)
         return thread.call_count
 
+    def test_tick_waits_for_job_sessions_and_loaded_wait_counts_from_the_stop(self):
+        """Job 1457: no run starts while a job session is live; a loaded wait counts from at + secs."""
+        with mock.patch.object(self.serve.board, "live_sessions", return_value=2):
+            self.assertEqual(self.tick(), 0)
+        self.assertEqual(self.tick(), 1)
+        w = self.serve.E2E_FULL_LOADED_WAIT
+        rec = {"at": 1000.0, "head": "h", "result": "loaded", "secs": 3600}
+        self.assertFalse(self.serve.e2e_full_due(rec, "h", 0, 1000.0 + 3600 + w - 1))
+        self.assertTrue(self.serve.e2e_full_due(rec, "h", 0, 1000.0 + 3600 + w))
+
     def test_tick_starts_one_run_on_a_clean_checkout(self):
         self.assertEqual(self.tick(), 1)
         rec = json.loads((self.root / "e2e-full.json").read_text())
@@ -14062,7 +14075,7 @@ class E2eFullTest(unittest.TestCase):
         self.assertEqual(self.open_items(), [])
         # 2026-11-21 crash: a loaded run restarted every ~4 min all night; it now waits E2E_FULL_LOADED_WAIT
         self.assertFalse(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + 1))
-        self.assertTrue(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + self.serve.E2E_FULL_LOADED_WAIT))
+        self.assertTrue(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + rec["secs"] + self.serve.E2E_FULL_LOADED_WAIT))
 
     def test_loaded_wait_doubles_per_head_and_resets(self):
         """Job 1345: each loaded stop on a head doubles the wait from E2E_FULL_LOADED_WAIT, capped at E2E_FULL_EVERY;

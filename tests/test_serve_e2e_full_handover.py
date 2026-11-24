@@ -308,9 +308,11 @@ class RealRestartTest(Base):
         self.assertTrue(gone(p.pid), "the buildlock child is stopped")
         self.assertTrue(gone(web), "its webServer in its own group is stopped too")
         self.assertTrue(gone(other.pid), "a listener left in the worktree is stopped")
-        self.assertEqual(self.record(), {"at": 123.0, "head": "h1", "result": "loaded", "exit": None, "failed": [],
-                                         "lastGreen": "lg", "loads": 2,
-                                         "reason": "serve.py restarted while the full run was in flight"})
+        rec = self.record()
+        self.assertGreater(rec.pop("secs"), 0, "the run's length, so the loaded wait counts from its stop (job 1457)")
+        self.assertEqual(rec, {"at": 123.0, "head": "h1", "result": "loaded", "exit": None, "failed": [],
+                               "lastGreen": "lg", "loads": 2,
+                               "reason": "serve.py restarted while the full run was in flight"})
 
     def test_reused_pid_other_command_is_left_alone(self):
         p, web = self.holder("npm run something-else", self.wt)
