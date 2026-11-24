@@ -295,7 +295,44 @@ class SameTestsTest(unittest.TestCase):
                 (line,) = self.lines()
                 line.pop("t")
                 self.assertEqual(line, {"kind": "same-tests", "project": "app", "jobs": ["2003-c"], "pids": [],
-                                        "cpu_min": 6.1, "rerun": True, "head": HEAD, "command": E2E})
+                                        "cpu_min": 6.1, "rerun": True, "head": HEAD, "command": E2E,
+                                        "via": {"pid": 400, "job": "2003-c", "agent": "build"},
+                                        "cwd": str(self.wt["2003-c"])})
+
+    def test_rerun_via_is_nearest_claude_ancestor(self):
+        """Job 1517: claude 10 > claude 30 (--agent scrum-builder) > the E2E run; via names 30, the nearest."""
+        self.record({"at": 1, "head": HEAD, "result": "fail", "exit": 1, "failed": [], "lastGreen": None})
+        self.cwds.update({401: self.wt["2003-c"]})
+        procs = [(10, 1, 1.0, cl("2001-a")),
+                 (30, 10, 1.0, "/usr/local/bin/claude -p /trevskills-scrum build 2003-c --agent scrum-builder"),
+                 (400, 30, 0.1, "/bin/zsh -c y"), (401, 400, 0.1, zsh(E2E)), (402, 401, 6.0, f"node /opt/homebrew/bin/{E2E}")]
+        self.run_pass(procs)
+        (line,) = self.lines()
+        self.assertEqual(line["via"], {"pid": 30, "job": "2003-c", "agent": "scrum-builder"})
+        self.assertEqual(line["cwd"], str(self.wt["2003-c"]))
+
+    def test_rerun_with_no_claude_above_has_via_none(self):
+        self.record({"at": 1, "head": HEAD, "result": "pass", "exit": 0, "failed": [], "lastGreen": HEAD})
+        self.cwds.update({401: self.wt["2003-c"]})
+        self.run_pass(bash_run(400, E2E))
+        (line,) = self.lines()
+        self.assertIsNone(line["via"])
+        self.assertEqual((line["rerun"], line["cwd"]), (True, str(self.wt["2003-c"])))
+
+    def test_e2e_full_worktree_rerun_not_logged(self):
+        """Job 1517: e2e_full_run and its e2e_full_rerun one-worker re-run run in .claude/worktrees/e2e-full after the
+        head's record is stored; that is serve.py's own run, never a waste line. A run in another worktree still is."""
+        e2e_wt = self.repo / ".claude" / "worktrees" / "e2e-full"
+        e2e_wt.mkdir(parents=True)
+        self.record({"at": 1, "head": HEAD, "result": "fail", "exit": 1, "failed": [], "lastGreen": None})
+        procs = [(300, os.getpid(), 0.5, f"{sys.executable} {Path(serve.buildlock.__file__).resolve()} {E2E}"),
+                 (301, 300, 0.1, f"/bin/sh -c {E2E}"), (302, 301, 6.0, f"node /opt/homebrew/bin/{E2E}")]
+        self.cwds = {300: e2e_wt}
+        self.assert_left_alone(procs)
+        procs += [(400, 1, 5.0, cl("2003-c")), *bash_run(400, E2E)]
+        self.cwds[401] = self.wt["2003-c"]
+        self.run_pass(procs)
+        self.assertEqual([(l["jobs"], l["cwd"]) for l in self.lines()], [(["2003-c"], str(self.wt["2003-c"]))])
 
     def test_no_fresh_result_not_a_rerun(self):
         procs = self.rerun_procs()
@@ -459,7 +496,7 @@ class E2eFullFilingTest(unittest.TestCase):
 
     def test_spec_in_live_job_title_not_filed(self):
         self.jobs(("1", "Fix e2e/a.spec.ts", "check", None))
-        rec = self.run_full(e2e_out(self.A), "")
+        self.run_full(e2e_out(self.A), "")
         self.assertEqual(self.items(), [])
         self.assertEqual(len(self.cmds), 1, "nothing left to re-run")
 

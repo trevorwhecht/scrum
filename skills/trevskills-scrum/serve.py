@@ -4260,7 +4260,9 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
     board.log_waste("same-tests", ..., kept=, head=, command=, via=, ages=) line: via is the nearest claude process above
     both runs as {"pid", "job", "agent"} (claude_step; None when they share none), ages {"kept", "stopped"} in minutes.
     Rerun: a run of its project's E2E command that this call did not stop, on the head of a finished (pass or fail)
-    e2e-full.json record, gets one log_waste line with pids [] and rerun=True, and no signal.
+    e2e-full.json record, gets one log_waste line with pids [], rerun=True, via (the nearest claude process above that
+    run, as above) and cwd, and no signal. A run whose cwd is the project's .claude/worktrees/e2e-full or under it
+    (e2e_full_run and its e2e_full_rerun, serve.py's own runs after write_e2e_full) is skipped (job 1517).
     A line is written once per run pid (SAME_TESTS_LOGGED); a survivor gets stop_tree again. procs defaults to
     process_scan(). Returns every pid signalled. SCRUM_IDLE_CLEANUP=0, or no project with a command, returns [] with
     no scan."""
@@ -4310,17 +4312,21 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
     twins = {key: runs for key, runs in groups.items() if len(runs) > 1}
     ages = proc_ages(sorted(pid for runs in twins.values() for pid, _ in runs)) if twins else {}
     job_ids = lambda *dirs: list(dict.fromkeys(j["id"] for j in map(job_for_cwd, dirs) if j and j.get("id")))
+    line_of = {p: ln for p, _, _, ln in procs}
+
+    def via_of(pid, among=None):
+        up = next((a for a in above(pid) if (among is None or a in among) and board._is_claude(line_of.get(a, ""))),
+                  None)
+        return None if up is None else dict(zip(("pid", "job", "agent"), (up, *claude_step(line_of[up]))))
+
     stopped, hit = [], set()
     for (name, c, head, _), runs in sorted(twins.items()):
         if any(pid not in ages for pid, _ in runs):
             continue
         (kept, kept_cwd), *rest = sorted(runs, key=lambda r: (-ages[r[0]], r[0]))
-        line_of = {p: ln for p, _, _, ln in procs}
         for pid, cwd in rest:
             hit.add(pid)
-            shared = set(above(kept))
-            up = next((a for a in above(pid) if a in shared and board._is_claude(line_of.get(a, ""))), None)
-            via = None if up is None else dict(zip(("pid", "job", "agent"), (up, *claude_step(line_of[up]))))
+            via = via_of(pid, set(above(kept)))
             pids, cpu = stop_tree(pid, procs)
             stopped += [p for p in pids if p not in stopped]
             if pids and pid not in SAME_TESTS_LOGGED:
@@ -4339,8 +4345,9 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
         rec = records[name]
         if rec.get("head") != head or rec.get("result") not in ("pass", "fail"):
             continue
+        own = os.path.realpath(repos[name][0] / ".claude" / "worktrees" / "e2e-full")
         for pid, cwd in runs:
-            if pid in hit or pid in SAME_TESTS_LOGGED:
+            if pid in hit or pid in SAME_TESTS_LOGGED or cwd == own or cwd.startswith(own + os.sep):
                 continue
             SAME_TESTS_LOGGED.add(pid)
             tree, todo = [], [pid]
@@ -4350,7 +4357,7 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
                     tree.append(p)
                     todo += kids.get(p, [])
             board.log_waste("same-tests", name, job_ids(cwd), [], round(sum(cpu_of.get(p, 0.0) for p in tree), 1),
-                            rerun=True, head=head, command=c)
+                            rerun=True, head=head, command=c, via=via_of(pid), cwd=cwd)
     return stopped
 
 
