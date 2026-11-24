@@ -111,6 +111,7 @@ class EditLaneTest(unittest.TestCase):
         self.assertNotIn("VectorCraft", terms)  # installed on the shop Mac (#866); an edit-vector job is held by its Kind line
         self.assertTrue(board.names_main_only("Kind: edit-photo\nretouch the hoodie shot", terms))
         self.assertTrue(board.names_main_only("Kind: edit-reel", terms))
+        self.assertTrue(board.names_main_only("Read ~/Developer/claude/md-trim/plan.md first", terms))
         self.assertFalse(board.names_main_only("Claude edits the widget", terms))
         self.assertFalse(board.names_main_only("Fix the widget", terms))
 

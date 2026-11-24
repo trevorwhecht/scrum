@@ -71,6 +71,22 @@ class SelfReloadTest(unittest.TestCase):
         with redirect_stdout(self.out), redirect_stderr(self.err):
             return serve.reload_if_changed(execv=execv, check=check)
 
+    def test_main_reloads_in_place_on_hup(self):
+        prev = signal.getsignal(signal.SIGHUP)
+        self.addCleanup(signal.signal, signal.SIGHUP, prev)
+        server = mock.Mock(serve_forever=lambda: os.kill(os.getpid(), signal.SIGHUP))
+        with mock.patch.object(sys, "argv", ["serve.py", "--port", "0"]), \
+                mock.patch.object(serve, "make_server", return_value=server), \
+                mock.patch.object(serve, "tailnet_host", return_value=""), \
+                mock.patch.object(serve, "rotate_serve_log"), \
+                mock.patch.object(serve.threading, "Thread"), \
+                mock.patch.object(serve.board, "projects", return_value={}), \
+                mock.patch.object(serve.board, "migrate_focus"), \
+                mock.patch.object(serve.board, "migrate_backlog_sources"), \
+                mock.patch.object(serve, "reload_if_changed") as reload, redirect_stdout(self.out):
+            serve.main()
+        reload.assert_called_once_with()
+
     def test_reload_execs_when_code_changed_and_idle(self):
         self.bump()
         execv, check = mock.Mock(), mock.Mock(side_effect=ok_check)

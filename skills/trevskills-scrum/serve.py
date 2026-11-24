@@ -170,11 +170,11 @@ LAUNCH_LOCK = threading.Lock()  # spawn's room check and its Popen run as one st
 GATED = ("start", "resume", "approve", "rework")  # the job launches spawn's gate holds to board.ram_room(floor=0)
 
 
-def note_queue_gate(root, job_id, gate, name="queue-gates.txt"):
+def note_queue_gate(root, job_id, gate, name="queue-gates.txt", reason=None):
     """Add `gate` (board.ram_room_reason's ram_room(<readings>), ram_room:<live id> or cpu_load(<pct>%)) to
     jobs/<id>/<name> (queue-gates.txt) once per name (the text before `(`), so a job held twice keeps its first readings, for
     timing.md's Queue gate column. It outlives the launch, unlike play_queued. For queue-gates.txt it also stamps the head
-    in current-gates.json (board.note_current_gate), which gate_heads reads. Called under LAUNCH_LOCK; a write error
+    in current-gates.json (board.note_current_gate, with `reason` as its text, else `gate`), which gate_heads reads. Called under LAUNCH_LOCK; a write error
     never blocks the queue."""
     path = Path(root) / "jobs" / job_id / name
     head = lambda g: g.split("(", 1)[0]
@@ -187,13 +187,19 @@ def note_queue_gate(root, job_id, gate, name="queue-gates.txt"):
     except OSError:
         pass
     if name == "queue-gates.txt":
-        board.note_current_gate(root, job_id, gate)
+        board.note_current_gate(root, job_id, gate, reason)
 
 
 def note_stall_hold(root, job_id, token):
     """note_queue_gate into jobs/<id>/stall-holds.txt: a hold auto_resume passed a stalled job over for, for
     timing.md's Stalls cell."""
     note_queue_gate(root, job_id, token, name="stall-holds.txt")
+
+
+def cpu_text():
+    """cpu_token with its limit: cpu_load(<pct>%): CPU load is over the <MAX>% launch limit (None when unread)."""
+    tok = cpu_token()
+    return None if tok == "cpu_load" else f"{tok}: CPU load is over the {board.MAX_LAUNCH_CPU_LOAD_PCT}% launch limit"
 
 
 def cpu_token():
@@ -277,37 +283,52 @@ def gate_held(root, job, gates):
 GATE_FRESH_SECS = 900  # a gate last hit this long ago is no current hold (per gate in current-gates.json; else the queue-gates.txt mtime)
 
 
-def gate_heads(root, job):
-    """The gate names (text before `(`) holding a job now: the heads in jobs/<id>/current-gates.json hit within
-    GATE_FRESH_SECS (job 1408). With no readable record (an object of numbers) it falls back to every head in
-    queue-gates.txt, or none when that is unreadable or last noted over GATE_FRESH_SECS ago (the file keeps every gate
-    a job ever hit, so an old line is not a current hold: job 1222)."""
+def gate_entries(root, job):
+    """{gate head: why text} for the gates holding a job now: the entries in jobs/<id>/current-gates.json hit within
+    GATE_FRESH_SECS (job 1408), each a number (old shape, text is the head) or {"at": epoch, "text": why}. With no
+    readable record (an object of those) it falls back to every head in queue-gates.txt (text is the gate string), or
+    none when that is unreadable or last noted over GATE_FRESH_SECS ago (the file keeps every gate a job ever hit, so an
+    old line is not a current hold: job 1222)."""
     folder = Path(root) / "jobs" / str(job["id"])
     try:
         seen = json.loads((folder / board.CURRENT_GATES).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         seen = None
-    if isinstance(seen, dict) and all(type(t) in (int, float) for t in seen.values()):
+    at = lambda v: v.get("at") if isinstance(v, dict) else v
+    if isinstance(seen, dict) and all(type(at(v)) in (int, float) for v in seen.values()):
         now = time.time()
-        return {g for g, t in seen.items() if now - t <= GATE_FRESH_SECS}
+        return {g: (v["text"] if isinstance(v, dict) and isinstance(v.get("text"), str) and v["text"] else g)
+                for g, v in seen.items() if now - at(v) <= GATE_FRESH_SECS}
     try:
         path = folder / "queue-gates.txt"
         if time.time() - path.stat().st_mtime > GATE_FRESH_SECS:
-            return set()
+            return {}
         gates = path.read_text(encoding="utf-8").split()
     except OSError:
-        return set()
-    return {g.split("(", 1)[0] for g in gates}
+        return {}
+    return {g.split("(", 1)[0]: g for g in gates}
+
+
+def gate_heads(root, job):
+    """The gate names (text before `(`) holding a job now: the keys of gate_entries."""
+    return set(gate_entries(root, job))
+
+
+NO_HOLD_TEXT = "No hold recorded: the queue has not picked it up yet"
 
 
 def held_by(root, job, stage):
-    """The gate names a waiting job whose depends_on are all done is held by right now (gate_heads, comma-joined), or None.
+    """The reasons a waiting job whose depends_on are all done is held by right now (gate_entries' texts, sorted by gate
+    head and joined with `; `), NO_HOLD_TEXT when it has no fresh gate (and is not paused, play-queued, overlap-held, setup-pending or shop-tagged), or None for any other job.
     A depends_on:<id> gate whose job is done is dropped: that blocker merged, so it is no longer the cause (job 1406).
     `stage` is {job id: stage}."""
     if job.get("stage") != "waiting" or not all(stage.get(d) == "done" for d in job.get("depends_on") or []):
         return None
-    heads = {g for g in gate_heads(root, job) if not (g.startswith("depends_on:") and stage.get(g[11:]) == "done")}
-    return ", ".join(sorted(heads)) or None
+    ents = {g: t for g, t in gate_entries(root, job).items() if not (g.startswith("depends_on:") and stage.get(g[11:]) == "done")}
+    if not ents and (job.get("paused") or job.get("play_queued") or job.get("overlap_hold")
+                     or job.get("setup") == "pending" or board.stored_runs_on(root, job) == "shop"):
+        return None  # Trevor's pause, a queued play, an overlap hold, a pending setup or a shop tag is its own reason, not a missing one
+    return "; ".join(ents[g] for g in sorted(ents)) or NO_HOLD_TEXT
 
 
 def mem_held(root, job):
@@ -402,7 +423,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 gates = ([board.ram_room_reason(light)] + [f"ram_room:{i}" for i in sorted(live_ids(project))]
                          if ram_short else [f"cpu_load({cpu:.0f}%)"] if cpu_short else ["cpu_queue"])
                 for gate in gates:
-                    note_queue_gate(root, job_id, gate)
+                    note_queue_gate(root, job_id, gate, reason=(
+                        f"{gate}: CPU load is over the {board.MAX_LAUNCH_CPU_LOAD_PCT}% launch limit" if gate.startswith("cpu_load(") else None))
                 if ram_short:
                     note_ram_hold(root, job_id)
                 if ram_short and held_over(queued_at):
@@ -417,7 +439,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 except (board.HeldStart, board.HardStop) as e:  # job 1312: a hot Mac queued this start for the shop Mac
                     proc, held = None, e  # a HardStop stays queued the same way, so it starts once the stop lifts
                     note_queue_gate(root, job_id, "hard_stop" if isinstance(e, board.HardStop)
-                                    else "heavy_cap" if "heavy_cap(" in str(e) else "hot_mac")
+                                    else "heavy_cap" if "heavy_cap(" in str(e) else "hot_mac", reason=str(e))
         if refused_live:  # not started and not queued: play_queue_tick would retry it every tick
             print(f"spawn refused: {project}/{job_id} {action}: {refused_live}", file=sys.stderr, flush=True)
             unqueue(root, job)
@@ -507,21 +529,24 @@ def held_gate(why):
     return next((tok for pre, tok in PULSE_GATES if pre in why), "other")
 
 
+PULSE_LOCK = threading.Lock()  # guards PULSE_HOLDS and PULSE_BUSY: the watchdog and spawn paths write them, pulse_loop's thread reads them (job 1447)
 PULSE_HOLDS: dict[Path, dict[str, float]] = {}  # resolved scrum/ root -> {hold token: epoch s}: what skipped a ready job or run-all start
 PULSE_HOLD_TTL_S = 180  # pulse_tick reports a hold this long after it was last seen (a few watchdog ticks)
 
 
 def note_hold(root, reason):
     """Remember `reason` (a held-job token or a run-all start hold) for root's project (keyed by its resolved scrum/ path): pulse_tick adds `held:<reason>`
-    to that project's gates, so write_pulse counts the idle minutes as gated and names the gate."""
-    PULSE_HOLDS.setdefault(Path(root).resolve(), {})[reason] = time.time()
+    to that project's gates, so write_pulse counts the idle minutes as gated and names the gate. Writes under PULSE_LOCK."""
+    key, now = Path(root).resolve(), time.time()
+    with PULSE_LOCK:
+        PULSE_HOLDS.setdefault(key, {})[reason] = now
 
 
-def note_held(root, reason, job_ids):
-    """note_queue_gate(root, id, reason) for each of `job_ids` (a ready waiting job the tick passed over), and
-    note_hold(root, reason) when there are any."""
+def note_held(root, reason, job_ids, text=None):
+    """note_queue_gate(root, id, reason, reason=text) for each of `job_ids` (a ready waiting job the tick passed over;
+    `text` is the why shown on its card, else the token), and note_hold(root, reason) when there are any."""
     for job_id in job_ids:
-        note_queue_gate(root, job_id, reason)
+        note_queue_gate(root, job_id, reason, reason=text)
     if job_ids:
         note_hold(root, reason)
 
@@ -548,12 +573,12 @@ def start_ready(project, root, parent_id, manual=False):
     cmd_ready names in `held` is noted on each ready waiting child: ram_room, held_gate's token for a machine_ok
     refusal, usage_allowance for the rest (the usage cap; held_gate knows every machine_ok reason)."""
     if cpu_hot(manual):
-        note_held(root, cpu_token(), ready_waiting(root, parent_id))
+        note_held(root, cpu_token(), ready_waiting(root, parent_id), cpu_text())
         return {"ready": []}
     out = board.cmd_ready(root, parent_id, live_ids(project), manual=manual)
     if held := out.get("held"):
         tok = held if held == "ram_room" else held_gate(held)
-        note_held(root, "usage_allowance" if tok == "other" else tok, ready_waiting(root, parent_id))
+        note_held(root, "usage_allowance" if tok == "other" else tok, ready_waiting(root, parent_id), held)
     elif out.get("left") and not out["ready"]:  # `any` children kept for the shop Mac (cmd_ready's shop-first wait)
         note_held(root, "runs_on_shop", out["left"])
     for child in out["ready"]:
@@ -574,24 +599,24 @@ def wake_waiting(project, root):
         return
     why = board.machine_ok(root, claim=True) or board.finish_first(root)
     cooling = why == board.COOLING or bool(why and why.startswith((board.FINISH_FIRST, board.SOFT_COOLING)))
-    cool_gate = held_gate(why) if cooling else None
+    cool_gate, cool_why = (held_gate(why), why) if cooling else (None, None)
     if cooling:  # only a parked wake job passes; plain waiting jobs stay held (hold below)
         why = board.machine_ok(root) or (None if any(j.get("wake") for j in filter(board.parked_waiting, board.read_board(root)["jobs"])) else why)
     if why:
-        note_held(root, held_gate(why), ready_waiting(root))
+        note_held(root, held_gate(why), ready_waiting(root), why)
         return
     room = board.ram_room(floor=0)  # spawn's own gate: a start it would queue stays waiting, never claimed
     if room < 1:
-        note_held(root, "ram_room", ready_waiting(root))
+        note_held(root, "ram_room", ready_waiting(root), board.ram_room_reason(False))
         return
     live = board.live_sessions()
     allow = board.pick_account(time.time(), live)[1]
     if allow is not None:
         room = min(room, max(0, allow - live))
         if room < 1:
-            note_held(root, "usage_pace" if "pace 5h" in allow.reason else "usage_allowance", ready_waiting(root))
+            note_held(root, "usage_pace" if "pace 5h" in allow.reason else "usage_allowance", ready_waiting(root), str(allow.reason))
     if cpu_hot():  # re-read right before the claim
-        note_held(root, cpu_token(), ready_waiting(root))
+        note_held(root, cpu_token(), ready_waiting(root), cpu_text())
         return
     held = {}  # job id -> the gate hold() passed it over for, noted below (job 1406: a held job named no cause)
 
@@ -599,14 +624,14 @@ def wake_waiting(project, root):
         if j.get("wake"):
             return board.resume_blocker(root, j["id"], live_ids(project))
         if cooling:
-            held[j["id"]] = cool_gate
-        elif board.heavy_cap_reason(root, j):  # job 1314: a heavy start at the cap waits
-            held[j["id"]] = "heavy_cap"
+            held[j["id"]] = (cool_gate, cool_why)
+        elif why_cap := board.heavy_cap_reason(root, j):  # job 1314: a heavy start at the cap waits
+            held[j["id"]] = ("heavy_cap", why_cap)
         return j["id"] in held
 
     out = board.wake_waiting(root, room, hold=hold)
-    for job_id, gate in held.items():
-        note_held(root, gate, [job_id])
+    for job_id, (gate, text) in held.items():
+        note_held(root, gate, [job_id], text)
     for job_id in out["ready"]:
         spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
     for job_id in out.get("retry", []):
@@ -1366,7 +1391,7 @@ def e2e_full_tick(project, repo, root) -> None:
     head = board._git(repo, "rev-parse", "HEAD").decode().strip()
     merges = merges_since(repo, record)
     settled = board.cooling_down() and not [b for b in restart_blockers(project) if b != f"{project}/{E2E_FULL_BLOCKER}"]
-    if not e2e_full_due(record, head, merges, now, settled) or board.machine_ok(root):
+    if not e2e_full_due(record, head, merges, now, settled) or board.machine_ok(root) or board.vm_pressure_reason():
         return
     last_green = (record or {}).get("lastGreen")
     loads = (record or {}).get("loads") if (record or {}).get("head") == head else None  # run's loaded count carries
@@ -1658,7 +1683,7 @@ def hard_stop_tick() -> list[str]:
 
 
 def hot_stop_tick() -> list[str]:
-    """While board.heavy_hold() gives a reason, stop the two maintenance runs on a main checkout (job 1312): a running
+    """While board.heavy_hold() or board.vm_pressure_reason() gives a reason, stop the two maintenance runs on a main checkout (job 1312): a running
     UI sweep session (RUNS `<project>/ui-sweep`, live) and a full E2E in flight (E2E_FULL["pid"], its buildlock child).
     Each group gets TERM, then KILL after HOT_STOP_WAIT (stop_group). The E2E sets E2E_FULL["hot_stop"] to the reason
     first, so e2e_full_run records `loaded` and files nothing; with no job session live (board.live_sessions() is 0) a
@@ -1666,7 +1691,7 @@ def hot_stop_tick() -> list[str]:
     UI_SWEEP_BEFORE[project] (e2e_full_stop_new_servers) and, only while ui-sweep.json still holds the same running
     record, rewrites it `loaded` with the reason and no `dir`, so it reruns and files nothing. One processes.log line
     per stop. Job sessions are never signalled. Returns the `<project>/ui-sweep` and `<project>/e2e-full` names stopped."""
-    why = board.heavy_hold()
+    why = board.heavy_hold() or board.vm_pressure_reason()
     if not why:
         return []
     stopped = []
@@ -2044,7 +2069,7 @@ def ui_sweep_tick(project, repo, root) -> None:
             return
     if not e2e_queue_free() or e2e_job_waiting() or board.solo_hold() \
             or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip() \
-            or board.machine_ok(root, claim=True):
+            or board.machine_ok(root, claim=True) or board.vm_pressure_reason():
         return
     record = ui_sweep_record(root)
     if now - ((record or {}).get("at") or 0) < E2E_FULL_EVERY and not (
@@ -4328,12 +4353,22 @@ def time_steps(names=TIMED_STEPS, scope=None):
             scope[name] = wrapper
 
 
+def publish_busy(busy):
+    """Replace PULSE_BUSY's contents with busy in one step under PULSE_LOCK, so pulse_loop's snapshot never sees it
+    empty or half built. The dict object stays the same."""
+    with PULSE_LOCK:
+        PULSE_BUSY.clear()
+        PULSE_BUSY.update(busy)
+
+
 def pulse_loop():
     """Run pulse_tick every 60 s from its own thread, so its stuck_alert never waits on a slow watchdog_tick step.
-    One bad pulse never ends the thread."""
+    One bad pulse never ends the thread. PULSE_BUSY is copied under PULSE_LOCK, so the copy is never a half publish."""
     while True:
         try:
-            pulse_tick(dict(PULSE_BUSY))
+            with PULSE_LOCK:
+                busy = dict(PULSE_BUSY)
+            pulse_tick(busy)
         except (Exception, SystemExit) as e:
             print(f"watchdog: pulse: {e}", file=sys.stderr, flush=True)
         time.sleep(60)
@@ -4543,8 +4578,7 @@ def watchdog_tick():
         weekly_tick()
     except (Exception, SystemExit) as e:
         print(f"watchdog: weekly digest: {e}", file=sys.stderr, flush=True)
-    PULSE_BUSY.clear()  # pulse_loop (its own timer, job 1429) reads this tick's busy map
-    PULSE_BUSY.update(busy)
+    publish_busy(busy)  # pulse_loop (its own timer, job 1429) reads this tick's busy map
     cooldown_chime()
 
 
@@ -4642,7 +4676,7 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     blocks every one of those waiting jobs), and top-level gates: ram_room when board.ram_room(floor=0) < 1, plus a PULSE_GATES token (other when
     unrecognised) for the first project's machine_ok(claim=True) refusal other than COOLING. A gates list that raised
     is null. A hold start_ready or auto_continue_tick noted (note_hold: a child left to the shop, finish_first, a running
-    run-all, SWEEP_HELD, a machine or usage hold; play_queue_tick's queued_launch:<id> for a launch spawn still holds) in the last PULSE_HOLD_TTL_S adds `held:<token>` to that project's gates, which
+    run-all, SWEEP_HELD, a machine or usage hold; play_queue_tick's queued_launch:<id> for a launch spawn still holds) in the last PULSE_HOLD_TTL_S (read from a copy taken under PULSE_LOCK) adds `held:<token>` to that project's gates, which
     board.write_pulse counts as gated even beside claimable work. guard: the first project's machine_ok(claim=False) refusal, else the allowance reason when
     board.pick_account has no account or the live count reaches its allowance (the 5h pace included), else null.
     stuck_alert gets the machine_ok refusal alone (never the allowance reason) and the same sessions count, in its own
@@ -4676,7 +4710,10 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
             gates = []
             for hit in hits if hits and all(hits) else []:  # one resumable job means the project is not gated
                 gates += ["runs_alone"] if hit == "this job runs alone" else [f"overlap:{i}" for i in hit.ids]
-            gates += [f"held:{r}" for r, t in PULSE_HOLDS.get(root.resolve(), {}).items() if now - t <= PULSE_HOLD_TTL_S]
+            key = root.resolve()
+            with PULSE_LOCK:  # note_hold writes from other threads; iterate a copy
+                holds = dict(PULSE_HOLDS.get(key, {}))
+            gates += [f"held:{r}" for r, t in holds.items() if now - t <= PULSE_HOLD_TTL_S]
             projects[project]["gates"] = list(dict.fromkeys(gates))
         except (Exception, SystemExit) as e:
             print(f"watchdog: pulse: {project}: gates: {e}", file=sys.stderr, flush=True)
@@ -8585,6 +8622,7 @@ def main():
     print(f"Trevskills Scrum: http://localhost:{a.port}  projects: {names}  claude: {CLAUDE}" + (f"  tailnet: {tn}" if tn else ""), flush=True)
     if fd_limit:
         print(f"open file limit {fd_limit}", flush=True)
+    signal.signal(signal.SIGHUP, lambda *_: reload_if_changed())  # Merge's Restart: new code now, same pid and nice
     try:
         server.serve_forever()
     except KeyboardInterrupt:

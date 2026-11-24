@@ -32,6 +32,12 @@ class BuildLockWait(unittest.TestCase):
                          "Waiting on 2-b (not merged yet)")
         self.assertEqual(status({**base, "stage": "needs-human", "question": "Pick one"}), "Waiting on you: Pick one")
 
+    def test_held_by_keeps_its_counts_and_drops_paths(self):
+        """Job 1437: the Held by text keeps heavy_cap(2/2) whole; a path in a status line is still cut to its basename."""
+        text = "heavy_cap(2/2): 2 heavy jobs on this Mac (1363-a, 1365-b); session_cap(14/14)"
+        self.assertEqual(status({"stage": "waiting", "heldBy": text}), f"Held by {text}")
+        self.assertEqual(status({"stage": "waiting", "heldBy": "see /tmp/x/y.log"}), "Held by see y.log")
+
 
 if __name__ == "__main__":
     unittest.main()

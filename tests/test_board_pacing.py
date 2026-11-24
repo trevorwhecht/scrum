@@ -723,7 +723,7 @@ class HeavyHoldTest(unittest.TestCase):
     def test_memory_pressure_reason_matches_machine_ok(self):
         for level, text in (("2", "memory pressure warn (kernel level 2)"), ("3", "memory pressure warn (kernel level 3)"),
                             ("4", "memory pressure critical (kernel level 4)")):
-            with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE=level):
+            with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE=level, SCRUM_FREE_RAM="34"):
                 self.assertEqual((board.heavy_hold(), board.machine_ok(self.tmp), board.vm_pressure_reason()),
                                  (text, text, text), level)
         with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="1"):

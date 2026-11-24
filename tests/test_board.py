@@ -3733,7 +3733,7 @@ class BoardTest(unittest.TestCase):
     def test_machine_ok_memory_pressure(self):
         """Job 966: free RAM read 32-61% on a full machine while the kernel said memory pressure WARN (level 2)."""
         warn = "memory pressure warn (kernel level 2)"
-        with self.machine("60", "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2"):
+        with self.machine("34", "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2", SCRUM_PS=os.devnull):
             self.assertEqual(board.machine_ok(self.tmp.name), warn)
             self.assertEqual(board.machine_ok(self.tmp.name, manual=True), warn)
         with self.machine("60", "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="3"):
@@ -3748,6 +3748,29 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)", "free RAM first")
         with self.machine("30", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="40", SCRUM_VM_PRESSURE="2"):
             self.assertEqual(board.machine_ok(self.tmp.name), warn, "before the swap line")
+
+    def test_memory_warn_lets_a_few_sessions_work(self):
+        """Trevor 2026-11-23: level 2 held every start and heavy step for a day at 36-43% free with 1 session live."""
+        warn = "memory pressure warn (kernel level 2)"
+
+        def read(live, ram="35", swap="40", level="2", grew=False):
+            with self.machine(ram, "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE=level, SCRUM_SWAP_PCT=swap), \
+                    mock.patch.object(board, "live_sessions", return_value=live), \
+                    mock.patch.object(board, "swap_grew", return_value=grew):
+                return board.machine_ok(self.tmp.name), board.heavy_hold()
+        self.assertEqual(board.WARN_SESSIONS, 3)
+        self.assertEqual(read(2), (None, None))
+        self.assertEqual(read(3), (warn, None), "no 4th session starts; the 3 live ones' heavy steps run")
+        self.assertEqual(read(4), (warn, warn))
+        self.assertEqual(read(0, ram="34"), (warn, warn))
+        self.assertEqual(read(0, grew=True), (warn, warn))
+        critical = "memory pressure critical (kernel level 4)"
+        self.assertEqual(read(0, ram="90", level="4"), (critical, critical), "critical always holds")
+        for reading in ("free_ram_pct", "swap_used_pct"):
+            with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2"), mock.patch.object(board, reading, return_value=None):
+                self.assertEqual(board.vm_pressure_reason(new=0), warn, f"unknown {reading} keeps the hold")
+        with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2"), mock.patch.object(board, "live_sessions", return_value=0):
+            self.assertEqual(board.vm_pressure_reason(), warn, "a sweep or full E2E is no job's work: always held")
 
     def test_ram_room_memory_pressure_floor(self):
         with self.machine("60", "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2", SCRUM_PS=os.devnull):
@@ -7512,6 +7535,23 @@ class BoardTest(unittest.TestCase):
         self.assertNotIn("wake", job)
 
 
+class CurrentGateTextTest(unittest.TestCase):
+    def test_note_current_gate_stores_text(self):
+        """Job 1437: each head keeps {"at", "text"}: the reason, else the full gate string; a second call updates it."""
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / "jobs" / "002-x").mkdir(parents=True)
+            read = lambda: json.loads((Path(t) / "jobs" / "002-x" / "current-gates.json").read_text())
+            with mock.patch("time.time", return_value=50.0):
+                board.note_current_gate(t, "002-x", "ram_room(free=10%)")
+                board.note_current_gate(t, "002-x", "heavy_cap", "heavy_cap(2/2): 2 heavy jobs on this Mac (a, b)")
+            self.assertEqual(read(), {"ram_room": {"at": 50.0, "text": "ram_room(free=10%)"},
+                                      "heavy_cap": {"at": 50.0, "text": "heavy_cap(2/2): 2 heavy jobs on this Mac (a, b)"}})
+            with mock.patch("time.time", return_value=60.0):
+                board.note_queue_gate(t, "002-x", "ram_room(free=4%)", reason="low RAM")
+            self.assertEqual(read()["ram_room"], {"at": 60.0, "text": "low RAM"})
+            self.assertEqual(read()["heavy_cap"]["at"], 50.0)
+
+
 class SpawnTest(unittest.TestCase):
     """B spawn: the one headless `claude -p` launcher. SCRUM_CLAUDE / board.CLAUDE point at a stub that records how it ran."""
     STUB = """import json, os, sys
@@ -7670,7 +7710,7 @@ print("stub err", file=sys.stderr)
         """Job 1312: a chat hand-off start of a spec-stage job with no shop field queues a start launch on a hot Mac."""
         job_id = self.hot_job()
         for env, why in ((dict(SCRUM_CPU_LOAD_PCT="400"), f"CPU load 400% of {os.cpu_count()} cores (> 300%)"),
-                         (dict(SCRUM_VM_PRESSURE="2"), "memory pressure warn (kernel level 2)")):
+                         (dict(SCRUM_VM_PRESSURE="2", SCRUM_FREE_RAM="30"), "memory pressure warn (kernel level 2)")):
             with self.subTest(env=env), mock.patch.dict(os.environ, env):
                 with self.assertRaises(board.HeldStart) as cm:
                     board.spawn(self.root, job_id, "start", "/p start")

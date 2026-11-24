@@ -1686,7 +1686,7 @@ PROCESSES = (
     ("Cloud jobs", ("cloud_tick", "cmd_cloud_sync", "cmd_cloud_claim", "shop_tick", "write_shop_room",
                     "project_notes_tick"), ()),
     ("Usage windows", ("window_tick", "hard_stop_tick"), ("windows",)),
-    ("Pulse", ("pulse_tick", "record_cpu_sample", "cooldown_chime"), ()),
+    ("Pulse", ("pulse_tick", "publish_busy", "record_cpu_sample", "cooldown_chime"), ()),
     ("Stuck alert", ("stuck_alert", "stuck_process"), ()),
     ("Run all and triage", ("cmd_runall_start", "cmd_triage_start", "cmd_triage_apply"), ("triage/*",)),
     ("Roadmap and BigBoy", ("cmd_roadmap_next",), ("roadmap.md", "jobs/*/track-*.md", "jobs/*/bigboy-review.md")),
@@ -6129,6 +6129,9 @@ CPU_SAMPLES = 3  # cpu_busy_pct: the mean of at most this many watchdog samples 
 CPU_SAMPLE_SECS = 300  # ... from the last this many seconds (about 3 watchdog ticks), so one spike never flips the gate
 SWAP_FREE_RAM_PCT = 35  # ... but swap alone is stale (macOS keeps it until pressure returns): it blocks only below this free RAM
 SWAP_GROWTH_SECS = 600  # ... or when swap grew within this window (2026-10-25: idle machine, 71% free, blocked for an hour)
+WARN_SESSIONS = 3  # vm_pressure_reason: up to this many live sessions, kernel level 2 with free RAM at SWAP_FREE_RAM_PCT or
+#                    more and swap flat is no reason (Trevor 2026-11-23: held 81% of a day at 36-43% free, 1 session live).
+#                    pulse.log 11-10 to 11-23, 15 min after a warn: critical 0 of 749 readings at 0-4 sessions, 5.4% of 445 at 5+
 SESSION_RAM_PCT = 5  # ram_room: share of RAM one new headless session takes when session_rss_pct is unknown; tune here
 LIGHT_SESSION_RAM_PCT = 3  # ram_room(light=True): a fast or lilguy job's share (no E2E, related tests only), never above
 #                           the standard share; a guess, tune here
@@ -6344,10 +6347,18 @@ def swap_grew(swap):
     return grew
 
 
-def vm_pressure_reason() -> str | None:
+def vm_pressure_reason(new=None) -> str | None:
     """Why the kernel memory pressure level (vm_pressure_level) refuses new work: level 2 or more, else None (level 1 or
-    an unknown reading). Shared by machine_ok and heavy_hold (job 1312)."""
+    an unknown reading). With `new` (the sessions about to start: machine_ok 1, heavy_hold 0; job 1312) level 2 is also
+    no reason while the live sessions plus `new` are at most WARN_SESSIONS, free RAM is at least SWAP_FREE_RAM_PCT and
+    swap is not growing (swap_grew); an unknown RAM or swap reading keeps the hold. Without `new` level 2 always refuses:
+    the UI sweep and the full E2E on main (serve.py), which are no job's work."""
     level = vm_pressure_level()
+    if level == 2 and new is not None:
+        ram, swap = free_ram_pct(), swap_used_pct()
+        if ram is not None and ram >= SWAP_FREE_RAM_PCT and swap is not None and not swap_grew(swap) \
+                and live_sessions() + new <= WARN_SESSIONS:
+            return None
     if level is not None and level >= 2:
         return f"memory pressure {'critical' if level >= 4 else 'warn'} (kernel level {level})"
     return None
@@ -6361,7 +6372,7 @@ def swap_pressing(ram, swap, limit):
 def machine_ok(path, manual=False, claim=False, own_load=False):
     """None when the machine has room for new work, else why not: cool-down (only for an automatic start of new or
     not-yet-started work, claim=True, and skipped for Trevor's manual clicks), then free RAM, then the kernel memory
-    pressure level (vm_pressure_level, 2+ refuses), then swap, then free
+    pressure level (vm_pressure_reason: 4 and 3 refuse, 2 past its limits), then swap, then free
     disk, then CPU busy, then CPU load (the 5-minute load average over the cores; both CPU checks also skipped for
     manual clicks; CPU load also skipped with own_load, a resume whose own idle session is already in it: resume_gate),
     then the session ceiling.
@@ -6374,7 +6385,7 @@ def machine_ok(path, manual=False, claim=False, own_load=False):
     ram = free_ram_pct()
     if ram is not None and ram < MIN_FREE_RAM_PCT:
         return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
-    if mem := vm_pressure_reason():
+    if mem := vm_pressure_reason(new=1):
         return mem
     swap = swap_used_pct()
     if swap_pressing(ram, swap, MAX_SWAP_PCT):
@@ -6404,7 +6415,7 @@ def heavy_hold(warn_ok=False) -> str | None:
     load = cpu_load_pct()
     if load is not None and load > MAX_CPU_LOAD_PCT:
         return f"CPU load {load:.0f}% of {os.cpu_count()} cores (> {MAX_CPU_LOAD_PCT}%)"
-    if (mem := vm_pressure_reason()) and not (warn_ok and vm_pressure_level() == 2):
+    if (mem := vm_pressure_reason(new=0)) and not (warn_ok and vm_pressure_level() == 2):
         return mem
     swap = swap_used_pct()
     if swap is not None and swap > MAX_SWAP_PCT and swap_pressing(free_ram_pct(), swap, MAX_SWAP_PCT):
@@ -6836,12 +6847,13 @@ def overlap_gate(holder, mine, theirs):
     return f"overlap:{holder}:{min(shared)}" if shared else f"overlap:{holder}"
 
 
-CURRENT_GATES = "current-gates.json"  # {gate head: epoch seconds last hit}; serve.py gate_heads reads it (job 1408)
+CURRENT_GATES = "current-gates.json"  # {gate head: {"at": epoch seconds last hit, "text": why}} (a bare epoch number is the old shape); serve.py gate_heads reads it (job 1408)
 
 
-def note_current_gate(root, job_id: str, gate: str) -> None:
-    """Stamp `gate`'s head (text before `(`) with the time now in jobs/<id>/current-gates.json, so serve.py gate_heads
-    names only gates hit lately while queue-gates.txt stays the cumulative log. Read, set and os.replace run under one
+def note_current_gate(root, job_id: str, gate: str, reason: str | None = None) -> None:
+    """Stamp `gate`'s head (text before `(`) with {"at": time now, "text": reason, else the full gate string} in
+    jobs/<id>/current-gates.json, so serve.py gate_heads and held_by name only gates hit lately while queue-gates.txt
+    stays the cumulative log. Read, set and os.replace run under one
     flock on jobs/<id>/.current-gates.lock, so a board.py and a serve.py writer never drop each other's entry. A
     malformed record starts over; a write error never blocks the queue."""
     folder = Path(root) / "jobs" / job_id
@@ -6856,7 +6868,7 @@ def note_current_gate(root, job_id: str, gate: str) -> None:
                 seen = {}
             if not isinstance(seen, dict):
                 seen = {}
-            seen[gate.split("(", 1)[0]] = time.time()
+            seen[gate.split("(", 1)[0]] = {"at": time.time(), "text": reason or gate}
             try:
                 tmp.write_text(json.dumps(seen), encoding="utf-8")
                 os.replace(tmp, path)
@@ -6866,9 +6878,10 @@ def note_current_gate(root, job_id: str, gate: str) -> None:
         pass
 
 
-def note_queue_gate(root, job_id, gate):
+def note_queue_gate(root, job_id, gate, reason=None):
     """Add `gate` to jobs/<id>/queue-gates.txt once, for timing.md's Queue gate column (serve.py's note_queue_gate
-    writes ram_room and cpu_load the same way), and stamp it in current-gates.json (note_current_gate). A write error
+    writes ram_room and cpu_load the same way), and stamp it in current-gates.json (note_current_gate, with the optional
+    `reason` text, else the gate string). A write error
     never blocks the queue."""
     path = Path(root) / "jobs" / job_id / "queue-gates.txt"
     try:
@@ -6877,7 +6890,7 @@ def note_queue_gate(root, job_id, gate):
                 f.write(gate + "\n")
     except OSError:
         pass
-    note_current_gate(root, job_id, gate)
+    note_current_gate(root, job_id, gate, reason)
 
 
 def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, shop: str | None = None,
