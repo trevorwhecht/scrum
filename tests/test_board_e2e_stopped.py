@@ -27,6 +27,14 @@ class E2eStoppedTest(unittest.TestCase):
         self.assertEqual(board.cmd_e2e_stopped(self.root, "1497-runaway-test"),
                          {"stopped": True, "count": 2, "reason": "disk", "line": "E2E: not run, stopped: disk twice"})
 
+    def test_stale_marker_is_not_stopped_since_the_run_started(self):
+        self.write(json.dumps({"reason": "memory", "count": 1, "at": 100}))
+        none = {"stopped": False, "count": 0, "reason": None, "line": None}
+        self.assertEqual(board.cmd_e2e_stopped(self.root, "1497-runaway-test", 101), none)
+        self.assertTrue(board.cmd_e2e_stopped(self.root, "1497-runaway-test", 100)["stopped"])
+        self.write(json.dumps({"reason": "memory", "count": 1}))
+        self.assertEqual(board.cmd_e2e_stopped(self.root, "1497-runaway-test", 1), none)
+
     def test_no_marker_is_not_stopped(self):
         none = {"stopped": False, "count": 0, "reason": None, "line": None}
         self.assertEqual(board.cmd_e2e_stopped(self.root, "1497-runaway-test"), none)

@@ -1050,9 +1050,9 @@ class ContractTest(unittest.TestCase):
     def test_newjob_e2e_stopped_rule(self):
         """Job 1497: a runaway-stopped job E2E is a retry, never a CHECK: FAIL, triage, rework or backlog item."""
         text = (SKILL_DIR / "lanes" / "newjob.md").read_text()
-        rule = text[text.index("run `B e2e-stopped $ID` first"):]
+        rule = text[text.index("Delete `jobs/$ID/e2e-stopped.json`"):]
         rule = rule[:rule.index("`B e2e-budget $ID")]
-        for phrase in ("`count` 1", "no `CHECK: FAIL`", "no **E2E triage**", "no rework and no backlog item",
+        for phrase in ("S=$(date +%s)", "`B e2e-stopped $ID --since $S`", "stale stop", "`count` 1", "no `CHECK: FAIL`", "no **E2E triage**", "no rework and no backlog item",
                        "re-run the E2E command once", "`E2E stopped: <reason>`",
                        "`E2E: not run, stopped: <reason> twice`", "deletes `jobs/$ID/e2e-stopped.json` when the E2E exits 0"):
             self.assertIn(phrase, rule)

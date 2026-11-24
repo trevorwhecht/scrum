@@ -118,7 +118,7 @@
   board.py e2e-budget <id> <log>   print {"over_budget","passed","failed","not_run","slowest","line","backlog"} for a
                                    job E2E run's output; over budget with no failed test files one deduped
                                    "Speed up the slowest job E2E spec files" backlog item (lanes/newjob.md Check gate)
-  board.py e2e-stopped <id>        print {"stopped","count","reason","line"} from jobs/<id>/e2e-stopped.json, the marker
+  board.py e2e-stopped <id> [--since <epoch>]  print {"stopped","count","reason","line"} from jobs/<id>/e2e-stopped.json, the marker
                                    serve.py's e2e_runaway_tick writes when it stops the job's E2E (lanes/newjob.md Check gate)
   board.py render-paths <id>       print {"paths","skipped"}: the app paths the diff's UI runtime files render plus spec.md
                                    `Render path:` URLs, at most 8, dynamic routes and placeholder URLs skipped, ["/"]
@@ -4291,10 +4291,11 @@ def e2e_budget(text: str) -> dict:
             "not_run": not_run, "slowest": slowest, "line": f"E2E: over budget, {passed} passed, {not_run} not run"}
 
 
-def cmd_e2e_stopped(root, job_id) -> dict:
+def cmd_e2e_stopped(root, job_id, since=None) -> dict:
     """{"stopped", "count", "reason", "line"} from jobs/<id>/e2e-stopped.json (serve.py e2e_runaway_tick's marker).
     Missing, unreadable or malformed: {"stopped": False, "count": 0, "reason": None, "line": None}. `line` is the
-    check.md line: `E2E stopped: <reason>` for count 1, `E2E: not run, stopped: <reason> twice` for 2 or more."""
+    check.md line: `E2E stopped: <reason>` for count 1, `E2E: not run, stopped: <reason> twice` for 2 or more.
+    With `since` (epoch seconds), a marker whose `at` is older, or has no numeric `at`, is a stale stop: not stopped."""
     job_id = check_id(job_id)
     out = {"stopped": False, "count": 0, "reason": None, "line": None}
     try:
@@ -4302,6 +4303,8 @@ def cmd_e2e_stopped(root, job_id) -> dict:
     except (OSError, ValueError):
         return out
     if not isinstance(rec, dict) or not is_num(rec.get("count")) or rec["count"] < 1 or rec.get("reason") not in ("memory", "disk"):
+        return out
+    if since is not None and not (is_num(rec.get("at")) and rec["at"] >= since):
         return out
     count = int(rec["count"])
     out.update(stopped=True, count=count, reason=rec["reason"],
@@ -9557,7 +9560,9 @@ def main(argv=None):
     eb = sub.add_parser("e2e-budget")
     eb.add_argument("id")
     eb.add_argument("log")
-    sub.add_parser("e2e-stopped").add_argument("id")
+    es2 = sub.add_parser("e2e-stopped")
+    es2.add_argument("id")
+    es2.add_argument("--since", type=float)
     sub.add_parser("check-reuse").add_argument("id")
     sub.add_parser("render-paths").add_argument("id")
     sub.add_parser("ui-sweep-record").add_argument("review")
@@ -9726,7 +9731,7 @@ def main(argv=None):
     elif a.cmd == "e2e-budget":
         print(json.dumps(cmd_e2e_budget(a.dir, a.id, a.log)))
     elif a.cmd == "e2e-stopped":
-        print(json.dumps(cmd_e2e_stopped(a.dir, a.id)))
+        print(json.dumps(cmd_e2e_stopped(a.dir, a.id, a.since)))
     elif a.cmd == "check-reuse":
         print(json.dumps(cmd_check_reuse(a.dir, a.id)))
     elif a.cmd == "render-paths":
