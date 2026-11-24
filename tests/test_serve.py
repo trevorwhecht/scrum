@@ -92,7 +92,8 @@ class ServeTest(unittest.TestCase):
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
 
     def setUp(self):
-        hc = mock.patch.object(sys.modules["board"], "HEAVY_PER_MAC", 99)  # job 1314: these fixtures start many default-lane jobs; HeavyCap tests keep the real cap
+        import board  # not sys.modules["board"]: a filtered run of this module loads nothing else
+        hc = mock.patch.object(board, "HEAVY_PER_MAC", 99)  # job 1314: these fixtures start many default-lane jobs; HeavyCap tests keep the real cap
         hc.start()
         self.addCleanup(hc.stop)
         guard = mock.patch.object(self.serve.board, "merge_refusal", return_value=None)  # PR-less fixture jobs may go done
@@ -8926,7 +8927,8 @@ class ResumeFirstTest(unittest.TestCase):
     PAUSED = "stalled in build: paused by Trevor. Fix: click Play."
 
     def setUp(self):
-        hc = mock.patch.object(sys.modules["board"], "HEAVY_PER_MAC", 99)  # job 1314: these fixtures start many default-lane jobs; HeavyCap tests keep the real cap
+        import board  # not sys.modules["board"]: a filtered run of this module loads nothing else
+        hc = mock.patch.object(board, "HEAVY_PER_MAC", 99)  # job 1314: these fixtures start many default-lane jobs; HeavyCap tests keep the real cap
         hc.start()
         self.addCleanup(hc.stop)
         import serve
@@ -10620,7 +10622,8 @@ class AutoContinueTest(unittest.TestCase):
     Usage pace gates nothing; starts stop at the first failed machine_ok (RAM or disk)."""
 
     def setUp(self):
-        hc = mock.patch.object(sys.modules["board"], "HEAVY_PER_MAC", 99)  # job 1314: these fixtures start many default-lane jobs; HeavyCap tests keep the real cap
+        import board  # not sys.modules["board"]: a filtered run of this module loads nothing else
+        hc = mock.patch.object(board, "HEAVY_PER_MAC", 99)  # job 1314: these fixtures start many default-lane jobs; HeavyCap tests keep the real cap
         hc.start()
         self.addCleanup(hc.stop)
         import serve
