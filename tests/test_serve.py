@@ -14306,13 +14306,44 @@ class HotStopTest(unittest.TestCase):
                 self.assertEqual(proc.wait(timeout=5), -signal.SIGTERM)
                 self.serve.E2E_FULL.pop("hot_stop", None)
 
-    def test_memory_warn_still_stops_ui_sweep_with_no_job_session(self):
+    def test_memory_warn_keeps_ui_sweep_with_no_job_session(self):
+        """Job 1477: with 0 live job sessions a memory warn alone keeps a running UI sweep; swap stops it."""
         proc = self.group()
-        self.sweep(proc)
+        d, rec = self.sweep(proc)
         with mock.patch.object(self.serve.board, "live_sessions", return_value=0), \
                 mock.patch.object(self.serve, "e2e_full_stop_new_servers", return_value=[]):
-            stopped, _ = self.tick(SCRUM_VM_PRESSURE="2")
+            stopped, lines = self.tick(SCRUM_VM_PRESSURE="2")
+            self.assertEqual((stopped, lines), ([], []))
+            self.assertIsNone(proc.poll())
+            self.assertEqual(json.loads((self.root / "ui-sweep.json").read_text()), rec)
+            with mock.patch.object(self.serve.board, "swap_used_pct", return_value=90.0), \
+                    mock.patch.object(self.serve.board, "free_ram_pct", return_value=1.0):
+                stopped, lines = self.tick(SCRUM_VM_PRESSURE="2")
         self.assertEqual(stopped, ["repo/ui-sweep"])
+        self.assertIn("swap used", lines[0]["reason"])
+        self.assertEqual(proc.wait(timeout=5), -signal.SIGTERM)
+
+    def test_memory_warn_stops_ui_sweep_once_a_job_session_runs(self):
+        proc = self.group()
+        self.sweep(proc)
+        with mock.patch.object(self.serve.board, "live_sessions", return_value=1), \
+                mock.patch.object(self.serve, "e2e_full_stop_new_servers", return_value=[]):
+            stopped, lines = self.tick(SCRUM_VM_PRESSURE="2")
+        self.assertEqual(stopped, ["repo/ui-sweep"])
+        self.assertEqual(lines[0]["reason"], "memory pressure warn (kernel level 2)")
+        self.assertEqual(proc.wait(timeout=5), -signal.SIGTERM)
+
+    def test_memory_critical_and_cpu_stop_ui_sweep_with_no_job_session(self):
+        for env, why in ((dict(SCRUM_VM_PRESSURE="4"), "memory pressure critical (kernel level 4)"),
+                         (dict(SCRUM_CPU_LOAD_PCT="400"), self.HOT)):
+            with self.subTest(why=why):
+                proc = self.group()
+                self.sweep(proc)
+                with mock.patch.object(self.serve.board, "live_sessions", return_value=0), \
+                        mock.patch.object(self.serve, "e2e_full_stop_new_servers", return_value=[]):
+                    stopped, lines = self.tick(**env)
+                self.assertEqual((stopped, lines[0]["reason"]), (["repo/ui-sweep"], why))
+                self.assertEqual(proc.wait(timeout=5), -signal.SIGTERM)
 
     def test_hot_stop_ends_full_e2e(self):
         proc = self.e2e_child()
@@ -14768,6 +14799,9 @@ class UiSweepTickTest(unittest.TestCase):
         p = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "projects.json"), "HOME": str(self.home)})
         p.start()
         self.addCleanup(p.stop)
+        p = mock.patch.object(serve.board, "live_sessions", return_value=0)  # no job session live by default
+        p.start()
+        self.addCleanup(p.stop)
         self.dirty, self.count, self.short = b"", b"5\n", False
         self.targets = {"since": "x", "head": self.HEAD, "targets": []}
 
@@ -14864,6 +14898,15 @@ class UiSweepTickTest(unittest.TestCase):
         self.assertEqual((spawn.call_count, targets.call_count), (0, 0))
         self.assertEqual(self.read(), rec)
         self.assertEqual(self.tick()[0].call_count, 1, "starts once the hold ends")
+
+    def test_skip_while_a_job_session_is_live(self):
+        """Job 1477: no sweep starts while a job session is live, as e2e_full_tick since job 1457; it starts at 0."""
+        rec = self.due_with_targets(86400)
+        with mock.patch.object(self.serve.board, "live_sessions", return_value=1):
+            spawn, targets = self.tick()
+        self.assertEqual((spawn.call_count, targets.call_count), (0, 0))
+        self.assertEqual(self.read(), rec)
+        self.assertEqual(self.tick()[0].call_count, 1, "starts once no job session is live")
 
     def due_with_targets(self, age):
         """A due record `age` s old (5 merges since its head) and one changed screen."""
