@@ -1036,19 +1036,30 @@ def requeue_after(root, job):
     reason = str(job.get("reason") or "")
     if not reason.startswith("requeue:"):
         return []
+    named, repo = job_refs(reason), Path(root).resolve().parent.name
+    return [f"{repo}:{j['id']}" for j in read_board(root).get("jobs") or []
+            if j.get("id") != job["id"] and j.get("stage") != "done" and names_job(named, j.get("id"))]
+
+
+def job_refs(text):
+    """The job numbers (ints) and full ids text names after `job` or `jobs` (a comma or `and` list; a `1362-1365` range
+    names every number from 1362 to 1365, at most 20 apart). Never a number elsewhere, such as `after 5 minutes`."""
     named = set()
     ref = r"\d+(?:-[a-z0-9-]*[a-z0-9])?"
-    cued = re.findall(rf"\bjobs?\s+({ref}(?:(?:,\s*|\s+and\s+){ref})*)", reason)  # numbers only after "job(s)", never "after 5 minutes"
+    cued = re.findall(rf"\bjobs?\s+({ref}(?:(?:,\s*|\s+and\s+){ref})*)", text)
     for tok in re.findall(ref, " ".join(cued)):
         if m := re.fullmatch(r"(\d+)-(\d+)", tok):
             lo, hi = int(m[1]), int(m[2])
             named.update(range(lo, hi + 1) if lo <= hi <= lo + 20 else (lo, hi))
         else:
             named.add(int(tok) if tok.isdigit() else tok)
-    num = lambda i: int(m[1]) if (m := re.match(r"(\d+)(?:-|$)", str(i))) else None
-    repo = Path(root).resolve().parent.name
-    return [f"{repo}:{j['id']}" for j in read_board(root).get("jobs") or []
-            if j.get("id") != job["id"] and j.get("stage") != "done" and (j.get("id") in named or num(j.get("id")) in named)]
+    return named
+
+
+def names_job(named, job_id):
+    """True when job_refs' set names job_id by full id or by its leading number."""
+    m = re.match(r"(\d+)(?:-|$)", str(job_id))
+    return job_id in named or (m is not None and int(m[1]) in named)
 
 
 def requeue_job(root, job, folder, feature):
@@ -5291,6 +5302,24 @@ def cmd_triage_start(root):
         return {"id": claim_folder(Path(root) / "triage"), "open": n} if n else {"id": None, "open": 0}
 
 
+def retire_blocker(board: dict, item: dict, reason: str, items: list) -> str | None:
+    """Why a triage retire of an open item must be refused, or None. The cited jobs are the board jobs the reason names
+    (full id, or number after `job`/`jobs`), the → job of each closed line with the item's text, and any job whose
+    `requeued` is the item's item_key. Refused when there is at least one and every one is aborted without evidence: its
+    reason is not `obsolete:`/`looks already fixed:`, or the item is Trevor self-text (job 1511)."""
+    jobs = [j for j in board.get("jobs") or [] if isinstance(j, dict) and j.get("id")]
+    full = {t.rstrip("-") for t in re.findall(r"\d{3,}-[a-z0-9-]+", reason)}
+    named, key = job_refs(reason), item_key(item)
+    closed = {i["job"] for i in items if i["done"] and i["job"] and i["text"] == item["text"]}
+    cited = [j for j in jobs if j["id"] in full or names_job(named, j["id"]) or j["id"] in closed or j.get("requeued") == key]
+    evidence = tuple(p for p in CLOUD_SELF_ABORT if p != "requeue:")
+    self_text = "trevor self-text" in item["text"].lower()
+    bare = lambda j: j.get("stage") == "aborted" and (self_text or not str(j.get("reason") or "").startswith(evidence))
+    if cited and all(map(bare, cited)):
+        return f"cites only aborted job(s) {', '.join(j['id'] for j in cited)}; left open"
+    return None
+
+
 def cmd_triage_apply(root, triage_id):
     """Merge, retire, move to manual-checks.md and estimate open items by exact text, then add dependencies. Merges
     rewrite needs references to the merged item; retires and manual moves drop them. Stale, reused or bad entries are
@@ -5342,6 +5371,9 @@ def cmd_triage_apply(root, triage_id):
                     cause = "merged text is over 2000 characters"
                 elif got and kind in ("retire", "manual") and not clean(e.get("reason") or ""):
                     cause = "no reason given"
+                elif got and kind == "retire" and (cause := retire_blocker(read_board(root), got[0], clean(e["reason"]), items)):
+                    print(f'triage {triage_id}: kept open "{clean(got[0]["text"], ITEM_MAX)}" — '
+                          f'{cause.removesuffix("; left open")}', file=sys.stderr)
                 elif got and kind == "estimate" and got[0]["points"] is not None:
                     cause = "already pointed"
                 elif got and kind == "estimate" and pts is None:
