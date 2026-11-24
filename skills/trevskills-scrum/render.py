@@ -11,7 +11,8 @@ to out_dir/console.log as `<path> <width> <level>: <text>`, and out_dir/manifest
 --cookies loads a Playwright storageState file's cookies first; no cookie name or value is ever written out.
 Exit 0 when every page is ok, redirected or http_error; 1 on a timeout or when Chrome cannot run (manifest "error");
 2 on a usage error. Every render first reaps (reap()) each scrum-render Chrome whose render.py is gone (ppid 1) and
-its temp dir; --reap does only that and prints {"reaped": [<pids>]}. Stdlib only: Chrome DevTools Protocol over a small websocket client."""
+its temp dir; --reap does only that, prints {"reaped": [<pids>]} and exits 0.
+Stdlib only: Chrome DevTools Protocol over a small websocket client."""
 import base64, glob, json, os, re, select, shutil, signal, socket, struct, subprocess, sys, tempfile, time
 import urllib.request
 from collections import deque
