@@ -4165,13 +4165,19 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             for phrase in ("`$F/jobs/$ID/preview.md`", "`- <absolute path>`", files, "replacing any older preview.md"):
                 self.assertIn(phrase, body, (step, phrase))
             self.assertLess(body.index("preview.md"), body.index("B ask $ID"), step)
-        for kind, job in (("edit-reel", "1364-edit-project-edit-reel-instagram-print-r"),
-                          ("edit-vector", "1365-edit-project-edit-vector-and-edit-photo"),
-                          ("edit-photo", "1365-edit-project-edit-vector-and-edit-photo")):
-            body = [l for l in kind_files[kind].splitlines()[1:] if l.strip()]
-            self.assertEqual(len(body), 1, (kind, body))  # a one-line stub until its job lands
-            self.assertIn(job, body[0], kind)
-            self.assertIn("not built yet", body[0], kind)
+        body = [l for l in kind_files["edit-reel"].splitlines()[1:] if l.strip()]
+        self.assertEqual(len(body), 1, body)  # a one-line stub until job 1364 lands
+        self.assertIn("1364-edit-project-edit-reel-instagram-print-r", body[0])
+        self.assertIn("not built yet", body[0])
+        for kind, skill_name, app, ledger in (("edit-vector", "trevskills-vectorcraft", "VectorCraft", "vector.md"),
+                                              ("edit-photo", "trevskills-photocraft", "PhotoCraft", "photo.md")):
+            text_k = kind_files[kind]
+            self.assertNotIn("not built yet", text_k, kind)
+            self.assertGreater(len(text_k.splitlines()), 10, kind)
+            for phrase in (f"$HOME/.claude/skills/{skill_name}/SKILL.md", "Spawn `edit-builder`", "fresh `edit-reviewer`",
+                           f"`$F/jobs/$ID/view.md` as one line `View: {app} <the file's absolute path>`",
+                           f"$F/jobs/$ID/{ledger}", "--title EDIT_APPROVE", "--mcp-config"):
+                self.assertIn(phrase, text_k, (kind, phrase))
         text = (skill / "SKILL.md").read_text()
         self.assertNotIn("## Video lane", text)
         body = [l for l in self.h2(text, "## Edit lane").splitlines()[2:] if l.strip()]

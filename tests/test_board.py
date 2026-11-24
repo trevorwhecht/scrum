@@ -7565,6 +7565,85 @@ print("stub err", file=sys.stderr)
         proc.wait(timeout=10)
         return self.records()[0]["argv"]
 
+    def mcp_run(self, job_id, home, fields=None, feature=None, flags=None, env=None):
+        """Spawn one job with HOME at `home`; return (argv, parsed --mcp-config file or None)."""
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": job_id, "stage": "spec", **(fields or {})}] if fields is not None else []}))
+        if feature is not None:
+            (self.root / "jobs" / job_id).mkdir(parents=True, exist_ok=True)
+            (self.root / "jobs" / job_id / "feature.md").write_text(feature)
+        self.out.unlink(missing_ok=True)
+        extra = {"flags": flags} if flags else {}
+        with mock.patch.dict(os.environ, {"HOME": str(home), **(env or {})}), \
+                mock.patch.object(board, "session_alive_fn", return_value=lambda job: False):
+            proc, _ = board.spawn(self.root, job_id, "approve", "/p", model="sonnet", **extra)
+        proc.wait(timeout=10)
+        argv = self.records()[0]["argv"]
+        cfg = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text()) if "--mcp-config" in argv and not flags else None
+        return argv, cfg
+
+    def test_spawn_mcp_vector(self):
+        """Job 1365: an edit-vector job gets one MCP server, from the ~/.claude.json entry, and keeps --strict-mcp-config."""
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        (home / ".claude.json").write_text(json.dumps({"mcpServers": {"vectorcraft": {
+            "type": "stdio", "command": "/opt/vc/vc-cli", "args": ["serve", "--x"], "env": {"TOKEN": "secret"}},
+            "other": {"command": "x", "args": []}}}))
+        argv, cfg = self.mcp_run("1-vec", home, {"kind": "edit-vector"})
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertEqual(cfg, {"mcpServers": {"vectorcraft": {"type": "stdio", "command": "/opt/vc/vc-cli", "args": ["serve", "--x"]}}})
+        (home / ".claude.json").unlink()
+        _, cfg = self.mcp_run("1-vec", home, {"kind": "edit-vector"})
+        self.assertEqual(cfg["mcpServers"]["vectorcraft"]["command"], f"{home}/.local/bin/vectorcraft-cli")
+        self.assertEqual(cfg["mcpServers"]["vectorcraft"]["args"], ["mcp"])
+
+    def test_spawn_mcp_photo(self):
+        """Job 1365: an edit-photo job gets photocraft with the app default when ~/.claude.json has no entry; the kind may come from feature.md."""
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        (home / ".claude.json").write_text(json.dumps({"mcpServers": {"vectorcraft": {"command": "v", "args": []}}}))
+        want = {"mcpServers": {"photocraft": {"type": "stdio", "command": "/Applications/PhotoCraft.app/Contents/MacOS/photocraft-cli", "args": ["mcp"]}}}
+        self.assertEqual(self.mcp_run("2-pho", home, {"kind": "edit-photo"})[1], want)
+        self.assertEqual(self.mcp_run("2-pho", home, {}, feature="# x\nKind: edit-photo\n")[1], want)
+
+    def test_spawn_mcp_only_edit_vector_photo(self):
+        """Job 1365: every other job keeps its argv; a flags --mcp-config is not duplicated; a second account reads the primary ~/.claude.json."""
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        for fields, feature in (({}, None), ({"kind": "edit-reel"}, None), ({"kind": "edit-animation"}, None),
+                                ({}, "Kind: edit-animation\n"), (None, None), (None, "no kind here\n")):
+            argv, cfg = self.mcp_run("3-other", home, fields, feature=feature)
+            self.assertNotIn("--mcp-config", argv, (fields, feature))
+        argv, _ = self.mcp_run("3-vec", home, {"kind": "edit-vector"}, flags=("--mcp-config", "/mine.json"))
+        self.assertEqual(argv.count("--mcp-config"), 1)
+        self.assertEqual(argv[argv.index("--mcp-config") + 1], "/mine.json")
+        (home / ".claude.json").write_text(json.dumps({"mcpServers": {"vectorcraft": {"command": "/primary/vc", "args": ["m"]}}}))
+        other = Path(self.tmp.name) / "other"
+        other.mkdir()
+        (other / ".claude.json").write_text(json.dumps({"mcpServers": {"vectorcraft": {"command": "/other/vc", "args": []}}}))
+        _, cfg = self.mcp_run("3-vec", home, {"kind": "edit-vector"}, env={"CLAUDE_CONFIG_DIR": str(other)})
+        self.assertEqual(cfg["mcpServers"]["vectorcraft"]["command"], "/primary/vc")
+
+    def test_edit_mcp_config_no_env_and_fallback(self):
+        """Job 1365: the file never has an env key; a missing or malformed ~/.claude.json gives the default command."""
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        default = {"type": "stdio", "command": f"{home}/.local/bin/vectorcraft-cli", "args": ["mcp"]}
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for text in (None, "{not json", "[]", json.dumps({"mcpServers": []}),
+                         json.dumps({"mcpServers": {"vectorcraft": "x"}}),
+                         json.dumps({"mcpServers": {"vectorcraft": {"command": 5}}})):
+                (home / ".claude.json").unlink(missing_ok=True)
+                if text is not None:
+                    (home / ".claude.json").write_text(text)
+                path = board.edit_mcp_config(self.root, "edit-vector")
+                self.assertEqual(json.loads(path.read_text()), {"mcpServers": {"vectorcraft": default}}, text)
+            (home / ".claude.json").write_text(json.dumps({"mcpServers": {"photocraft": {"command": "p", "args": ["q"], "env": {"K": "v"}}}}))
+            path = board.edit_mcp_config(self.root, "edit-photo")
+            self.assertEqual(path, self.root / "runs" / "mcp-edit-photo.json")
+            self.assertEqual(json.loads(path.read_text()), {"mcpServers": {"photocraft": {"type": "stdio", "command": "p", "args": ["q"]}}})
+            self.assertNotIn("env", path.read_text())
+            self.assertIsNone(board.edit_mcp_config(self.root, "edit-reel"))
+
     def test_spawn_nice_level(self):
         """Job 1244: a session runs at SESSION_NICE 10 unless spawn is given another level (the UI sweep's 19)."""
         with mock.patch.object(board.os, "setpriority") as prio:
