@@ -228,7 +228,7 @@ ACTIVE = ("spec", "build", "check", "review", "approve", "merging", "deploying")
 # Where the job's terminal and run log are: both are matched or read by path, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
           "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy|edit|ops)$"),  # no lane key = standard
-          "kind": re.compile(r"^(?:edit-(?:reel|animation|vector|photo)|ops-data|ops-content|knowledge)$"),  # an edit or ops job's kind (edit_kind, ops_kind, lanes/edit.md, lanes/ops.md)
+          "kind": re.compile(r"^(?:edit-(?:reel|animation|vector|photo|embroidery)|ops-data|ops-content|knowledge)$"),  # an edit or ops job's kind (edit_kind, ops_kind, lanes/edit.md, lanes/ops.md)
           "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
           "account": re.compile(r"^[a-z0-9-]{1,20}$"),  # the accounts() name board.spawn ran the session on
           "reset": re.compile(r"^[0-9]{0,12}$"),  # the account's seven_day resets_at when board.spawn recorded it: fallback_account favours the recorded account only until then
@@ -4993,7 +4993,7 @@ def shop_room_path() -> Path:
 
 
 NO_GIT_RE = re.compile(r"^- Git: *none\s*$", re.M | re.I)
-EDIT_KIND_RE = re.compile(r"^Kind: (edit-reel|edit-animation|edit-vector|edit-photo)\s*$", re.M)
+EDIT_KIND_RE = re.compile(r"^Kind: (edit-reel|edit-animation|edit-vector|edit-photo|edit-embroidery)\s*$", re.M)
 OPS_KIND_RE = re.compile(r"^Kind: (ops-data|ops-content)\s*$", re.M)
 
 
@@ -5007,7 +5007,7 @@ def no_git(root) -> bool:
 
 
 def edit_kind(text: str) -> str | None:
-    """The kind on the first `Kind: edit-reel|edit-animation|edit-vector|edit-photo` line of a feature.md text, else
+    """The kind on the first `Kind: edit-reel|edit-animation|edit-vector|edit-photo|edit-embroidery` line of a feature.md text, else
     None (job 1362). A job with a kind runs lane=edit (lanes/edit.md)."""
     return _kind_match(EDIT_KIND_RE, text)
 
@@ -5025,7 +5025,7 @@ def ops_kind(text: str) -> str | None:
 
 
 OPS_KIND_CUTOFF = 0.7  # jev-gate.py kind: a confident yes
-OTHER_KIND_RE = re.compile(r"^Kind: (?:edit-(?:reel|animation|vector|photo)|knowledge)\s*$", re.M)
+OTHER_KIND_RE = re.compile(r"^Kind: (?:edit-(?:reel|animation|vector|photo|embroidery)|knowledge)\s*$", re.M)
 RUN_LINE_RE = re.compile(r"^Run: ", re.M)
 
 

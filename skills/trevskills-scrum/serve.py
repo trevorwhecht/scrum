@@ -7268,7 +7268,7 @@ def edit_preview(root, job):
             for i, (path, kind, _, rev) in enumerate(preview_files(root, job))]
 
 
-VIEW_APPS = ("QuickTime Player", "Edits", "VectorCraft", "PhotoCraft")  # the apps an edit job's View button may open
+VIEW_APPS = ("QuickTime Player", "Edits", "VectorCraft", "PhotoCraft", "Preview")  # the apps an edit job's View button may open
 VIEW_FOLDERS = ("~/Developer/vid-img-editing", "~/Desktop/Mockups")  # a View file must sit under one of these
 
 

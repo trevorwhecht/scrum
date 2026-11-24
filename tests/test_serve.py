@@ -16673,7 +16673,8 @@ class ViewRouteTest(unittest.TestCase):
         for line, argv in ((f"View: QuickTime Player {self.clip}\n", ["open", "-a", "QuickTime Player", os.path.realpath(self.clip)]),
                            ("View: Edits\n", ["open", "-a", "Edits"]),
                            (f"View: VectorCraft {self.mock / 'a.svg'}\n", ["open", "-a", "VectorCraft", os.path.realpath(self.mock / "a.svg")]),
-                           (f"View: PhotoCraft {self.mock / 'a.svg'}\n", ["open", "-a", "PhotoCraft", os.path.realpath(self.mock / "a.svg")])):
+                           (f"View: PhotoCraft {self.mock / 'a.svg'}\n", ["open", "-a", "PhotoCraft", os.path.realpath(self.mock / "a.svg")]),
+                           (f"View: Preview {self.mock / 'a.svg'}\n", ["open", "-a", "Preview", os.path.realpath(self.mock / "a.svg")])):
             with self.subTest(line=line):
                 self.run.reset_mock()
                 self.put(line=line)
