@@ -15543,7 +15543,44 @@ class StuckAlertTest(unittest.TestCase):
         self.assertEqual(err.getvalue(), "watchdog: stuck alert: imsg-send.sh: exec format error\n")
         self.assertEqual(self.logged()[1:], [{"process": "Stuck alert", "result": "failed", "reason": self.MEM,
                                               "error": "imsg-send.sh: exec format error"}])
-        self.assertIsNone(self.alert(750), "a failed send still ends the episode's text")
+        self.assertEqual(self.alert(750), self.LEFTOVER, "job 1458: a failed send is tried again on the next held pulse")
+        self.assertIsNone(self.alert(900), "a send that exited 0 ends the episode's text")
+
+    def test_sent_is_written_only_after_a_send_exits_zero(self):
+        """Job 1458: a timeout or nonzero exit leaves `sent` unset, so the next held pulse sends again."""
+        def timed_out(argv):
+            raise subprocess.TimeoutExpired(argv, 120)
+        self.alert(0)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(self.serve.stuck_alert(self.NOW + 150, self.MEM, 0, send=timed_out))
+            self.assertIsNone(self.serve.stuck_alert(self.NOW + 300, self.MEM, 0, send=lambda argv: subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="no")))
+        self.assertIsNone(json.loads((self.base / "stuck-alert.json").read_text())["sent"])
+        self.assertEqual(self.alert(450), self.LEFTOVER)
+        self.assertEqual(json.loads((self.base / "stuck-alert.json").read_text())["sent"], self.NOW + 450)
+        self.assertIsNone(self.alert(600))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_background_send_never_blocks_and_one_is_in_flight(self):
+        """Job 1458: with background=True the pulse returns at once; a second fire during the send does nothing."""
+        gate, started, calls = threading.Event(), threading.Event(), []
+
+        def slow(argv):
+            calls.append(argv)
+            started.set()
+            gate.wait(10)
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        self.addCleanup(gate.set)
+        self.alert(0)
+        self.assertIsNone(self.serve.stuck_alert(self.NOW + 150, self.MEM, 0, send=slow, background=True))
+        self.assertTrue(started.wait(5))
+        self.assertIsNone(self.serve.stuck_alert(self.NOW + 300, self.MEM, 0, send=slow, background=True))
+        self.assertEqual(len(calls), 1, "one send in flight at a time")
+        self.assertIsNone(json.loads((self.base / "stuck-alert.json").read_text())["sent"], "not sent until it exits 0")
+        gate.set()
+        self.serve.STUCK_SEND.join(5)
+        self.assertEqual(json.loads((self.base / "stuck-alert.json").read_text())["sent"], self.NOW + 150)
+        self.assertEqual(self.logged(), [{"process": "Stuck alert", "result": "sent", "reason": self.MEM}])
 
     def test_nonzero_sender_exit_logs_failed(self):
         """Job 1420: imsg-send.sh that runs but exits nonzero logs failed with its last output line, never sent."""
