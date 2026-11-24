@@ -138,6 +138,37 @@ class PulseLockTest(unittest.TestCase):
             serve.watchdog_tick()
         publish.assert_called_once_with({})
 
+    def test_pulse_snapshot_never_empty(self):
+        """pulse_loop's snapshot, run 20000 times against a thread republishing the same full map, never sees it empty
+        or half built. A tiny switch interval makes the GIL hand over between clear() and update() often."""
+        full = {f"p{i}": bool(i % 2) for i in range(50)}
+        serve.publish_busy(full)
+        old = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        self.addCleanup(sys.setswitchinterval, old)
+        stop = threading.Event()
+
+        def publisher():
+            while not stop.is_set():
+                serve.publish_busy(full)
+        t = threading.Thread(target=publisher, daemon=True)
+        t.start()
+        self.addCleanup(t.join, 30)
+        self.addCleanup(stop.set)
+        snaps, sleeps = [], []
+
+        def sleep(_):
+            sleeps.append(1)
+            if len(sleeps) == 20000:
+                raise StopIteration
+        with mock.patch.object(serve, "pulse_tick", side_effect=snaps.append), \
+                mock.patch.object(serve.time, "sleep", side_effect=sleep):
+            with self.assertRaises(StopIteration):
+                serve.pulse_loop()
+        self.assertEqual(len(snaps), 20000)
+        bad = [len(s) for s in snaps if s != full]
+        self.assertEqual((len(bad), bad[:5]), (0, []))  # count and the first few bad snapshot sizes
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4339,10 +4339,12 @@ def publish_busy(busy):
 
 def pulse_loop():
     """Run pulse_tick every 60 s from its own thread, so its stuck_alert never waits on a slow watchdog_tick step.
-    One bad pulse never ends the thread."""
+    One bad pulse never ends the thread. PULSE_BUSY is copied under PULSE_LOCK, so the copy is never a half publish."""
     while True:
         try:
-            pulse_tick(dict(PULSE_BUSY))
+            with PULSE_LOCK:
+                busy = dict(PULSE_BUSY)
+            pulse_tick(busy)
         except (Exception, SystemExit) as e:
             print(f"watchdog: pulse: {e}", file=sys.stderr, flush=True)
         time.sleep(60)
