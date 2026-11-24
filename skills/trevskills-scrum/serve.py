@@ -998,6 +998,7 @@ def idle_claim(project, root, jobs) -> bool:
                 for c in out["ready"]])
 
 
+OPS_RESUME = "ops job: there is no worktree or build session to resume. Fix: answer its question on the card, or run the lane again by hand (lanes/ops.md)."
 LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main checkout and run "
                  "/trevskills-commitpush, or discard it, then click Abort.")
 
@@ -1011,6 +1012,8 @@ def resume_refusal(project, root, job, manual=False):
     also waits for the overlap rules `ready` applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
+    if board.no_pr_job(job):
+        return OPS_RESUME
     global RESUME_ROOM
     machine = board.resume_gate(root, job, manual=manual)  # its own live idle session skips the CPU load gate
     if machine and RESUME_ROOM is not None:
@@ -2246,7 +2249,7 @@ def auto_resume(project, root, jobs):
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 continue
     for job in jobs:
-        if job.get("paused"):
+        if job.get("paused") or board.no_pr_job(job):  # an ops job has no worktree or builder: never resumed (lanes/ops.md)
             continue
         if job.get("limitResetAt") and job["stage"] in board.WATCHED:
             busy = resume_held(project, root, job, jobs, now) or busy
@@ -2292,7 +2295,7 @@ def auto_resume(project, root, jobs):
                     check_resumed = True
                 resume_job(project, root, job, jobs)
             continue
-        if not board.stalled(job) or board.lilguy_in_checkout(job) or running(project, job["id"]):
+        if not board.stalled(job) or board.lilguy_in_checkout(job) or board.no_pr_job(job) or running(project, job["id"]):
             continue
         key = f"{project}/{job['id']}"
         if str(job.get("reason") or "").startswith(board.STALL + board.CI_BILLING_WAIT):  # no try spent, never spent
@@ -2923,7 +2926,7 @@ def respawn_exited(project, root):
     alive, flagged = None, []
     for key, run in runs:
         job = next((j for j in jobs if j["id"] == key.split("/", 1)[1]), None)
-        if not job or job.get("stage") not in board.WATCHED or job.get("waiting") or board.lilguy_in_checkout(job) \
+        if not job or job.get("stage") not in board.WATCHED or job.get("waiting") or board.lilguy_in_checkout(job) or board.no_pr_job(job) \
                 or job.get("paused") or job.get("stalled") or board.queue_waiting(job):
             run["handled"] = True
             continue

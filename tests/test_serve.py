@@ -7661,6 +7661,25 @@ class AutoResumeTest(unittest.TestCase):
         s.AUTO_RESUME["p/limit"] = [s.AUTO_RESUME_MAX, 0.0]
         self.assertEqual(self.sweep(), [], "capped")
 
+    def test_ops_auto_resume_never_resumes(self):
+        """Job 1423: a stalled or needs-human lane=ops job is never resumed; a lane=standard job in the same state is."""
+        s = self.serve
+        (self.root / "runs" / "o.log").write_text("Traceback: something else broke")
+        for lane, want in (("ops", []), ("standard", ["o"])):
+            for stage, reason in (("needs-human", "stalled in plan: no live session"),
+                                  ("build", "stalled: no board update for 30 min and no live session")):
+                with self.subTest(lane=lane, stage=stage):
+                    s.AUTO_RESUME.clear(); s.STALL_RESUMED.clear()
+                    self.jobs = [{"id": "o", "stage": stage, "lane": lane, "stalled": stage == "build",
+                                  "reason": reason, "runlog": "runs/o.log"}]
+                    with mock.patch.object(s, "resume_refusal", return_value=None), mock.patch.object(s, "take_room", return_value=True):
+                        self.assertEqual(self.sweep(), want)
+
+    def test_ops_resume_refusal(self):
+        s = self.serve
+        self.assertIn("ops job", s.resume_refusal("p", self.root, {"id": "o", "lane": "ops", "stage": "build"}))
+        self.assertIn("ops job", s.resume_refusal("p", self.root, {"id": "o", "lane": "ops", "stage": "build"}, manual=True))
+
     def test_auto_resume_notes_stall_holds(self):
         """Job 927: each hold that passes a stalled job over writes one token to stall-holds.txt; a resumed job none."""
         s, b = self.serve, self.serve.board
@@ -9450,6 +9469,22 @@ class ExitedRunSweepTest(unittest.TestCase):
                 self.serve.respawn_exited("p", self.root)
         self.assertEqual(self.serve.STALL_RESUMED, set())
         self.assertTrue(self.job("x")["stalled"], "left stalled, so auto_resume retries it")
+
+    def test_ops_respawn_exited_skips_job(self):
+        """Job 1423: a lane=ops job has no worktree or builder: the exited-session pass handles the run and flags nothing."""
+        for lane, flagged in (("ops", False), ("standard", True)):
+            with self.subTest(lane):
+                self.serve.RUNS.clear()
+                self.write([{"id": "x", "stage": "build", "lane": lane}])
+                self.run_entry("x")
+                before = (self.root / "board.json").read_text()
+                with mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False), \
+                        mock.patch.object(self.serve, "resume_refusal", return_value="no"):
+                    got = self.serve.respawn_exited("p", self.root)
+                self.assertEqual(got, ["x"] if flagged else [])
+                self.assertTrue(self.serve.RUNS["p/x"]["handled"])
+                if not flagged:
+                    self.assertEqual((self.root / "board.json").read_text(), before)
 
     def test_respawn_exited_leaves_paused_job(self):
         (self.root / "runs").mkdir()

@@ -3184,7 +3184,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(key, board.STOP_TITLES, span)
             self.assertEqual(words[words.index("--title") + 2], "--recommend", span)
             self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot'|a 'it is not a code failure; the board resumes it when CI runs again'|a 'the machine was overloaded, not the code')$")
-        self.assertEqual(len(board.STOP_TITLES), 20)
+        self.assertEqual(len(board.STOP_TITLES), 23)
         stops = self.lane("stops")
         for key, meaning in board.STOP_TITLES.items():
             self.assertRegex(key, r"^[A-Z]+(_[A-Z]+)*$")
@@ -4104,6 +4104,23 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                 self.assertTrue((skill / "lanes" / f"{name}.md").is_file(), f"{f.name} -> {name}")
                 referenced.add(name)
         self.assertLessEqual(set(MOVED), referenced)
+
+    def test_ops_lane_file(self):
+        """Job 1423: lanes/ops.md is the ops lane's shared flow; the kind files come in later jobs."""
+        lane = self.lane("ops")
+        for phrase in ("1. **Route.**", "2. **Ledger.**", "3. **Stops.**", "4. **Finish.**",
+                       "`ops-data`: read `$HOME/.claude/skills/trevskills-scrum/lanes/ops-data.md`",
+                       "`ops-content`: read `$HOME/.claude/skills/trevskills-scrum/lanes/ops-content.md`",
+                       "While that file is missing the job stops with the **No kind** ask",
+                       "--title BUILDER_BLOCKED --recommend <key> '<why>'",
+                       "Before anything else in New job, run `B set $ID lane=ops kind=<kind>`",
+                       "this lane replaces New job, the spec writer, the Check gate, Review and Merge",
+                       "there is no worktree, branch or PR", "never spawns a scrum agent",
+                       "Ops jobs run only on the main Mac", "per-job ledger", "Append to it after every step",
+                       "reads the job ledger first on every resume",
+                       "The final report gives the job id, the kind, the stage, what ran or was approved",
+                       "There is no PR URL"):
+            self.assertIn(phrase, lane, phrase)
 
     def test_edit_lane(self):
         """Job 1362 (was job 1340's video lane): every edit runs in one lane, outside git, with its own agents."""

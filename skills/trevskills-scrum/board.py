@@ -213,8 +213,8 @@ FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "bas
 ACTIVE = ("spec", "build", "check", "review", "approve", "merging", "deploying")  # stages an interactive session can pause in
 # Where the job's terminal and run log are: both are matched or read by path, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
-          "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy|edit)$"),  # no lane key = standard
-          "kind": re.compile(r"^edit-(?:reel|animation|vector|photo)$"),  # an edit job's kind (edit_kind, lanes/edit.md)
+          "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy|edit|ops)$"),  # no lane key = standard
+          "kind": re.compile(r"^(?:edit-(?:reel|animation|vector|photo)|ops-data|ops-content|knowledge)$"),  # an edit or ops job's kind (edit_kind, ops_kind, lanes/edit.md, lanes/ops.md)
           "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
           "account": re.compile(r"^[a-z0-9-]{1,20}$"),  # the accounts() name board.spawn ran the session on
           "reset": re.compile(r"^[0-9]{0,12}$"),  # the account's seven_day resets_at when board.spawn recorded it: fallback_account favours the recorded account only until then
@@ -250,6 +250,9 @@ STOP_TITLES = {
     "AGENT_MISSING": "a scrum agent could not be loaded (Agent type not found), so the job stopped instead of running a stand-in agent",
     "VIDEO_REVIEW": "a video job needs Trevor to approve its storyboard or a cut, or to send notes",
     "EDIT_APPROVE": "an edit is ready: Trevor views it and approves, or sends notes",
+    "CONTENT_QUESTIONS": "an ops content job needs Trevor's answers before it can write the draft",
+    "CONTENT_DRAFT": "an ops content job has a draft ready for Trevor to approve or send notes on",
+    "DATA_RUN": "an ops data job needs Trevor's OK before it runs on production data",
 }
 
 # The scrum commands a needs-human question's option may run (shape only: the id need not be the asked job's).
@@ -3070,7 +3073,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
         hits["fable_misuse"] += [job_id for line in fable if simple and line.split("\t")[2:3] == ["fable"]]
         job = board.get(job_id, {})
         if job.get("stage") == "done" and (str(job.get("reason") or "").startswith("merged, not live")
-                                          or job.get("lane") not in ("lilguy", "runall", "bigboy", "edit") and not job.get("pr")):
+                                          or job.get("lane") not in ("lilguy", "runall", "bigboy", "edit", "ops") and not job.get("pr")):
             m = re.search(r"/pull/(\d+)/?$", str(job.get("pr") or ""))
             if m and m[1] in on_main():  # main holds the PR: a stale reason must not flag it
                 continue
@@ -4807,6 +4810,7 @@ def shop_room_path() -> Path:
 
 NO_GIT_RE = re.compile(r"^- Git: *none\s*$", re.M | re.I)
 EDIT_KIND_RE = re.compile(r"^Kind: (edit-reel|edit-animation|edit-vector|edit-photo)\s*$", re.M)
+OPS_KIND_RE = re.compile(r"^Kind: (ops-data|ops-content)\s*$", re.M)
 
 
 def no_git(root) -> bool:
@@ -4821,8 +4825,19 @@ def no_git(root) -> bool:
 def edit_kind(text: str) -> str | None:
     """The kind on the first `Kind: edit-reel|edit-animation|edit-vector|edit-photo` line of a feature.md text, else
     None (job 1362). A job with a kind runs lane=edit (lanes/edit.md)."""
-    m = EDIT_KIND_RE.search(text or "")
+    return _kind_match(EDIT_KIND_RE, text)
+
+
+def _kind_match(pattern, text: str) -> str | None:
+    """The kind in the first line of `text` that `pattern` (EDIT_KIND_RE or OPS_KIND_RE) matches, else None."""
+    m = pattern.search(text or "")
     return m.group(1) if m else None
+
+
+def ops_kind(text: str) -> str | None:
+    """The kind on the first `Kind: ops-data|ops-content` line of a feature.md text, else None (`Kind: knowledge` is a
+    label only and never matches). A job with a kind runs lane=ops (lanes/ops.md)."""
+    return _kind_match(OPS_KIND_RE, text)
 
 
 def shop_project_excluded(root) -> bool:
@@ -5234,7 +5249,7 @@ def resume_first(jobs: list[dict]) -> int:
         return bool(p) and (bool(p.get("paused")) or p.get("stage") != "running")
 
     return sum(bool(j.get("paused")) and j.get("stage") not in ("done", "aborted")
-               or stalled(j) and not lilguy_in_checkout(j) and not parent_idle(j) for j in jobs)
+               or stalled(j) and not lilguy_in_checkout(j) and not no_pr_job(j) and not parent_idle(j) for j in jobs)
 
 
 # The Claude accounts automated sessions may run on, in order: (name, config dir, reserve) where reserve is
@@ -7218,12 +7233,17 @@ def lilguy_in_checkout(job: dict) -> bool:
     return job.get("lane") == "lilguy" and not job.get("worktree")
 
 
+def no_pr_job(job: dict) -> bool:
+    """True for an ops job (lanes/ops.md): no worktree, branch, PR or builder session, so nothing resumes it."""
+    return job.get("lane") == "ops"
+
+
 def merge_refusal(job: dict) -> str | None:
     """Why `job` may not move to done, or None. Its PR must be MERGED; a PR-less job may finish only on a parent
     (bigboy/runall) lane, an edit job (lanes/edit.md: no worktree or PR) or a lilguy job in the main checkout."""
     pr = job.get("pr")
     if not pr:
-        return None if job.get("lane") in ("bigboy", "runall", "edit") or lilguy_in_checkout(job) else "not done: no PR recorded"
+        return None if job.get("lane") in ("bigboy", "runall", "edit", "ops") or lilguy_in_checkout(job) else "not done: no PR recorded"
     m = re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", pr)
     if not m:
         return f"not done: could not confirm PR {pr} is merged: not a GitHub pull request URL"
@@ -8347,7 +8367,7 @@ def resume_waits(job: dict, by_id: dict) -> bool:
     needs-human, never paused: job 751), not lilguy-in-checkout, not parked for cool down or GitHub billing, with no
     parent or a running, unpaused Run-all/BigBoy parent."""
     reason = str(job.get("reason") or "")
-    if not stalled(job) or job.get("stage") == "needs-human" or lilguy_in_checkout(job) \
+    if not stalled(job) or job.get("stage") == "needs-human" or lilguy_in_checkout(job) or no_pr_job(job) \
             or reason.startswith((STALL + COOLDOWN_PARK, STALL + CI_BILLING_WAIT)):
         return False
     p = by_id.get(job.get("parent")) if job.get("parent") else None
@@ -8655,7 +8675,7 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
             # limitResetAt: serve.py holds the job until its usage limit resets, then auto_resume restarts it.
             # play_queued: serve.py's own CPU/RAM launch gate holds the launch: waiting, not stalled.
             stale = [j for j in board["jobs"] if j.get("stage") in WATCHED and not j.get("waiting") and not queue_waiting(j)
-                     and not j.get("paused") and not lilguy_in_checkout(j) and not j.get("limitResetAt") and not j.get("play_queued")
+                     and not j.get("paused") and not lilguy_in_checkout(j) and not no_pr_job(j) and not j.get("limitResetAt") and not j.get("play_queued")
                      and not j.get("stalled") and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             idle_cutoff = datetime.now(timezone.utc) - timedelta(hours=IDLE_HOURS)
