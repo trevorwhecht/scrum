@@ -9216,6 +9216,60 @@ class CloudPollTest(unittest.TestCase):
         clear.assert_called_once_with(root, job_id)
         self.assertNotIn("artifactsPending", real.read_board(root)["jobs"][0])
 
+    def shop_job(self, tail):
+        """A real board with one stage-cloud shop job and feature.md, whose ended session's log tail is tail; run one
+        cloud_tick with no PR anywhere. Returns (job, backlog text, stderr)."""
+        s = self.serve
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = tmp / "scrum"
+        job_id = s.board.cmd_new(root, "Leads finder")
+        (root / "jobs" / job_id).mkdir(parents=True, exist_ok=True)
+        (root / "jobs" / job_id / "feature.md").write_text("Leads finder skill text\n")
+        with s.board.locked_board(root) as b:
+            job = s.board.find(b, job_id)
+            job.update(stage="cloud", shop="4242", account="owa")
+        jobs = s.board.read_board(root)["jobs"]
+        s.SHOP_PROBE_LAST.clear()
+        self.addCleanup(s.SHOP_PROBE_LAST.clear)
+        with mock.patch.object(s.shop, "ended", return_value=tail), \
+                mock.patch.object(s.board, "gh_api", return_value=[]), \
+                mock.patch.object(s.board, "branch_pushed", return_value=False), \
+                mock.patch.object(s.board, "cooling_down", return_value=False), \
+                mock.patch.object(s, "spawn") as sp, \
+                mock.patch("sys.stderr", new=io.StringIO()) as err:
+            s.cloud_tick("p", root, jobs, now=10_000)
+        sp.assert_not_called()
+        backlog = (root / "backlog.md").read_text() if (root / "backlog.md").exists() else ""
+        return s.board.read_board(root)["jobs"][0], backlog, err.getvalue()
+
+    def test_shop_session_that_closed_its_job_is_not_requeued(self):
+        """Job 1844: a shop session that moved its item to another backlog (or aborted it obsolete / already fixed) and
+        opened no PR is aborted with that reason, never requeued with SHOP_ENDED."""
+        cases = [
+            ("moved", "Spec says WRONG PROJECT.\nRan B abort 1844 --reason 'moved to trevorhecht-skills backlog'\n"
+                      "Done.\n", "moved to trevorhecht-skills backlog"),
+            ("moved, backticked", "Moved the item to the `trevorhecht-skills` backlog and aborted the job.\n",
+             "moved to trevorhecht-skills backlog"),
+            ("obsolete", "Working\nAborted as obsolete: duplicate of job 1844, already on the backlog\n",
+             "obsolete: duplicate of job 1844, already on the backlog"),
+            ("already fixed", "Checked main.\n**Looks already fixed:** the guard landed in #1341.\n",
+             "looks already fixed: the guard landed in #1341."),
+        ]
+        for why, tail, reason in cases:
+            with self.subTest(why):
+                self.serve.CLOUD_LAST.clear()
+                job, backlog, err = self.shop_job(tail)
+                self.assertEqual((job["stage"], job["reason"]), ("aborted", reason))
+                self.assertNotIn("Leads finder skill text", backlog, "closed on purpose: nothing requeued")
+                self.assertEqual(err, "")
+
+    def test_shop_session_ended_without_closing_still_requeued(self):
+        self.serve.CLOUD_LAST.clear()
+        job, backlog, _ = self.shop_job("Working on it\nThe job is not obsolete yet\nDone for now\n")
+        self.assertEqual((job["stage"], job["reason"]), ("aborted", "requeue: shop session ended without a PR"))
+        self.assertIn("Leads finder skill text", backlog)
+
     def test_cloud_poll_runs_for_pending_without_cloud_job(self):
         jobs = [{"id": "003-late", "stage": "done", "artifactsPending": "2026-10-22T00:00:00+00:00"}]
         cs, sp = self.tick(jobs, now=10_000, result={"moved": [], "arrived": ["003-late"], "error": None})
@@ -13598,6 +13652,68 @@ class E2eFullTest(unittest.TestCase):
         self.git("commit", "-q", "-m", "yarn")
         self.serve.e2e_full_worktree(self.repo, self.root, self.git("rev-parse", "HEAD"))
         self.assertEqual((wt / "installs.txt").read_text(), "x\nx\n", "Install none runs nothing")
+
+    def commit_schema(self, body):
+        """Commit prisma/schema.prisma with body; return the new head."""
+        (self.repo / "prisma").mkdir(exist_ok=True)
+        (self.repo / "prisma" / "schema.prisma").write_text(body)
+        self.git("add", "prisma/schema.prisma")
+        self.git("commit", "-q", "-m", "schema")
+        return self.git("rev-parse", "HEAD")
+
+    def generate_patch(self, argv=("sh", "-c", "echo g >> steps.txt")):
+        """Point E2E_FULL_PRISMA at a stand-in, so no test runs the real npx."""
+        return mock.patch.object(self.serve, "E2E_FULL_PRISMA", list(argv))
+
+    def test_e2e_worktree_generates_prisma_client_after_install_when_created(self):
+        """Job 1479: a fresh e2e worktree with prisma/schema.prisma runs prisma generate right after Install."""
+        head = self.commit_schema("model Lead { id Int @id }\n")
+        self.fresh_worktree()
+        (self.root / "project.md").write_text("- E2E: sh run-e2e.sh\n- Install: echo i >> steps.txt\n")
+        with self.generate_patch():
+            wt = self.serve.e2e_full_worktree(self.repo, self.root, head)
+        self.assertEqual((wt / "steps.txt").read_text(), "i\ng\n")
+
+    def test_e2e_worktree_generates_prisma_client_when_schema_changes(self):
+        """Job 1908 repro: a reused worktree whose schema changed between its old HEAD and head regenerates the client."""
+        head1 = self.commit_schema("model Lead { id Int @id }\n")
+        self.fresh_worktree()
+        (self.root / "project.md").write_text("- E2E: sh run-e2e.sh\n- Install: none\n")
+        with self.generate_patch():
+            wt = self.serve.e2e_full_worktree(self.repo, self.root, head1)
+            self.assertEqual((wt / "steps.txt").read_text(), "g\n", "created: generated once")
+            self.serve.e2e_full_worktree(self.repo, self.root, self.merge("no schema change"))
+            self.assertEqual((wt / "steps.txt").read_text(), "g\n", "schema unchanged: no second generate")
+            self.serve.e2e_full_worktree(self.repo, self.root,
+                                         self.commit_schema("model Lead { id Int @id\n  reopenedAt DateTime? }\n"))
+            self.assertEqual((wt / "steps.txt").read_text(), "g\ng\n", "schema changed: generated again")
+
+    def test_e2e_worktree_generates_prisma_client_after_lockfile_install(self):
+        """A lockfile change reinstalls node_modules, which drops the generated client: generate runs after it."""
+        head1 = self.commit_schema("model Lead { id Int @id }\n")
+        self.fresh_worktree()
+        (self.root / "project.md").write_text("- E2E: sh run-e2e.sh\n- Install: echo i >> steps.txt\n")
+        with self.generate_patch():
+            wt = self.serve.e2e_full_worktree(self.repo, self.root, head1)
+            (self.repo / "package-lock.json").write_text("lock\n")
+            self.git("add", "package-lock.json")
+            self.git("commit", "-q", "-m", "lock")
+            self.serve.e2e_full_worktree(self.repo, self.root, self.git("rev-parse", "HEAD"))
+        self.assertEqual((wt / "steps.txt").read_text(), "i\ng\ni\ng\n")
+
+    def test_e2e_worktree_no_prisma_schema_runs_no_generate(self):
+        self.fresh_worktree()
+        with self.generate_patch():
+            wt = self.serve.e2e_full_worktree(self.repo, self.root, self.base)
+        self.assertFalse((wt / "steps.txt").exists(), "no prisma/schema.prisma: no generate")
+
+    def test_e2e_worktree_failed_generate_drops_worktree(self):
+        head = self.commit_schema("model Lead { id Int @id }\n")
+        self.fresh_worktree()
+        with self.generate_patch(("sh", "-c", "echo boom; exit 4")), self.assertRaises(RuntimeError) as e:
+            self.serve.e2e_full_worktree(self.repo, self.root, head)
+        self.assertEqual(str(e.exception), "e2e worktree prisma generate exited 4: boom")
+        self.assertFalse(self.wt.exists(), "a failed generate drops the worktree, so the next run generates again")
 
     def test_e2e_worktree_copies_env_local(self):
         self.serve.e2e_full_worktree(self.repo, self.root, self.base)

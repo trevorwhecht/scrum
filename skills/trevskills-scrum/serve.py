@@ -1858,6 +1858,8 @@ def e2e_full_wait(proc, loads, started) -> int:
 
 
 E2E_FULL_LOCKFILES = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb")
+E2E_FULL_SCHEMA = "prisma/schema.prisma"
+E2E_FULL_PRISMA = ["npx", "prisma", "generate"]  # run in the e2e worktree after Install, as lanes/newjob.md does
 
 
 def e2e_full_worktree(repo, root, head) -> Path:
@@ -1866,8 +1868,11 @@ def e2e_full_worktree(repo, root, head) -> Path:
     `git checkout --detach` run inside it. Every top-level <repo>/.env* regular file git does not track
     (`git ls-files --error-unmatch`, as lanes/newjob.md links them) is copied in on every call. PROJECT's
     Install command runs in it when it was just created or a lockfile differs between its old HEAD and head
-    (`git diff --name-only`); an empty or `none` Install runs nothing. A failed git call or a failed install
-    (the worktree is removed first, so the next call reinstalls) raises (ValueError, OSError or RuntimeError)."""
+    (`git diff --name-only`); an empty or `none` Install runs nothing. Then, when E2E_FULL_SCHEMA exists in it,
+    E2E_FULL_PRISMA (`npx prisma generate`) runs when it was just created, Install just ran (a fresh node_modules
+    has no client) or that file differs between its old HEAD and head (job 1479: a schema merge left a stale client).
+    A failed git call or a failed install or generate (the worktree is removed first, so the next call reinstalls and
+    regenerates) raises (ValueError, OSError or RuntimeError)."""
     head = str(head)
     if head.startswith("-"):
         raise ValueError(f"bad head {head!r}")
@@ -1888,24 +1893,29 @@ def e2e_full_worktree(repo, root, head) -> Path:
             continue  # tracked: the worktree's checkout already holds the committed copy
         except ValueError:
             shutil.copyfile(env, wt / env.name)
+    names = None if old is None else board._git(wt, "diff", "--name-only", old, head, "--").decode().splitlines()
+    steps = []  # (label, command, shell)
     install = e2e_command(root, "Install")
-    if install and install.lower() != "none":
-        changed = old is None or any(Path(n).name in E2E_FULL_LOCKFILES
-                                     for n in board._git(wt, "diff", "--name-only", old, head, "--").decode().splitlines())
-        if changed:
+    if install and install.lower() != "none" and (names is None or any(Path(n).name in E2E_FULL_LOCKFILES
+                                                                       for n in names)):
+        steps.append(("install", install, True))
+    if (wt / E2E_FULL_SCHEMA).is_file() and (names is None or steps or E2E_FULL_SCHEMA in names):
+        steps.append(("prisma generate", E2E_FULL_PRISMA, False))
+    for label, cmd, shell in steps:
+        try:
+            r = subprocess.run(cmd, shell=shell, cwd=wt, stdin=subprocess.DEVNULL, capture_output=True, timeout=1800)
+            err = f"exited {r.returncode}: " + (r.stdout + r.stderr).decode(errors="replace").strip()[-200:] \
+                if r.returncode else None
+        except subprocess.TimeoutExpired:
+            err = "timed out"
+        except OSError as e:  # npx missing: drop the worktree like a failed step
+            err = f"failed: {e}"
+        if err:  # drop the worktree so the next run creates it again and reinstalls, never runs on a part install
             try:
-                r = subprocess.run(install, shell=True, cwd=wt, stdin=subprocess.DEVNULL, capture_output=True,
-                                   timeout=1800)
-                err = f"exited {r.returncode}: " + (r.stdout + r.stderr).decode(errors="replace").strip()[-200:] \
-                    if r.returncode else None
-            except subprocess.TimeoutExpired:
-                err = "timed out"
-            if err:  # drop the worktree so the next run creates it again and reinstalls, never runs on a part install
-                try:
-                    board._git(repo, "worktree", "remove", "--force", str(wt))
-                except ValueError:
-                    shutil.rmtree(wt, ignore_errors=True)
-                raise RuntimeError(f"e2e worktree install {err}")
+                board._git(repo, "worktree", "remove", "--force", str(wt))
+            except ValueError:
+                shutil.rmtree(wt, ignore_errors=True)
+            raise RuntimeError(f"e2e worktree {label} {err}")
     return wt
 
 
@@ -2531,6 +2541,26 @@ def shop_pr_close(project, root, job_id):
         print(f"cloud-sync: {project}: {job_id}: PR close failed: {e}", file=sys.stderr, flush=True)
 
 
+# an ended shop session's log tail saying it closed its job on purpose (job 1844): an `obsolete:` or `looks already
+# fixed:` abort (lanes/cloud.md Needs-human), or newjob.md 3b's `moved to <folder> backlog`
+SHOP_CLOSED_RE = re.compile(r"\b(obsolete|looks already fixed):[*_]*[ \t]+([^\s'\"`*][^\n'\"`]*)"
+                            r"|\bmoved (?:the item |this item |it )?to (?:the )?[`*]*([\w.-]+)[`*]* backlog\b", re.I)
+
+
+def shop_closed(tail):
+    """The abort reason an ended shop session's log tail gives for closing its own job (SHOP_CLOSED_RE's last match,
+    so the session's final word wins): `obsolete: <why>`, `looks already fixed: <why>` (prefix lower-cased, the rest
+    through board.clean) or `moved to <folder> backlog`; None when it shows none."""
+    m = None
+    for m in SHOP_CLOSED_RE.finditer(tail or ""):
+        pass
+    if m is None:
+        return None
+    if m.group(3):
+        return f"moved to {m.group(3)} backlog"
+    return board.clean(f"{m.group(1).lower()}: {m.group(2).rstrip(' *_')}", 300)
+
+
 def cloud_tick(project, root, jobs, now=None):
     """While a job is in stage cloud or awaits its artifacts branch (artifactsPending), run board.py cloud-sync (plain
     Python, no LLM) at most every CLOUD_EVERY seconds, then start a headless `/trevskills-scrum cloud-home <id>` for
@@ -2547,8 +2577,9 @@ def cloud_tick(project, root, jobs, now=None):
     as a spec stall with a local worktree, the PR left open (HOME: no cloud-home spawn; auto_resume's spec-stall rule
     resumes it); with none ended it is called with no ended. After a sync with no error, a usage-limit line in an ended
     session's log tail marks its account limited (note_limit), whatever stage the sync left the job in; one still in
-    stage cloud after the sync (no PR and no branch) is aborted with SHOP_ENDED (requeued unless a BigBoy child), and
-    once that abort took effect, shop_pr_close closes the job's open unlabelled PR, so the rerun opens no duplicate.
+    stage cloud after the sync (no PR and no branch) is aborted with SHOP_ENDED (requeued unless a BigBoy child), or,
+    when its log tail shows it closed the job on purpose (shop_closed: obsolete, looks already fixed, or moved to
+    another project's backlog; job 1844), aborted with that reason and no requeue; once either abort took effect, shop_pr_close closes the job's open unlabelled PR, so the rerun opens no duplicate.
     A no-git project (board.no_git, job 1362) is skipped: none of its jobs goes to the cloud or the shop."""
     if board.cooling_down() or board.no_git(root):
         return
@@ -2586,8 +2617,9 @@ def cloud_tick(project, root, jobs, now=None):
                                      reset if reset and reset > now else now + AUTO_RESUME_EVERY)
                 if job.get("stage") != "cloud":  # a PR or branch the sync just moved wins
                     continue
+                closed = shop_closed(tail)  # the session closed its job on purpose: no requeue, no rerun
                 try:  # re-checks stage cloud under the lock
-                    board._cloud_abort(root, job_id, job.get("pr"), True, SHOP_ENDED)
+                    board._cloud_abort(root, job_id, job.get("pr"), not closed, closed or SHOP_ENDED)
                 except SystemExit as e:
                     print(f"cloud-sync: {project}: {job_id}: {e}", file=sys.stderr, flush=True)
                     continue
