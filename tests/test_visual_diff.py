@@ -87,6 +87,65 @@ class VisualDiffTest(unittest.TestCase):
         self.assertIn("- /b 1440: same", md)
         self.assertIn(f"- /c 390: changed — crop truncated — crop {out / 'c-390.png'}", md)
 
+    def stub_project(self, fail_plain=True, fail_chrome=False):
+        """A project dir whose stub playwright logs each launch's args to launches.json and fails newContext."""
+        proj = self.tmp / "stubproj"
+        for name, body in (
+            ("playwright", "const fs = require('fs');\n"
+             "const log = process.env.STUB_LAUNCH_LOG;\n"
+             "module.exports = { chromium: { async launch(o) {\n"
+             "  const seen = fs.existsSync(log) ? JSON.parse(fs.readFileSync(log, 'utf8')) : [];\n"
+             "  seen.push(o === undefined ? null : o);\n"
+             "  fs.writeFileSync(log, JSON.stringify(seen));\n"
+             f"  if (!(o && o.executablePath) && {str(fail_plain).lower()}) throw new Error('no playwright chromium');\n"
+             f"  if (o && o.executablePath && {str(fail_chrome).lower()}) throw new Error('chrome binary broken');\n"
+             "  return { async newContext() { throw new Error('STOP_AFTER_LAUNCH'); }, async close() {} };\n"
+             "} } };\n"),
+            ("odiff-bin", "module.exports = { compare() {} };\n"),
+            ("sharp", "module.exports = () => {};\n"),
+        ):
+            d = proj / "node_modules" / name
+            d.mkdir(parents=True)
+            (d / "index.js").write_text(body)
+        (proj / "package.json").write_text('{"name": "p"}\n')
+        return proj
+
+    def run_stub(self, chrome, **kw):
+        proj = self.stub_project(**kw)
+        log = self.tmp / "launches.json"
+        env = {k: v for k, v in os.environ.items() if k not in ("NODE_PATH", "SCRUM_CHROME")}
+        env["STUB_LAUNCH_LOG"] = str(log)
+        if chrome is not None:
+            env["SCRUM_CHROME"] = chrome
+        r = subprocess.run([NODE, str(SCRIPT), "--base", "http://127.0.0.1:9", "--head", "http://127.0.0.1:9",
+                            "--out", str(self.tmp / "r" / "visual"), "--project-dir", str(proj), "/"],
+                           capture_output=True, text=True, timeout=60, env=env)
+        return r, json.loads(log.read_text())
+
+    def test_missing_playwright_chromium_falls_back_to_scrum_chrome(self):
+        r, launches = self.run_stub("/fake/chrome")
+        self.assertEqual(launches, [None, {"executablePath": "/fake/chrome"}])
+        self.assertIn("STOP_AFTER_LAUNCH", r.stderr)  # got past launch with the fallback browser
+
+    def test_plain_launch_wins_over_scrum_chrome(self):
+        r, launches = self.run_stub("/fake/chrome", fail_plain=False)
+        self.assertEqual(launches, [None])
+        self.assertIn("STOP_AFTER_LAUNCH", r.stderr)
+
+    def test_no_scrum_chrome_launch_failure_exits_1(self):
+        for chrome in (None, "", "   "):
+            with self.subTest(chrome=chrome):
+                r, launches = self.run_stub(chrome)
+                self.assertEqual(launches, [None])
+                self.assertEqual(r.returncode, 1)
+                self.assertIn("no playwright chromium", r.stderr)
+
+    def test_scrum_chrome_launch_failure_exits_1(self):
+        r, launches = self.run_stub("/fake/chrome", fail_chrome=True)
+        self.assertEqual(launches, [None, {"executablePath": "/fake/chrome"}])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("chrome binary broken", r.stderr)
+
     @staticmethod
     def png_height(path):
         return int.from_bytes(Path(path).read_bytes()[20:24], "big")
