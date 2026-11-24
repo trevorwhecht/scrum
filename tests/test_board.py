@@ -17,6 +17,7 @@ os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # CPU nearly idle unless a test says so;
 os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly nil unless a test says so; no test reads the real load average
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ["SCRUM_SWAP_LOG"] = os.path.join(tempfile.mkdtemp(), "swap.json")  # never the real swap log
+os.environ["SCRUM_IDLE_HOLD"] = os.path.join(tempfile.mkdtemp(), "idle-hold.json")  # never the real idle-hold file
 os.environ.setdefault("SCRUM_PS", os.devnull)  # no live sessions unless a test says so, whatever this machine runs
 os.environ.setdefault("SCRUM_USAGE", os.path.join(os.devnull, "no-usage.json"))  # never Trevor's real usage.json
 os.environ.pop("SCRUM_PW_CHANNEL", None)  # E2E commands carry no --config unless a test sets it
@@ -3771,6 +3772,48 @@ class BoardTest(unittest.TestCase):
                 self.assertEqual(board.vm_pressure_reason(new=0), warn, f"unknown {reading} keeps the hold")
         with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2"), mock.patch.object(board, "live_sessions", return_value=0):
             self.assertEqual(board.vm_pressure_reason(), warn, "a sweep or full E2E is no job's work: always held")
+
+    def test_idle_hold_releases_one_claim(self):
+        """Job 1460: warn with no session live held the queue about 14 h; after IDLE_HOLD_SECS idle, one claim starts."""
+        warn = "memory pressure warn (kernel level 2)"
+        hold = Path(self.tmp.name) / "idle-hold.json"
+        pulse = Path(self.tmp.name) / "pulse.log"
+
+        def ok(live=0, ram="34", level="2", swap="10"):
+            with self.machine(ram, "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE=level, SCRUM_SWAP_PCT=swap,
+                                                            SCRUM_IDLE_HOLD=str(hold), SCRUM_PULSE=str(pulse)), \
+                    mock.patch.object(board, "live_sessions", return_value=live), \
+                    mock.patch.object(board, "swap_grew", return_value=False):
+                return board.machine_ok(self.tmp.name)
+
+        def age(secs):
+            hold.write_text(json.dumps({"since": time.time() - secs}))
+        self.assertEqual(ok(), warn, "first refusal starts the timer")
+        self.assertTrue(hold.exists())
+        age(board.IDLE_HOLD_SECS - 60)
+        self.assertEqual(ok(), warn, "not yet 30 min")
+        age(board.IDLE_HOLD_SECS + 60)
+        self.assertIsNone(ok(), "30 min idle: one claim starts")
+        self.assertIsNone(ok(), "the release stays until a session is live")
+        rows = [json.loads(l) for l in pulse.read_text().splitlines()]
+        self.assertEqual([r.get("idle_release") for r in rows], [warn], "one pulse line a release")
+        self.assertEqual(ok(live=1), warn, "a live session refuses again and restarts the timer")
+        self.assertFalse(hold.exists())
+        age(board.IDLE_HOLD_SECS + 60)
+        self.assertEqual(ok(live=1), warn, "never with a session live")
+        age(board.IDLE_HOLD_SECS + 60)
+        self.assertEqual(ok(level="4", ram="90"), "memory pressure critical (kernel level 4)", "critical never releases")
+        age(board.IDLE_HOLD_SECS + 60)
+        self.assertEqual(ok(ram="15"), "free RAM 15% (< 20%)", "low free RAM never releases")
+        age(board.IDLE_HOLD_SECS + 60)
+        self.assertIsNone(ok(level="1"), "no hold: nothing to release")
+        self.assertFalse(hold.exists())
+        swap = "swap used 56.4% of RAM (> 25%)"
+        self.assertEqual(ok(level="1", ram="30", swap="56.4"), swap, "a swap hold starts the timer too")
+        age(board.IDLE_HOLD_SECS + 60)
+        self.assertIsNone(ok(level="1", ram="30", swap="56.4"), "and releases after it")
+        hold.write_text("not json{")
+        self.assertEqual(ok(), warn, "corrupt file: starts the timer, never releases")
 
     def test_ram_room_memory_pressure_floor(self):
         with self.machine("60", "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2", SCRUM_PS=os.devnull):
