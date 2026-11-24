@@ -8045,7 +8045,7 @@ print("stub err", file=sys.stderr)
             settings = json.loads(rec["argv"][rec["argv"].index("--settings") + 1])
             return rec, settings
 
-        with mock.patch.dict(os.environ, {"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1"}):  # a Run-all parent's own setting
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}):  # a Run-all parent's own settings (job 1481)
             for job_id, mds in (("001-std", "1"), ("999-not-a-job", "1"), ("002-lil", None), ("003-pinned", None)):
                 rec, settings = run(job_id)
                 self.assertEqual(rec["argv"][:7], ["-p", "/p", "--model", "sonnet", "--permission-mode", "acceptEdits", "--strict-mcp-config"], job_id)
@@ -8059,6 +8059,7 @@ print("stub err", file=sys.stderr)
                 self.assertEqual(rec["argv"][-5:], ["--disallowedTools", *board.UNUSED_TOOLS], job_id)  # job 1469
         with mock.patch.dict(os.environ):
             os.environ.pop("CLAUDE_CODE_DISABLE_CLAUDE_MDS", None)
+            os.environ.pop("CLAUDE_CODE_DISABLE_AUTO_MEMORY", None)
             self.assertEqual(run("001-std")[0]["claude_mds"], "1")
         (self.account / "settings.json").write_text(json.dumps({"enabledPlugins": {
             "hookify@claude-plugins-official": True, "new@mkt": True}}))  # installed since the last spawn
