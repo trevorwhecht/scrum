@@ -8600,6 +8600,7 @@ def main():
     print(f"Trevskills Scrum: http://localhost:{a.port}  projects: {names}  claude: {CLAUDE}" + (f"  tailnet: {tn}" if tn else ""), flush=True)
     if fd_limit:
         print(f"open file limit {fd_limit}", flush=True)
+    signal.signal(signal.SIGHUP, lambda *_: reload_if_changed())  # Merge's Restart: new code now, same pid and nice
     try:
         server.serve_forever()
     except KeyboardInterrupt:
