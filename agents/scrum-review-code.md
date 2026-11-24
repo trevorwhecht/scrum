@@ -71,6 +71,7 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 - a guard, hook or rule that exempts a caller (a session kind, env var, path or flag) from a check: the exempted caller must still be unable to do what the guard forbids (a scrum session committing on the main checkout), shown by a test; without one it is `[blocking]`
 - a check the diff adds or changes that decides a job has no live session (so it starts, resumes or flags the job stalled): it must count every session that can be doing that job's work, not only one under the job's own id (a BigBoy parent's final review runs in its last child's session); a check that looks only at the job's own id is `[blocking]` (job 1157)
 - a serve.py watchdog or gate branch the diff adds that holds, skips or marks a job or account limited: it must write its reason to the pulse or job log and be tested against the other account and the other session kind; a silent branch, or one tested on one account only, is `[blocking]` (jobs 1219, 1220)
+- a time-sensitive step the diff adds inside serve.py `watchdog_tick` (an alert text, a pulse sample): it runs only after every slower step before it in the same tick (a file scan, a subprocess, a lock wait), which took 10 to 55 minutes in job 1429, so it belongs on its own thread or timer; one placed inside the tick is `[blocking]` (jobs 755, 1413)
 
 **Output:** write exactly one file, `JOB_DIR/round-ROUND/review-code.md`:
 
