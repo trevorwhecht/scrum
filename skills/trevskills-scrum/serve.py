@@ -2605,7 +2605,7 @@ SHOP_SETUP_TTL = 3600  # seconds shop_tick skips shop.setup on a worker whose se
 # failed dispatch step there (shop_tick's fail) drops it
 SHOP_SETUP_AT = {}
 SHOP_SLOW_TICK = 5  # seconds: a dispatching shop_tick pass longer than this prints its `steps` line
-SHOP_ENDED ="requeue: shop session ended without a PR"
+SHOP_ENDED = "requeue: shop session ended without a PR"
 
 
 def shop_worker():
@@ -2675,7 +2675,8 @@ def shop_tick(project, repo, root) -> bool:
     with one on it, heavy jobs in the pool are skipped, the first light one is sent, and new work claims only a light line.
     A job tagged Runs on main (board.tag_runs_on; Jev is asked, if at all, only here, with a worker free) is never sent: it is skipped and the next one is tried (job 1155). A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
     profile_copy and start run on that worker (setup is skipped while SHOP_SETUP_AT says it passed there within
-    SHOP_SETUP_TTL and shop.ready still says ready with the account true; job 1464); a failed step puts a claimed child back to waiting, prints one
+    SHOP_SETUP_TTL and shop.ready still says ready with the account true; job 1464); a failed step puts a claimed child
+    back to waiting, prints one
     `shop: <project>: <id>: <step> failed on <alias>` line (clone adds `: <git's error>`) and holds that worker for
     SHOP_RETRY_EVERY. A failed clone on a worker with no shop job (board.shop_jobs_by_worker) first has shop.stash_dirty
     set the clone's modified tracked files aside, prints a `set aside <paths> on <alias> (git stash)` line and retries
