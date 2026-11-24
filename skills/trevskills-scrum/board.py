@@ -9789,6 +9789,11 @@ def edit_mcp_config(root: Path, kind: str) -> Path | None:
     return path
 
 
+# Job 1469: tools no scrum session uses (headless ScheduleWakeup dies with the process; scrum runs no Workflow, review
+# findings go to files). Dropping their schemas cuts ~5k tokens from every turn's re-read, measured with `claude -p`.
+UNUSED_TOOLS = ("ReportFindings", "ScheduleWakeup", "Workflow", "ListAgents")
+
+
 def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags=("--permission-mode", "acceptEdits"),
           model: str | None = None, account: str | None = None, nice: int = SESSION_NICE,
           caller: int | None = None, hot_hold: bool = True) -> tuple[subprocess.Popen, str]:
@@ -9801,7 +9806,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     (the recorded account on a tie), else the first (Trevor's Play and Resume are never refused on usage). Any account but the first runs with
     CLAUDE_CONFIG_DIR=<its dir>; the first runs with CLAUDE_CONFIG_DIR removed. The session runs at `nice` (SESSION_NICE;
     the UI sweep passes 19). `flags` without their own get --strict-mcp-config and --settings spawn_settings(...); a job
-    whose job_lane is not lilguy runs with CLAUDE_CODE_DISABLE_CLAUDE_MDS=1. With `hot_hold` (the `B spawn` CLI passes
+    whose job_lane is not lilguy runs with CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 and CLAUDE_CODE_DISABLE_AUTO_MEMORY=1, and `flags` without --disallowedTools get UNUSED_TOOLS. With `hot_hold` (the `B spawn` CLI passes
     False), a `start` of a board job at stage spec with no `shop` field launches nothing while hand_hold(root) gives a
     reason, or heavy_cap_reason(root, job) gives one (job 1314: a heavy job at this Mac's heavy cap): queue_start queues it
     and HeldStart (a SystemExit) says so (job 1312). Returns (proc, log path relative to root)."""
@@ -9846,6 +9851,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         env.pop("CLAUDE_CODE_DISABLE_CLAUDE_MDS", None)  # a Run-all parent's own setting is inherited otherwise
     else:  # job 1253: every other orchestrator writes no code; CLAUDE.md, rules and AGENTS.md cost ~30k tokens a start
         env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
+        env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"  # job 1469: the memory index (~0.7k tokens) is never used by an orchestrator
     logs = root / "runs"
     logs.mkdir(exist_ok=True)
     log = logs / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{action}-{job_id}.log"
@@ -9859,7 +9865,8 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags,
             *(() if "--strict-mcp-config" in flags else ("--strict-mcp-config",)),  # job 1253: no MCP server loads
             *(("--mcp-config", str(mcp)) if mcp else ()),
-            *(() if "--settings" in flags else ("--settings", spawn_settings(acc.dir, root.parent)))]
+            *(() if "--settings" in flags else ("--settings", spawn_settings(acc.dir, root.parent))),
+            *(() if {"--disallowedTools", "--disallowed-tools"} & set(flags) else ("--disallowedTools", *UNUSED_TOOLS))]  # job 1469
     try:
         with open(log, "w") as fh:
             proc = subprocess.Popen(argv, cwd=root.parent,
