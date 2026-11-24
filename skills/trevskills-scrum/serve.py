@@ -507,6 +507,7 @@ def held_gate(why):
     return next((tok for pre, tok in PULSE_GATES if pre in why), "other")
 
 
+PULSE_LOCK = threading.Lock()  # guards PULSE_HOLDS and PULSE_BUSY: the watchdog and spawn paths write them, pulse_loop's thread reads them (job 1447)
 PULSE_HOLDS: dict[Path, dict[str, float]] = {}  # resolved scrum/ root -> {hold token: epoch s}: what skipped a ready job or run-all start
 PULSE_HOLD_TTL_S = 180  # pulse_tick reports a hold this long after it was last seen (a few watchdog ticks)
 
@@ -4328,6 +4329,14 @@ def time_steps(names=TIMED_STEPS, scope=None):
             scope[name] = wrapper
 
 
+def publish_busy(busy):
+    """Replace PULSE_BUSY's contents with busy in one step under PULSE_LOCK, so pulse_loop's snapshot never sees it
+    empty or half built. The dict object stays the same."""
+    with PULSE_LOCK:
+        PULSE_BUSY.clear()
+        PULSE_BUSY.update(busy)
+
+
 def pulse_loop():
     """Run pulse_tick every 60 s from its own thread, so its stuck_alert never waits on a slow watchdog_tick step.
     One bad pulse never ends the thread."""
@@ -4543,8 +4552,7 @@ def watchdog_tick():
         weekly_tick()
     except (Exception, SystemExit) as e:
         print(f"watchdog: weekly digest: {e}", file=sys.stderr, flush=True)
-    PULSE_BUSY.clear()  # pulse_loop (its own timer, job 1429) reads this tick's busy map
-    PULSE_BUSY.update(busy)
+    publish_busy(busy)  # pulse_loop (its own timer, job 1429) reads this tick's busy map
     cooldown_chime()
 
 
