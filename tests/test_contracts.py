@@ -4165,10 +4165,87 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             for phrase in ("`$F/jobs/$ID/preview.md`", "`- <absolute path>`", files, "replacing any older preview.md"):
                 self.assertIn(phrase, body, (step, phrase))
             self.assertLess(body.index("preview.md"), body.index("B ask $ID"), step)
-        body = [l for l in kind_files["edit-reel"].splitlines()[1:] if l.strip()]
-        self.assertEqual(len(body), 1, body)  # a one-line stub until job 1364 lands
-        self.assertIn("1364-edit-project-edit-reel-instagram-print-r", body[0])
-        self.assertIn("not built yet", body[0])
+        # Job 1364: edit-reel runs the 8 steps of pipeline-handoff.md "Reel flow", after a Folder and Ledger preamble.
+        reel = kind_files["edit-reel"]
+        self.assertNotIn("not built yet", reel)
+        names = ("Clips", "Log", "Cut", "Check", "Review", "Edits build", "Final approval", "His notes")
+        self.assertEqual(re.findall(r"^(\d+)\. \*\*([^*]+?)\.\*\*", reel, re.M),
+                         [(str(n), name) for n, name in enumerate(names, 1)])
+        preamble = reel[:reel.index("\n1. **Clips.**")]
+        for phrase in ("**Folder.**", "**Ledger.**", "Reel project: ", "`$F/jobs/$ID/reel.md`",
+                       "`~/Developer/vid-img-editing/motion/video/instaReels/<name>`",
+                       "`~/Developer/vid-img-editing/motion/notes/print-reels.md`",
+                       "`~/Developer/vid-img-editing/motion/.venv/bin/python <instaReels>/reel.py ...`"):
+            self.assertIn(phrase, preamble, phrase)
+        bad = self.section(preamble, "**Bad folder:**", "\n")
+        for phrase in ("`/` or `..`", "starts nothing", "stop.md", "--a \"Send back with a note=rework $ID \\\"Reel project: <name>\\\"\"",
+                       "--b \"Remove this job=abort $ID --cascade\" --title BUILDER_BLOCKED"):
+            self.assertIn(phrase, bad, phrase)
+        starts = [reel.index(f"\n{n}. **{name}.**") for n, name in enumerate(names, 1)] + [len(reel)]
+        steps = {name: reel[starts[i]:starts[i + 1]] for i, name in enumerate(names)}
+        for name, phrases in (("Clips", ("`<folder>/footage/` already holds a `.mov` or `.mp4`", "photos.py `pull`",
+                                         "plug in and unlock your phone", "--a \"Try again=resume $ID\"",
+                                         "--c \"Remove this job=abort $ID --cascade\" --title BUILDER_BLOCKED",
+                                         "A resume retries this step")),
+                              ("Log", ("reel.py log <folder>", "`edit-logger`", "about 35 sheets", "no rows yet: none",
+                                       "`Bad rows`", "never to a script that fills rows")),
+                              ("Cut", ("`edit-builder`", "Write <folder>/shots.json from", "footage-log.json",
+                                       "reel.py cut <folder> <beats.json> <first beat>", "-c copy", "rough.mov",
+                                       "Archivve/<project>-archive.zip", "`r<R>-<date>/shots.json`",
+                                       "Nothing in `<folder>/selects/` is ever deleted, moved, renamed or overwritten")),
+                              ("Check", ("reel.py check <folder>", "no reviewer is spawned until check exits 0",
+                                         "a `reel.py cut` refusal")),
+                              ("Review", ("a fresh `edit-reviewer`", "4 fps", "sheet.py", "<folder>/shots.json",
+                                          "footage-log.json", "print-reels.md", "check-r<R>.txt",
+                                          "every earlier <JOB_DIR>/review-*.md", "Write <JOB_DIR>/review-<N>.md",
+                                          "a blank to blank reveal", "cut to the same spot on the next blank"))):
+            for phrase in phrases:
+                self.assertIn(phrase, steps[name], (name, phrase))
+        self.assertLess(reel.index("reel.py check"), reel.index("edit-reviewer"))
+        for name, phrases in (("Edits build", ("straight after a `PASS` (or the third `RECUT` in a row)",
+                                               "no storyboard and no rough cut approval", "a new Edits project",
+                                               "never empty, reuse or delete an Edits project",
+                                               "`motion/notes/video-edit.md` \"What worked\"", "selects/<hash>/")),
+                              ("Final approval", ("blackdetect", "sends it back to step 6", "`<folder>/caption.md`",
+                                                  "trevskills-email `captions.md`", "`View: Edits`", "`$F/jobs/$ID/view.md`",
+                                                  "--a \"Approve the reel=approve $ID\"", "--title EDIT_APPROVE",
+                                                  "`mkdir -p ~/Desktop/videos`", "~/Desktop/videos/",
+                                                  "previous Desktop copy", "to the Trash", "`cp -c",
+                                                  "record the copy", "`B set $ID stage=done`", "Never press Share",
+                                                  "Trevor posts")),
+                              ("His notes", ("word for word", "print-reels.md", "the ledger", "the same day",
+                                             "reel.py check", "test_reel.py"))):
+            for phrase in phrases:
+                self.assertIn(phrase, steps[name], (name, phrase))
+        approval = steps["Final approval"]
+        self.assertLess(approval.index("blackdetect"), approval.index("View: Edits"))
+        self.assertLess(approval.index("View: Edits"), approval.index("B ask $ID"))
+        # Criterion 5: the headless computer-use proof, measured once, decides whether step 6 may drive Edits.
+        proof = re.findall(r"^\*\*Headless computer use \(measured 2026-11-\d\d\):\*\* (works|does not work)", reel, re.M)
+        self.assertEqual(len(proof), 1, proof)
+        config = skill / "edit" / "computer-use.mcp.json"
+        edits = steps["Edits build"]
+        if proof[0] == "works":
+            json.loads(config.read_text())
+            self.assertIn("skills/trevskills-scrum/edit/computer-use.mcp.json", reel)
+        else:
+            self.assertFalse(config.exists())
+            for phrase in ("The driven path is off", "--a \"I exported it=resume $ID\"",
+                           "--b \"Send back with a note=rework $ID", "--c \"Remove this job=abort $ID --cascade\"",
+                           "With no new export, ask the same question again: never a silent stop"):
+                self.assertIn(phrase, edits, phrase)
+        # Criterion 4: the Edits step never takes Trevor's cursor unasked.
+        for phrase in ("stepped away", "--a \"I have stepped away, go=resume $ID\"", "computer-use.lock",
+                       "Never remove the lock", "HIDIdleTime", "Never an idle timer"):
+            self.assertIn(phrase, edits, phrase)
+        self.assertLess(edits.index("to stop.md"), edits.index("B ask $ID"))
+        self.assertLess(edits.index("B ask $ID"), edits.index("--mcp-config"))
+        # Criterion 8: a rerun or resume never redoes finished work.
+        resume = self.section(preamble, "**Resume:**", "\n")
+        for phrase in ("the shared **Resume** rule holds", "reads `reel.md` and continues at its last unfinished step",
+                       "`reel.py log` caches each clip's trace", "never reuses a review number",
+                       "recorded as exported", "never rebuilds an Edits project"):
+            self.assertIn(phrase, resume, phrase)
         for kind, skill_name, app, ledger in (("edit-vector", "trevskills-vectorcraft", "VectorCraft", "vector.md"),
                                               ("edit-photo", "trevskills-photocraft", "PhotoCraft", "photo.md")):
             text_k = kind_files[kind]
