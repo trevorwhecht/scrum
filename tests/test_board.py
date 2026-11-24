@@ -6628,6 +6628,9 @@ class BoardTest(unittest.TestCase):
     def test_watchdog_flags_pipeline_started_lilguy_without_worktree(self):
         died = self.aged("Lil died early", 45, stage="spec", lane="lilguy", runlog="runs/x.log")
         here = self.aged("Lil by hand", 45, stage="spec", lane="lilguy")
+        for jid in (died, here):
+            (self.root / "jobs" / jid).mkdir(parents=True, exist_ok=True)
+            (self.root / "jobs" / jid / "feature.md").write_text("x\n")
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [died])
         self.assertEqual(self.get(died)["stalled"], True)
         self.assertEqual(self.get(here)["stage"], "spec")
