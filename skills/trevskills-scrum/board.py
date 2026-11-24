@@ -1666,7 +1666,7 @@ def pulse_path():
 PROCESSES = (
     ("Session starts", ("spawn", "auto_continue_tick", "play_queue_tick", "auto_resume", "auto_play", "idle_claim",
                         "start_ready", "wake_waiting", "queue_ready_waiting", "sweep_parents", "main_ff_tick", "terminal_batch_tick",
-                        "resume_budget"), ()),
+                        "resume_budget", "hand_queue_tick", "launch_queued"), ()),
     ("Stalls and exits", ("cmd_watchdog", "respawn_exited", "record_outcomes", "cmd_migrate_paused", "claude_migrate"),
      ("questions.log",)),
     ("Full E2E on main", ("e2e_full_tick", "e2e_full_run", "hot_stop_tick"), ("e2e-full.json", "e2e-full.log", "e2e-full-rerun.log")),
@@ -8389,18 +8389,31 @@ def solo_hold(root=None, jobs=None, waiting=True) -> str | None:
     return first_wait
 
 
+def hand_queued(root, job: dict) -> bool:
+    """A start Trevor or a chat queued by hand (job 1454): a parentless, unpaused job with play_queued and a `start`
+    queued_launch still in its stage, not tagged Runs on shop (stored_runs_on), that a dashboard click queued
+    (play_queued_manual) or a hand claim made (started_by "hand": cmd_new, `next <index>`). serve.py hand_queue_tick
+    launches these first, oldest first across projects; finish_first holds every new claim while one waits."""
+    launch = job.get("queued_launch") or {}
+    return not job.get("parent") and bool(job.get("play_queued")) and launch.get("action") == "start" \
+        and launch.get("stage") == job.get("stage") and not job.get("paused") \
+        and bool(job.get("play_queued_manual") or job.get("started_by") == "hand") \
+        and stored_runs_on(root, job) != "shop"
+
+
 def finish_first(root=None, jobs=None) -> str | None:
     """Why no automatic new claim (backlog next, a Run-all or BigBoy child, auto-continue, wake) may start in any
     project now, or None (job 971: finish the task at hand first). Read across root's board (`jobs` when given: the
     caller's locked copy) and every registered project's: a job held on the E2E, Check or Build queue (queue_waiting, or
-    stalled on E2E_WAIT_REASON or CHECK_WAIT_REASON), else a stalled job auto_resume restarts (resume_waits) that waits
+    stalled on E2E_WAIT_REASON or CHECK_WAIT_REASON), else a hand-queued start still waiting (hand_queued, job 1454),
+    else a stalled job auto_resume restarts (resume_waits) that waits
     on the machine gate: spawn's gate queued its resume (queued_launch), or resume_gate refuses it. Paused and
     needs-human jobs never hold it (job 751); Trevor's clicks (Play, Resume, Run now) never ask it. Before those checks, a
     solo run in flight or a job waiting for one (solo_hold, job 1361) holds it too."""
     if solo := solo_hold(root, jobs):
         return f"{FINISH_FIRST}: {solo}"
     here = Path(root).resolve() if root else None
-    waiting = []
+    waiting, hand = [], None
     for scrum in dict.fromkeys(([here] if here else []) + [(p / "scrum").resolve() for p in projects().values()]):
         try:
             js = jobs if jobs is not None and scrum == here else read_board(scrum)["jobs"]
@@ -8414,8 +8427,12 @@ def finish_first(root=None, jobs=None) -> str | None:
                 queue = "E2E" if reason.startswith((E2E_QUEUE_WAIT, STALL + E2E_WAIT_REASON)) \
                     else "Build" if reason.startswith(BUILD_QUEUE_WAIT) else "Check"
                 return f"{FINISH_FIRST}: {name}/{j.get('id')} waits on the {queue} queue"
+            if hand is None and hand_queued(scrum, j):
+                hand = f"{FINISH_FIRST}: {name}/{j.get('id')} hand start is queued"
             if resume_waits(j, by_id):
                 waiting.append((scrum, name, j))
+    if hand:  # after every board's queue waits, before the resume waits
+        return hand
     for scrum, name, j in waiting:  # the machine readings only when a stalled job could be waiting on them
         why = "its launch is queued" if j.get("queued_launch") else resume_gate(scrum, j)
         if why:

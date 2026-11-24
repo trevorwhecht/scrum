@@ -11504,9 +11504,10 @@ class QueuedLaunchHoldTest(unittest.TestCase):
         proc.poll.return_value = None
         return proc, f"runs/{self.JOB}-start.log"
 
-    def tick(self, machine_ok=None, room=0, cpu="1", spawn=None):
-        """One play_queue_tick over the board; machine_ok answers claim=True with `machine_ok` (None: room), anything
-        else with a refusal so a call without claim=True never passes. Returns (result, board.spawn job ids)."""
+    def tick(self, machine_ok=None, room=0, cpu="1", spawn=None, run=None):
+        """One play_queue_tick over the board (or `run(jobs)`); machine_ok answers claim=True with `machine_ok` (None:
+        room), anything else with a refusal so a call without claim=True never passes. Returns (result, board.spawn job
+        ids)."""
         b, s = self.board, self.serve
         ok = lambda *a, **kw: machine_ok if kw.get("claim") is True else "called without claim=True"
         with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT=cpu), \
@@ -11514,7 +11515,8 @@ class QueuedLaunchHoldTest(unittest.TestCase):
                 mock.patch.object(b, "ram_room", return_value=room), \
                 mock.patch.object(b, "spawn", side_effect=spawn or self.started) as board_spawn, \
                 contextlib.redirect_stderr(io.StringIO()):
-            got = s.play_queue_tick("qh", self.root, b.read_board(self.root)["jobs"])
+            jobs = b.read_board(self.root)["jobs"]
+            got = run(jobs) if run else s.play_queue_tick("qh", self.root, jobs)
         return got, [c.args[1] for c in board_spawn.call_args_list]
 
     def pulse_gates(self):
@@ -11548,7 +11550,9 @@ class QueuedLaunchHoldTest(unittest.TestCase):
         self.assertEqual(self.job()["queued_launch"]["action"], "start")
         self.assertIn("cpu_load(501%)", (self.root / "jobs" / self.JOB / "queue-gates.txt").read_text())
         self.write(self.ago(2 * 3600), manual=True)
-        self.assertEqual(self.tick(cpu="501"), (True, [self.JOB]), "Trevor's click: no CPU gate")
+        # job 1454: a manual queued start is hand-queued, so hand_queue_tick launches it through launch_queued
+        launch = lambda jobs: self.serve.launch_queued("qh", self.root, jobs[0], jobs) == "started"
+        self.assertEqual(self.tick(cpu="501", run=launch), (True, [self.JOB]), "Trevor's click: no CPU gate")
         job = self.job()
         self.assertIs(job.get("manual_run"), True)
         self.assertNotIn("play_queued_manual", job)
@@ -14518,7 +14522,7 @@ class HardStopTickTest(unittest.TestCase):
 
 class HandStartHoldTest(unittest.TestCase):
     """Job 1312: Run now and Start now on a hot Mac queue the job for the shop Mac (board.HeldStart), and
-    play_queue_tick keeps a manual queued start while this Mac is hot."""
+    play_queue_tick keeps a manual queued start while this Mac is hot (hand_queue_tick since job 1454)."""
 
     @classmethod
     def setUpClass(cls):
@@ -14607,13 +14611,12 @@ class HandStartHoldTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertIsNone(self.serve.spawn("repo", self.root, job_id, "start", f"/trevskills-scrum start {job_id}",
                                                manual=True))
-            jobs = self.serve.board.read_board(self.root)["jobs"]
-            self.serve.play_queue_tick("repo", self.root, jobs)
+            self.serve.hand_queue_tick()  # job 1454: a hand-queued start goes through the hand pass
         self.assertFalse(self.stub_log.exists())
         self.assertEqual(self.job(job_id)["queued_launch"]["action"], "start", "still queued while hot")
+        self.assertIsNone(self.serve.RESUME_ROOM, "outside a tick the hand pass leaves no budget behind")
         with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="1"):
-            jobs = self.serve.board.read_board(self.root)["jobs"]
-            self.assertTrue(self.serve.play_queue_tick("repo", self.root, jobs))
+            self.assertEqual(self.serve.hand_queue_tick(), {"repo"})
             deadline = time.monotonic() + 60  # job 1328: wait on the stub log, never a fixed sleep or a short bound
             while time.monotonic() < deadline and not (self.stub_log.exists() and self.stub_log.read_text()):
                 time.sleep(0.05)
@@ -14656,8 +14659,7 @@ class HandStartHoldTest(unittest.TestCase):
             self.post(f"/jobs/{job_id}/resume", {"manual": True})
         self.assertEqual(self.job(job_id)["queued_launch"]["action"], "start")
         with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="1"):
-            jobs = self.serve.board.read_board(self.root)["jobs"]
-            self.assertTrue(self.serve.play_queue_tick("repo", self.root, jobs))
+            self.assertEqual(self.serve.hand_queue_tick(), {"repo"})  # job 1454: the hand pass starts a hand-queued start
         self.assertIn(f'"/trevskills-scrum start {job_id}"', self.stub_prompts(job_id))
         job = self.job(job_id)
         self.assertNotIn("play_queued", job)

@@ -249,6 +249,53 @@ class FinishFirst(unittest.TestCase):
             serve.auto_continue_tick({"repo": False, "other": False})
         self.assertEqual([c.args[2] for c in spawn.call_args_list], ["run-all"])
 
+    # --- (d) a hand-queued start (job 1454) ---
+    def hand_start(self, **extra):
+        return dict({"id": "070-hand", "stage": "spec", "play_queued": "2026-11-24T22:45:00+00:00",
+                     "queued_launch": {"action": "start", "prompt": "/trevskills-scrum start 070-hand", "stage": "spec"}},
+                    **extra)
+
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", 4)  # a heavy start counts 2 young
+    def test_hand_queued_start_in_another_project_holds_claims(self):
+        parent, (a, b) = self.runall()
+        hold = "finishing work in flight first: other/070-hand hand start is queued"
+        self.other_jobs(self.hand_start(started_by="hand"))
+        self.assertEqual(board.finish_first(self.root), hold)
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["held"]), ([], hold))
+        self.other_jobs(self.hand_start(play_queued_manual=True))
+        self.assertEqual(board.finish_first(self.root), hold, "a dashboard click spawn queued")
+        self.other_jobs(self.hand_start(started_by="hand"), {"id": "050-queued", "stage": "check", "reason": "waiting: Check queue"})
+        self.assertEqual(board.finish_first(self.root), "finishing work in flight first: other/050-queued waits on the Check queue",
+                         "the Check/E2E/Build queue hold comes first")
+        self.other_jobs(self.hand_start(started_by="hand"), {"id": "090-solo", "stage": "build", "soloRun": "build",
+                                                             "soloAt": board.now()})
+        self.assertEqual(board.finish_first(self.root), "finishing work in flight first: other/090-solo runs alone")
+        self.other_jobs({"id": "060-stall", "stage": "build", "stalled": True, "reason": "stalled: x",
+                         "queued_launch": {"action": "resume", "prompt": "p", "stage": "build"}},
+                        self.hand_start(started_by="hand"))
+        self.assertEqual(board.finish_first(self.root), hold, "before the resume waits")
+
+    def test_wake_queued_start_never_holds(self):
+        for by in ("wake", "serve", "runall"):
+            self.other_jobs(self.hand_start(started_by=by))
+            self.assertIsNone(board.finish_first(self.root), by)
+        self.other_jobs({"id": "069-parent", "stage": "running", "lane": "runall"},
+                        self.hand_start(started_by="hand", parent="069-parent", play_queued_manual=True))
+        self.assertIsNone(board.finish_first(self.root), "a Run-all child")
+
+    def test_auto_continue_tick_waits_for_hand_queued_start(self):
+        (self.root / "project.md").write_text("- Auto continue: 1\n")
+        (self.root / "backlog.md").write_text("- [ ] Alpha\n")
+        self.other_jobs(self.hand_start(started_by="hand"))
+        serve.SWEEP_SEEN.pop("repo", None)  # a sibling test's sweep would read as sweep_held here
+        with mock.patch.object(serve, "spawn") as spawn, mock.patch.object(serve, "running", return_value=False):
+            serve.auto_continue_tick({"repo": False, "other": False})
+            spawn.assert_not_called()
+            self.other_jobs(self.hand_start(started_by="hand", play_queued=None, queued_launch=None))
+            serve.auto_continue_tick({"repo": False, "other": False})
+        self.assertEqual([c.args[2] for c in spawn.call_args_list], ["run-all"])
+
     def test_idle_claim_keeps_queued_launch_drops_waiting_child(self):
         parent, (a, b) = self.runall(2)
         with board.locked_board(self.root) as bd:
