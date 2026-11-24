@@ -170,11 +170,11 @@ LAUNCH_LOCK = threading.Lock()  # spawn's room check and its Popen run as one st
 GATED = ("start", "resume", "approve", "rework")  # the job launches spawn's gate holds to board.ram_room(floor=0)
 
 
-def note_queue_gate(root, job_id, gate, name="queue-gates.txt"):
+def note_queue_gate(root, job_id, gate, name="queue-gates.txt", reason=None):
     """Add `gate` (board.ram_room_reason's ram_room(<readings>), ram_room:<live id> or cpu_load(<pct>%)) to
     jobs/<id>/<name> (queue-gates.txt) once per name (the text before `(`), so a job held twice keeps its first readings, for
     timing.md's Queue gate column. It outlives the launch, unlike play_queued. For queue-gates.txt it also stamps the head
-    in current-gates.json (board.note_current_gate), which gate_heads reads. Called under LAUNCH_LOCK; a write error
+    in current-gates.json (board.note_current_gate, with `reason` as its text, else `gate`), which gate_heads reads. Called under LAUNCH_LOCK; a write error
     never blocks the queue."""
     path = Path(root) / "jobs" / job_id / name
     head = lambda g: g.split("(", 1)[0]
@@ -187,13 +187,19 @@ def note_queue_gate(root, job_id, gate, name="queue-gates.txt"):
     except OSError:
         pass
     if name == "queue-gates.txt":
-        board.note_current_gate(root, job_id, gate)
+        board.note_current_gate(root, job_id, gate, reason)
 
 
 def note_stall_hold(root, job_id, token):
     """note_queue_gate into jobs/<id>/stall-holds.txt: a hold auto_resume passed a stalled job over for, for
     timing.md's Stalls cell."""
     note_queue_gate(root, job_id, token, name="stall-holds.txt")
+
+
+def cpu_text():
+    """cpu_token with its limit: cpu_load(<pct>%): CPU load is over the <MAX>% launch limit (None when unread)."""
+    tok = cpu_token()
+    return None if tok == "cpu_load" else f"{tok}: CPU load is over the {board.MAX_LAUNCH_CPU_LOAD_PCT}% launch limit"
 
 
 def cpu_token():
@@ -277,37 +283,51 @@ def gate_held(root, job, gates):
 GATE_FRESH_SECS = 900  # a gate last hit this long ago is no current hold (per gate in current-gates.json; else the queue-gates.txt mtime)
 
 
-def gate_heads(root, job):
-    """The gate names (text before `(`) holding a job now: the heads in jobs/<id>/current-gates.json hit within
-    GATE_FRESH_SECS (job 1408). With no readable record (an object of numbers) it falls back to every head in
-    queue-gates.txt, or none when that is unreadable or last noted over GATE_FRESH_SECS ago (the file keeps every gate
-    a job ever hit, so an old line is not a current hold: job 1222)."""
+def gate_entries(root, job):
+    """{gate head: why text} for the gates holding a job now: the entries in jobs/<id>/current-gates.json hit within
+    GATE_FRESH_SECS (job 1408), each a number (old shape, text is the head) or {"at": epoch, "text": why}. With no
+    readable record (an object of those) it falls back to every head in queue-gates.txt (text is the gate string), or
+    none when that is unreadable or last noted over GATE_FRESH_SECS ago (the file keeps every gate a job ever hit, so an
+    old line is not a current hold: job 1222)."""
     folder = Path(root) / "jobs" / str(job["id"])
     try:
         seen = json.loads((folder / board.CURRENT_GATES).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         seen = None
-    if isinstance(seen, dict) and all(type(t) in (int, float) for t in seen.values()):
+    at = lambda v: v.get("at") if isinstance(v, dict) else v
+    if isinstance(seen, dict) and all(type(at(v)) in (int, float) for v in seen.values()):
         now = time.time()
-        return {g for g, t in seen.items() if now - t <= GATE_FRESH_SECS}
+        return {g: (v["text"] if isinstance(v, dict) and isinstance(v.get("text"), str) and v["text"] else g)
+                for g, v in seen.items() if now - at(v) <= GATE_FRESH_SECS}
     try:
         path = folder / "queue-gates.txt"
         if time.time() - path.stat().st_mtime > GATE_FRESH_SECS:
-            return set()
+            return {}
         gates = path.read_text(encoding="utf-8").split()
     except OSError:
-        return set()
-    return {g.split("(", 1)[0] for g in gates}
+        return {}
+    return {g.split("(", 1)[0]: g for g in gates}
+
+
+def gate_heads(root, job):
+    """The gate names (text before `(`) holding a job now: the keys of gate_entries."""
+    return set(gate_entries(root, job))
+
+
+NO_HOLD_TEXT = "No hold recorded: the queue has not picked it up yet"
 
 
 def held_by(root, job, stage):
-    """The gate names a waiting job whose depends_on are all done is held by right now (gate_heads, comma-joined), or None.
+    """The reasons a waiting job whose depends_on are all done is held by right now (gate_entries' texts, sorted by gate
+    head and joined with `; `), NO_HOLD_TEXT when it has no fresh gate (and is not paused, play-queued or overlap-held), or None for any other job.
     A depends_on:<id> gate whose job is done is dropped: that blocker merged, so it is no longer the cause (job 1406).
     `stage` is {job id: stage}."""
     if job.get("stage") != "waiting" or not all(stage.get(d) == "done" for d in job.get("depends_on") or []):
         return None
-    heads = {g for g in gate_heads(root, job) if not (g.startswith("depends_on:") and stage.get(g[11:]) == "done")}
-    return ", ".join(sorted(heads)) or None
+    ents = {g: t for g, t in gate_entries(root, job).items() if not (g.startswith("depends_on:") and stage.get(g[11:]) == "done")}
+    if not ents and (job.get("paused") or job.get("play_queued") or job.get("overlap_hold")):
+        return None  # Trevor's pause, a queued play or an overlap hold is its own reason, not a missing one
+    return "; ".join(ents[g] for g in sorted(ents)) or NO_HOLD_TEXT
 
 
 def mem_held(root, job):
@@ -402,7 +422,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 gates = ([board.ram_room_reason(light)] + [f"ram_room:{i}" for i in sorted(live_ids(project))]
                          if ram_short else [f"cpu_load({cpu:.0f}%)"] if cpu_short else ["cpu_queue"])
                 for gate in gates:
-                    note_queue_gate(root, job_id, gate)
+                    note_queue_gate(root, job_id, gate, reason=(
+                        f"{gate}: CPU load is over the {board.MAX_LAUNCH_CPU_LOAD_PCT}% launch limit" if gate.startswith("cpu_load(") else None))
                 if ram_short:
                     note_ram_hold(root, job_id)
                 if ram_short and held_over(queued_at):
@@ -417,7 +438,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 except (board.HeldStart, board.HardStop) as e:  # job 1312: a hot Mac queued this start for the shop Mac
                     proc, held = None, e  # a HardStop stays queued the same way, so it starts once the stop lifts
                     note_queue_gate(root, job_id, "hard_stop" if isinstance(e, board.HardStop)
-                                    else "heavy_cap" if "heavy_cap(" in str(e) else "hot_mac")
+                                    else "heavy_cap" if "heavy_cap(" in str(e) else "hot_mac", reason=str(e))
         if refused_live:  # not started and not queued: play_queue_tick would retry it every tick
             print(f"spawn refused: {project}/{job_id} {action}: {refused_live}", file=sys.stderr, flush=True)
             unqueue(root, job)
@@ -517,11 +538,11 @@ def note_hold(root, reason):
     PULSE_HOLDS.setdefault(Path(root).resolve(), {})[reason] = time.time()
 
 
-def note_held(root, reason, job_ids):
-    """note_queue_gate(root, id, reason) for each of `job_ids` (a ready waiting job the tick passed over), and
-    note_hold(root, reason) when there are any."""
+def note_held(root, reason, job_ids, text=None):
+    """note_queue_gate(root, id, reason, reason=text) for each of `job_ids` (a ready waiting job the tick passed over;
+    `text` is the why shown on its card, else the token), and note_hold(root, reason) when there are any."""
     for job_id in job_ids:
-        note_queue_gate(root, job_id, reason)
+        note_queue_gate(root, job_id, reason, reason=text)
     if job_ids:
         note_hold(root, reason)
 
@@ -548,12 +569,12 @@ def start_ready(project, root, parent_id, manual=False):
     cmd_ready names in `held` is noted on each ready waiting child: ram_room, held_gate's token for a machine_ok
     refusal, usage_allowance for the rest (the usage cap; held_gate knows every machine_ok reason)."""
     if cpu_hot(manual):
-        note_held(root, cpu_token(), ready_waiting(root, parent_id))
+        note_held(root, cpu_token(), ready_waiting(root, parent_id), cpu_text())
         return {"ready": []}
     out = board.cmd_ready(root, parent_id, live_ids(project), manual=manual)
     if held := out.get("held"):
         tok = held if held == "ram_room" else held_gate(held)
-        note_held(root, "usage_allowance" if tok == "other" else tok, ready_waiting(root, parent_id))
+        note_held(root, "usage_allowance" if tok == "other" else tok, ready_waiting(root, parent_id), held)
     elif out.get("left") and not out["ready"]:  # `any` children kept for the shop Mac (cmd_ready's shop-first wait)
         note_held(root, "runs_on_shop", out["left"])
     for child in out["ready"]:
@@ -574,24 +595,24 @@ def wake_waiting(project, root):
         return
     why = board.machine_ok(root, claim=True) or board.finish_first(root)
     cooling = why == board.COOLING or bool(why and why.startswith((board.FINISH_FIRST, board.SOFT_COOLING)))
-    cool_gate = held_gate(why) if cooling else None
+    cool_gate, cool_why = (held_gate(why), why) if cooling else (None, None)
     if cooling:  # only a parked wake job passes; plain waiting jobs stay held (hold below)
         why = board.machine_ok(root) or (None if any(j.get("wake") for j in filter(board.parked_waiting, board.read_board(root)["jobs"])) else why)
     if why:
-        note_held(root, held_gate(why), ready_waiting(root))
+        note_held(root, held_gate(why), ready_waiting(root), why)
         return
     room = board.ram_room(floor=0)  # spawn's own gate: a start it would queue stays waiting, never claimed
     if room < 1:
-        note_held(root, "ram_room", ready_waiting(root))
+        note_held(root, "ram_room", ready_waiting(root), board.ram_room_reason(False))
         return
     live = board.live_sessions()
     allow = board.pick_account(time.time(), live)[1]
     if allow is not None:
         room = min(room, max(0, allow - live))
         if room < 1:
-            note_held(root, "usage_pace" if "pace 5h" in allow.reason else "usage_allowance", ready_waiting(root))
+            note_held(root, "usage_pace" if "pace 5h" in allow.reason else "usage_allowance", ready_waiting(root), str(allow.reason))
     if cpu_hot():  # re-read right before the claim
-        note_held(root, cpu_token(), ready_waiting(root))
+        note_held(root, cpu_token(), ready_waiting(root), cpu_text())
         return
     held = {}  # job id -> the gate hold() passed it over for, noted below (job 1406: a held job named no cause)
 
@@ -599,14 +620,14 @@ def wake_waiting(project, root):
         if j.get("wake"):
             return board.resume_blocker(root, j["id"], live_ids(project))
         if cooling:
-            held[j["id"]] = cool_gate
-        elif board.heavy_cap_reason(root, j):  # job 1314: a heavy start at the cap waits
-            held[j["id"]] = "heavy_cap"
+            held[j["id"]] = (cool_gate, cool_why)
+        elif why_cap := board.heavy_cap_reason(root, j):  # job 1314: a heavy start at the cap waits
+            held[j["id"]] = ("heavy_cap", why_cap)
         return j["id"] in held
 
     out = board.wake_waiting(root, room, hold=hold)
-    for job_id, gate in held.items():
-        note_held(root, gate, [job_id])
+    for job_id, (gate, text) in held.items():
+        note_held(root, gate, [job_id], text)
     for job_id in out["ready"]:
         spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
     for job_id in out.get("retry", []):

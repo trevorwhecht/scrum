@@ -6836,12 +6836,13 @@ def overlap_gate(holder, mine, theirs):
     return f"overlap:{holder}:{min(shared)}" if shared else f"overlap:{holder}"
 
 
-CURRENT_GATES = "current-gates.json"  # {gate head: epoch seconds last hit}; serve.py gate_heads reads it (job 1408)
+CURRENT_GATES = "current-gates.json"  # {gate head: {"at": epoch seconds last hit, "text": why}} (a bare epoch number is the old shape); serve.py gate_heads reads it (job 1408)
 
 
-def note_current_gate(root, job_id: str, gate: str) -> None:
-    """Stamp `gate`'s head (text before `(`) with the time now in jobs/<id>/current-gates.json, so serve.py gate_heads
-    names only gates hit lately while queue-gates.txt stays the cumulative log. Read, set and os.replace run under one
+def note_current_gate(root, job_id: str, gate: str, reason: str | None = None) -> None:
+    """Stamp `gate`'s head (text before `(`) with {"at": time now, "text": reason, else the full gate string} in
+    jobs/<id>/current-gates.json, so serve.py gate_heads and held_by name only gates hit lately while queue-gates.txt
+    stays the cumulative log. Read, set and os.replace run under one
     flock on jobs/<id>/.current-gates.lock, so a board.py and a serve.py writer never drop each other's entry. A
     malformed record starts over; a write error never blocks the queue."""
     folder = Path(root) / "jobs" / job_id
@@ -6856,7 +6857,7 @@ def note_current_gate(root, job_id: str, gate: str) -> None:
                 seen = {}
             if not isinstance(seen, dict):
                 seen = {}
-            seen[gate.split("(", 1)[0]] = time.time()
+            seen[gate.split("(", 1)[0]] = {"at": time.time(), "text": reason or gate}
             try:
                 tmp.write_text(json.dumps(seen), encoding="utf-8")
                 os.replace(tmp, path)
@@ -6866,9 +6867,10 @@ def note_current_gate(root, job_id: str, gate: str) -> None:
         pass
 
 
-def note_queue_gate(root, job_id, gate):
+def note_queue_gate(root, job_id, gate, reason=None):
     """Add `gate` to jobs/<id>/queue-gates.txt once, for timing.md's Queue gate column (serve.py's note_queue_gate
-    writes ram_room and cpu_load the same way), and stamp it in current-gates.json (note_current_gate). A write error
+    writes ram_room and cpu_load the same way), and stamp it in current-gates.json (note_current_gate, with the optional
+    `reason` text, else the gate string). A write error
     never blocks the queue."""
     path = Path(root) / "jobs" / job_id / "queue-gates.txt"
     try:
@@ -6877,7 +6879,7 @@ def note_queue_gate(root, job_id, gate):
                 f.write(gate + "\n")
     except OSError:
         pass
-    note_current_gate(root, job_id, gate)
+    note_current_gate(root, job_id, gate, reason)
 
 
 def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, shop: str | None = None,
