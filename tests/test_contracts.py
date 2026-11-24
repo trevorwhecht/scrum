@@ -454,6 +454,25 @@ class ContractTest(unittest.TestCase):
         self.assertLess(text.index("**Prod check**"), text.index("**Mark done, only now**"))
         self.assertIn("- Deploy: <", self.lane("setup"))
 
+    def test_live_checks_recorded_and_written(self):
+        """Job 1496: Merge records `## Live checks` at Mark done; the spec writer and approver write the bullets."""
+        text = self.lane("merge")
+        step = next(l for l in text.splitlines() if "**Mark done, only now.**" in l)
+        self.assertIn("B live-record $ID", step)
+        self.assertLess(step.index("B set $ID stage=done reason=`"), step.index("B live-record $ID"))
+        self.assertIn("never after a `merged, not live:` reason", step)
+        writer = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        rule = next(l for l in writer.splitlines() if "## Live checks" in l)
+        for phrase in ("can only be seen after merge", "came back after an earlier fix", "never a proxy for it"):
+            self.assertIn(phrase, rule, phrase)
+        approver = (ROOT / "agents" / "scrum-approver.md").read_text()
+        template = approver[approver.index("    APPROVE\n"):approver.index("**ESCALATE only")]
+        self.assertIn("\n    ## Live checks\n", template)
+        self.assertLess(template.index("## Manual checks"), template.index("## Live checks"))
+        manual = self.section(approver, "**Manual checks.**", "**Out-of-scope follow-ups.**")
+        for phrase in ("what a command can decide goes under `## Live checks`", "never ruled `defer` without one"):
+            self.assertIn(phrase, manual, phrase)
+
     def test_triager_bundles_low_rated(self):
         text = (ROOT / "agents" / "scrum-triager.md").read_text()
         for phrase in ("{p:1}", "{p:2}", "even when they are not near-duplicates",

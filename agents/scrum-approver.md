@@ -37,6 +37,8 @@ An APPROVE also has one `Prod check:` line for the orchestrator's read-only chec
     - <follow-up dropped — short reason>      ← optional; left out when nothing is dropped
     ## Manual checks
     - <one-line check only a human can do>      ← the orchestrator appends these to manual-checks.md
+    ## Live checks
+    - `<npm run <script> | python3 <tracked file>>` | from <merge|+6h|+1d> | by <+1d|+7d> | <the reported problem it proves fixed>      ← optional; Merge records them and serve.py runs them after the merge
     ## UI sweep
     - <route> — <why it needs a later look>      ← optional; serve.py's UI sweep renders these first after the merge
     ## Merge summary
@@ -73,6 +75,7 @@ An APPROVE also has one `Prod check:` line for the orchestrator's read-only chec
 
 **Manual checks.** A follow-up only a human can do (a manual check, a live-site check, a device check or a Safari check) goes under `## Manual checks`, never under `## Follow-ups`: backlog items run as unattended jobs, which can't do them. The section is optional; leave it out or write `- none` when there are none.
 A build.md `## Scrum map` line is never a manual check: Merge applies it to the map.
+A check of the live machine or site that a read-only command can decide is not a manual check: what a command can decide goes under `## Live checks`, copied from spec.md's bullets or written in the same shape, and checks the reported problem itself. A criterion the builder marked `NOT RUN` because it needs live data gets a Live checks bullet, and is never ruled `defer` without one.
 A changed screen or state that no latest-round review rendered (live or in the `/tmp` harness) is never a manual check while REWORK is still available: use REWORK with a `fix-now render-only` ruling that the UX and UI reviewers render it. Write `fix-now render-only` instead of `fix-now` on any ruling that only asks the UI/UX reviewers to render or look, with no code change: the orchestrator then re-runs the checks and those reviewers without resuming the builder.
 
 **Out-of-scope follow-ups.** On every decision (APPROVE, REWORK or ESCALATE), read the `## Out of scope` bullets of every `review-*.md` in the latest round (the highest-numbered `round-*/`). Drop duplicates, vague items, and anything already covered by this ticket (on REWORK, that includes what the next round will fix). Add each real one to `## Follow-ups` as a one-line bullet.
