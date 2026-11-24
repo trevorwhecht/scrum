@@ -7,6 +7,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
+os.environ.pop("SCRUM_SHOP", None)  # a shop Mac sets it; backlog-add without --job is refused there (job 1504)
+os.environ.pop("CLAUDE_CODE_REMOTE", None)  # a cloud session sets it; same refusal
 os.environ["SCRUM_MUTE"] = "1"
 os.environ.setdefault("SCRUM_REGISTRY", os.path.join(tempfile.mkdtemp(), "projects.json"))
 import board  # noqa: E402
@@ -209,6 +211,20 @@ class E2eBudgetBacklogTest(unittest.TestCase):
         self.log.write_text(NORMAL_LOG.replace("  1 failed\n", ""))
         self.assertIsNone(board.cmd_e2e_budget(self.root, "1764-slow-run", self.log)["backlog"])
         self.assertEqual(self.open_items(), [])
+
+    def test_e2e_budget_on_worker_writes_followup(self):
+        """Job 1504: a shop run's backlog.md never comes home, so the slow-E2E item goes to the job's followups."""
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Existing\n")
+        before = (self.root / "backlog.md").read_bytes()
+        with mock.patch.dict(os.environ, {"SCRUM_SHOP": "1"}):
+            out = board.cmd_e2e_budget(self.root, "1764-slow-run", self.log)
+        text = ("Speed up the slowest job E2E spec files: e2e/orders.spec.ts 69.2s, e2e/payroll.spec.ts 50s, "
+                "e2e/inks.spec.ts 0.5s (job 1764-slow-run E2E ran past the 10 min budget)")
+        self.assertEqual(out["backlog"], text)
+        self.assertEqual((self.root / "backlog.md").read_bytes(), before)
+        followups = self.root / "jobs" / "1764-slow-run" / "followups"
+        self.assertEqual([p.name for p in followups.iterdir()], ["add-1.md"])
+        self.assertEqual((followups / "add-1.md").read_text(), f"Backlog: add\nItem: {text}\n")
 
     def test_missing_log_exits(self):
         with self.assertRaises(SystemExit):

@@ -6,6 +6,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 sys.path.insert(0, str(ROOT / "tests"))  # bare sibling imports resolve however the module is invoked
+os.environ.pop("SCRUM_SHOP", None)  # a shop Mac sets it; backlog-add without --job is refused there (job 1504)
+os.environ.pop("CLAUDE_CODE_REMOTE", None)  # a cloud session sets it; same refusal
 tempfile.tempdir = os.path.realpath(tempfile.gettempdir())  # macOS: /var/folders is a symlink to /private/var; code logs resolved paths
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 DEFAULT_REGISTRY = os.path.join(tempfile.mkdtemp(), "projects.json")  # pulse.log, weekly/ never in the real home
@@ -9228,7 +9230,7 @@ class CloudPollTest(unittest.TestCase):
         s = self.serve
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
-        root = tmp / "scrum"
+        root = self.shop_root = tmp / "scrum"
         job_id = s.board.cmd_new(root, "Leads finder")
         (root / "jobs" / job_id).mkdir(parents=True, exist_ok=True)
         (root / "jobs" / job_id / "feature.md").write_text("Leads finder skill text\n")
@@ -9269,6 +9271,43 @@ class CloudPollTest(unittest.TestCase):
                 self.assertEqual((job["stage"], job["reason"]), ("aborted", reason))
                 self.assertNotIn("Leads finder skill text", backlog, "closed on purpose: nothing requeued")
                 self.assertEqual(err, "")
+
+    def test_shop_moved_marks_artifacts_pending(self):
+        """Job 1504: a shop `moved to <folder> backlog` abort gets an artifactsPending mark, so the next tick that finds
+        its scrum-artifacts/<id> branch spawns cloud-home, which brings the job folder (and its followups) home."""
+        s = self.serve
+        s.CLOUD_LAST.clear()
+        job, _, _ = self.shop_job("Ran B abort 1844 --reason 'moved to trevorhecht-skills backlog'\n")
+        self.assertEqual((job["stage"], job["reason"]), ("aborted", "moved to trevorhecht-skills backlog"))
+        self.assertTrue(job.get("artifactsPending"))
+        root, job_id = self.shop_root, job["id"]
+        s.CLOUD_LAST.clear()
+        jobs = s.board.read_board(root)["jobs"]
+        with mock.patch.object(s.board, "artifacts_pushed", return_value=True), \
+                mock.patch.object(s.board, "cooling_down", return_value=False), \
+                mock.patch.object(s, "running", return_value=False), mock.patch.object(s, "spawn") as sp:
+            s.cloud_tick("p", root, jobs, now=20_000)
+        self.assertEqual([c.args[2:4] for c in sp.call_args_list], [(job_id, "cloud-home")])
+        self.assertNotIn("artifactsPending", s.board.read_board(root)["jobs"][0])
+
+    def test_shop_requeue_abort_no_mark(self):
+        for why, tail, reason in (
+                ("requeue", "Working on it\nDone for now\n", "requeue: shop session ended without a PR"),
+                ("obsolete", "Aborted as obsolete: duplicate of job 1844\n", "obsolete: duplicate of job 1844")):
+            with self.subTest(why):
+                self.serve.CLOUD_LAST.clear()
+                job, _, _ = self.shop_job(tail)
+                self.assertEqual((job["stage"], job["reason"]), ("aborted", reason))
+                self.assertNotIn("artifactsPending", job)
+
+    def test_cloud_pending_mark(self):
+        root = Path(tempfile.mkdtemp()) / "scrum"
+        self.addCleanup(shutil.rmtree, root.parent, True)
+        job_id = self.serve.board.cmd_new(root, "Mark me")
+        self.serve.board.cloud_pending_mark(root, "999-missing")  # a missing job: no-op, no raise
+        self.assertNotIn("artifactsPending", self.serve.board.read_board(root)["jobs"][0])
+        self.serve.board.cloud_pending_mark(root, job_id)
+        self.assertTrue(self.serve.board.read_board(root)["jobs"][0]["artifactsPending"])
 
     def test_shop_session_ended_without_closing_still_requeued(self):
         self.serve.CLOUD_LAST.clear()

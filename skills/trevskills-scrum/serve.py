@@ -2586,6 +2586,8 @@ def cloud_tick(project, root, jobs, now=None):
     stage cloud after the sync (no PR and no branch) is aborted with SHOP_ENDED (requeued unless a BigBoy child), or,
     when its log tail shows it closed the job on purpose (shop_closed: obsolete, looks already fixed, or moved to
     another project's backlog; job 1844), aborted with that reason and no requeue; once either abort took effect, shop_pr_close closes the job's open unlabelled PR, so the rerun opens no duplicate.
+    A `moved to <folder> backlog` abort also gets board.cloud_pending_mark (job 1504), so a later tick that finds its
+    scrum-artifacts/<id> branch spawns cloud-home, which files the move's followups/add-<n>.md at home.
     A no-git project (board.no_git, job 1362) is skipped: none of its jobs goes to the cloud or the shop."""
     if board.cooling_down() or board.no_git(root):
         return
@@ -2629,6 +2631,8 @@ def cloud_tick(project, root, jobs, now=None):
                 except SystemExit as e:
                     print(f"cloud-sync: {project}: {job_id}: {e}", file=sys.stderr, flush=True)
                     continue
+                if closed and closed.startswith("moved to "):  # its followups hold the move: bring the folder home
+                    board.cloud_pending_mark(root, job_id)
                 shop_pr_close(project, root, job_id)
         homes = [m["id"] for m in out["moved"] if m.get("artifacts") or (m.get("reason") or "").startswith(CLOUD_HOME)]
         homes += out.get("arrived") or []

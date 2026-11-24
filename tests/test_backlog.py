@@ -6,6 +6,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
+os.environ.pop("SCRUM_SHOP", None)  # a shop Mac sets it; backlog-add without --job is refused there (job 1504)
+os.environ.pop("CLAUDE_CODE_REMOTE", None)  # a cloud session sets it; same refusal
 import board, jev  # noqa: E402
 
 
@@ -1537,6 +1539,226 @@ class BacklogTest(unittest.TestCase):
         out, asked = self.rank_backlog({t: (2, 2, 0.9, "bug") for t in ("Edit me", "Delete me", "Keep me")}, during)
         self.assertEqual(out, {"rated": 1, "unrated": 2, "skipped": 0})
         self.assertEqual(self.text(), "# Backlog\n- [ ] Edit me please\n- [ ] Keep me {p:3}\n- [ ] Added meanwhile\n")
+
+
+class WorkerBacklogTest(unittest.TestCase):
+    """Job 1504: on a shop or cloud worker, backlog adds go into jobs/<id>/followups/add-<n>.md (the folder that syncs
+    home through the Artifacts push), and the home backlog-spec files them in the right project's backlog."""
+    BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
+    JOB = "042-x"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.home, self.other = base / "homerepo", base / "otherrepo"
+        for repo in (self.home, self.other):
+            (repo / "scrum").mkdir(parents=True)
+            (repo / "scrum" / "backlog.md").write_text("# Backlog\n- [ ] Existing item\n")
+        self.root = self.home / "scrum"
+        self.registry = base / "projects.json"
+        self.registry.write_text(json.dumps([str(self.home), str(self.other)]))
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(self.registry),
+                                           "SCRUM_COOLDOWN": str(base / "no-cooldown")})
+        env.start()
+        self.addCleanup(env.stop)
+        for var in ("SCRUM_SHOP", "CLAUDE_CODE_REMOTE"):
+            os.environ.pop(var, None)
+
+    def cli(self, *args, worker="SCRUM_SHOP"):
+        """B backlog-add in process (no detached estimate spawns) with worker ("SCRUM_SHOP", "CLAUDE_CODE_REMOTE" or
+        None) set; returns (exit code, stderr text)."""
+        env = {"SCRUM_SHOP": "1"} if worker == "SCRUM_SHOP" else {"CLAUDE_CODE_REMOTE": "true"} if worker else {}
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, env), mock.patch.object(board, "spawn_estimates") as self.estimates, \
+                redirect_stderr(err):
+            try:
+                board.main(["--dir", str(self.root), "backlog-add", *args])
+            except SystemExit as e:
+                return (e.code if isinstance(e.code, int) else 1), err.getvalue() + (e.code if isinstance(e.code, str) else "")
+        return 0, err.getvalue()
+
+    def followups(self):
+        return self.root / "jobs" / self.JOB / "followups"
+
+    def backlog(self, repo):
+        return (repo / "scrum" / "backlog.md").read_bytes()
+
+    def write_add(self, name, text):
+        self.followups().mkdir(parents=True, exist_ok=True)
+        (self.followups() / name).write_text(text)
+
+    def open_lines(self, repo):
+        return [line for line in (repo / "scrum" / "backlog.md").read_text().splitlines() if line.startswith("- [ ]")]
+
+    # --- criterion 1: the refusal ---
+    def test_worker_backlog_add_refused_without_job(self):
+        before = (self.backlog(self.home), self.backlog(self.other))
+        for worker in ("SCRUM_SHOP", "CLAUDE_CODE_REMOTE"):
+            with self.subTest(worker=worker):
+                code, err = self.cli("--top", "--", "x", worker=worker)
+                self.assertNotEqual(code, 0)
+                self.assertIn("--job <id>", err)
+                self.assertEqual((self.backlog(self.home), self.backlog(self.other)), before)
+                self.assertFalse((self.root / "jobs").exists())
+
+    def test_backlog_add_unchanged_off_worker(self):
+        code, err = self.cli("--", "Plain add", worker=None)
+        self.assertEqual(code, 0, err)
+        lines = self.open_lines(self.home)
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0], "- [ ] Existing item")
+        self.assertTrue(lines[1].startswith("- [ ] Plain add {#"), lines[1])
+        self.estimates.assert_called_once_with(self.root, ["Plain add"])
+        self.assertFalse((self.root / "jobs").exists())
+
+    # --- criterion 2: the followups file ---
+    def test_worker_add_writes_followup_file(self):
+        before = self.backlog(self.home)
+        code, err = self.cli("--job", "042-x", "--project", "otherrepo", "--top", "--", "Leads finder (moved from 042-x)")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(p.name for p in self.followups().iterdir()), ["add-1.md"])
+        lines = (self.followups() / "add-1.md").read_text().splitlines()
+        self.assertEqual(lines[0], "Backlog: add")
+        for line in ("Item: Leads finder (moved from 042-x)", "Project: otherrepo", "Top: yes"):
+            self.assertIn(line, lines)
+        self.assertEqual(self.backlog(self.home), before)
+
+    def test_worker_add_numbers_files(self):
+        self.assertEqual(self.cli("--job", "042-x", "--", "First")[0], 0)
+        self.assertEqual(self.cli("--job", "042-x", "--", "Second")[0], 0)
+        self.assertEqual(sorted(p.name for p in self.followups().iterdir()), ["add-1.md", "add-2.md"])
+        self.assertIn("Item: First", (self.followups() / "add-1.md").read_text().splitlines())
+        self.assertIn("Item: Second", (self.followups() / "add-2.md").read_text().splitlines())
+        (self.followups() / "add-1.md").unlink()  # a gap: the next file never overwrites add-2.md
+        self.assertEqual(self.cli("--job", "042-x", "--", "Third")[0], 0)
+        self.assertIn("Item: Second", (self.followups() / "add-2.md").read_text().splitlines())
+        names = sorted(p.name for p in self.followups().iterdir())
+        self.assertEqual(len(names), 2)
+        third = next(n for n in names if n != "add-2.md")
+        self.assertIn("Item: Third", (self.followups() / third).read_text().splitlines())
+
+    def test_worker_add_keeps_flags(self):
+        cases = [(("--trevor", "--priority", "5"), ["By: t", "Priority: 5"]),
+                 (("--back",), ["By: back"]),
+                 (("--critical",), ["Critical: yes"]),
+                 (("--setup", "a; b"), ["Setup: a; b"])]
+        for n, (flags, want) in enumerate(cases, 1):
+            with self.subTest(flags=flags):
+                code, err = self.cli("--job", "042-x", *flags, "--", f"Item {n}")
+                self.assertEqual(code, 0, err)
+                lines = (self.followups() / f"add-{n}.md").read_text().splitlines()
+                for line in want:
+                    self.assertIn(line, lines)
+        for flags in (("--top", "--priority", "3"), ("--back", "--top"), ("--critical", "--trevor"),
+                      ("--priority", "9")):
+            with self.subTest(bad=flags):
+                code, err = self.cli("--job", "042-x", *flags, "--", "Bad combo")
+                self.assertNotEqual(code, 0)
+                self.assertEqual(len(list(self.followups().iterdir())), 4)
+
+    def test_project_needs_job(self):
+        for worker in ("SCRUM_SHOP", None):
+            with self.subTest(worker=worker):
+                before = self.backlog(self.home)
+                code, err = self.cli("--project", "otherrepo", "--", "x", worker=worker)
+                self.assertNotEqual(code, 0)
+                self.assertIn("--project", err)
+                self.assertEqual(self.backlog(self.home), before)
+                self.assertFalse((self.root / "jobs").exists())
+
+    # --- criteria 3 and 4: filing at home ---
+    def test_backlog_spec_files_add_in_target_project(self):
+        home_before = self.backlog(self.home)
+        self.write_add("add-1.md", "Backlog: add\nItem: Leads finder (moved from 042-x)\nProject: otherrepo\nTop: yes\n")
+        out = board.cmd_backlog_spec(self.root, self.JOB)
+        self.assertEqual(out["moved"], [{"project": "otherrepo", "text": "Leads finder (moved from 042-x)"}])
+        self.assertEqual((out["added"], out["updated"], out["skipped"]), ([], [], []))
+        first = self.open_lines(self.other)[0]
+        self.assertTrue(first.startswith("- [ ] Leads finder (moved from 042-x) {#"), first)
+        self.assertIn("{p:5}", first)
+        self.assertIn("{by:t}", first)
+        self.assertEqual(self.open_lines(self.other)[1], "- [ ] Existing item")
+        self.assertEqual(self.backlog(self.home), home_before)
+
+    def test_backlog_spec_add_keeps_priority_and_by(self):
+        self.write_add("add-1.md", "Backlog: add\nItem: Trevor wants it\nProject: otherrepo\nBy: t\nPriority: 4\n")
+        self.write_add("add-2.md", "Backlog: add\nItem: Back of the line\nProject: otherrepo\nBy: back\n")
+        self.write_add("add-3.md", "Backlog: add\nItem: Critical one\nProject: otherrepo\nCritical: yes\n")
+        self.write_add("add-4.md", "Backlog: add\nItem: Needs setup\nProject: otherrepo\nSetup: a; b\n")
+        board.cmd_backlog_spec(self.root, self.JOB)
+        lines = self.open_lines(self.other)
+        trevor = next(l for l in lines if l.startswith("- [ ] Trevor wants it"))
+        self.assertIn("{by:t}", trevor)
+        self.assertIn("{p:4}", trevor)
+        back = next(l for l in lines if l.startswith("- [ ] Back of the line"))
+        self.assertIn("{by:back}", back)
+        self.assertIn("{p:1}", back)
+        self.assertIn("{p:5}", next(l for l in lines if l.startswith("- [ ] Critical one")))
+        self.assertIn("{setup: a; b}", next(l for l in lines if l.startswith("- [ ] Needs setup")))
+
+    def test_backlog_spec_add_own_project(self):
+        self.write_add("add-1.md", "Backlog: add\nItem: No project line\n")
+        self.write_add("add-2.md", "Backlog: add\nItem: Named home\nProject: homerepo\n")
+        other_before = self.backlog(self.other)
+        out = board.cmd_backlog_spec(self.root, self.JOB)
+        self.assertEqual(out["added"], ["No project line", "Named home"])
+        self.assertNotIn("moved", out)
+        texts = [i["text"] for i in board.read_backlog(self.root)[1] if not i["done"]]
+        self.assertEqual(texts, ["Existing item", "No project line", "Named home"])
+        self.assertEqual(self.backlog(self.other), other_before)
+
+    def test_backlog_spec_add_rerun_no_dupe(self):
+        self.write_add("add-1.md", "Backlog: add\nItem: Moved once\nProject: otherrepo\nTop: yes\n")
+        self.write_add("add-2.md", "Backlog: add\nItem: Home once\n")
+        board.cmd_backlog_spec(self.root, self.JOB)
+        other, home = self.backlog(self.other), self.backlog(self.home)
+        out = board.cmd_backlog_spec(self.root, self.JOB)
+        self.assertEqual((self.backlog(self.other), self.backlog(self.home)), (other, home))
+        self.assertEqual(out["added"], [])
+        self.assertNotIn("moved", out)
+
+    def test_backlog_spec_add_slow_e2e_item_deduped(self):
+        """The slow-E2E item keeps cmd_e2e_budget's one-open-item rule when filed from a worker's add file."""
+        self.write_add("add-1.md", "Backlog: add\nItem: Speed up the slowest job E2E spec files: a.spec.ts 9s (job 042-x)\n")
+        self.write_add("add-2.md", "Backlog: add\nItem: Speed up the slowest job E2E spec files: b.spec.ts 8s (job 042-x)\n")
+        out = board.cmd_backlog_spec(self.root, self.JOB)
+        self.assertEqual(out["added"], ["Speed up the slowest job E2E spec files: a.spec.ts 9s (job 042-x)"])
+
+    def test_backlog_spec_add_unknown_project(self):
+        self.write_add("add-1.md", "Backlog: add\nItem: Lost item\nProject: nowhere\n")
+        other_before = self.backlog(self.other)
+        out = board.cmd_backlog_spec(self.root, self.JOB)
+        self.assertEqual(out["added"], ["Lost item (for nowhere: not a registered project)"])
+        texts = [i["text"] for i in board.read_backlog(self.root)[1] if not i["done"]]
+        self.assertEqual(texts, ["Existing item", "Lost item (for nowhere: not a registered project)"])
+        self.assertEqual(self.backlog(self.other), other_before)
+
+    def test_backlog_spec_only_adds(self):
+        self.write_add("add-1.md", "Backlog: add\nItem: Only an add\n")
+        out = board.cmd_backlog_spec(self.root, self.JOB)
+        self.assertEqual(out, {"added": ["Only an add"], "updated": [], "skipped": []})
+
+    # --- criterion 5: nothing filed on a worker ---
+    def test_backlog_spec_ignores_adds_on_worker(self):
+        self.write_add("add-1.md", "Backlog: add\nItem: Moved later\nProject: otherrepo\n")
+        self.write_add("add-2.md", "Backlog: add\nItem: Home later\n")
+        self.write_add("1.md", "Backlog: new\nItem: Spec item\n\n# Spec\nBody\n")
+        other_before = self.backlog(self.other)
+        with mock.patch.dict(os.environ, {"SCRUM_SHOP": "1"}):
+            out = board.cmd_backlog_spec(self.root, self.JOB)
+        self.assertEqual(out, {"added": ["Spec item (from 042-x)"], "updated": [], "skipped": []})
+        self.assertEqual(self.backlog(self.other), other_before)
+        self.assertEqual([i["text"] for i in board.read_backlog(self.root)[1] if not i["done"]],
+                         ["Existing item", "Spec item (from 042-x)"])
+        self.assertEqual(sorted(p.name for p in self.followups().iterdir()), ["1.md", "add-1.md", "add-2.md"])
+
+    def test_on_worker_env(self):
+        for env, want in (({}, False), ({"SCRUM_SHOP": "1"}, True), ({"SCRUM_SHOP": ""}, False),
+                          ({"CLAUDE_CODE_REMOTE": "true"}, True), ({"CLAUDE_CODE_REMOTE": "false"}, False)):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                self.assertIs(board.on_worker(), want)
+
 
 if __name__ == "__main__":
     unittest.main()
