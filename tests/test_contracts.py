@@ -1240,6 +1240,19 @@ class ContractTest(unittest.TestCase):
         for phrase in ("OBSOLETE: needs Trevor — <that step>", "the main Mac"):
             self.assertIn(phrase, line, phrase)
 
+    def test_spec_writer_reads_video_transcripts(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        bullets = [l for l in text.splitlines() if "**Obsolete requests.**" in l]
+        self.assertEqual(len(bullets), 1)
+        for phrase in ("~/Developer/claude/video-transcripts", "~/.claude/scripts/video-transcript.sh",
+                       "Never write OBSOLETE because the video could not be watched"):
+            self.assertIn(phrase, bullets[0], phrase)
+
+    def test_newjob_obsolete_trevor_item_goes_to_manual(self):
+        step = next(l for l in (SKILL_DIR / "lanes" / "newjob.md").read_text().splitlines() if "**Obsolete:**" in l)
+        self.assertIn("B manual-add 'Closed unwatched, check: <rest of line> (from $ID)'", step)
+        self.assertLess(step.index("Closed unwatched"), step.index("B abort $ID"))
+
     def test_cloud_sync_needs_trevor_manual_add(self):
         cloud = (SKILL_DIR / "lanes" / "cloud.md").read_text()
         line = next(l for l in cloud.splitlines() if l.strip().startswith("- PR `OPEN` with label `scrum:needs-human`"))

@@ -185,6 +185,13 @@ class RunsOnTest(unittest.TestCase):
             self.assertIn(term, terms)
         self.assertEqual(len(terms), len(set(terms)))
 
+    def test_video_hosts_are_main_only(self):
+        terms = board.main_only_terms()
+        for t in ("instagram.com", "youtu.be", "youtube.com", "tiktok.com"):
+            self.assertIn(t, terms)
+        self.assertTrue(board.names_main_only("watch https://www.instagram.com/reel/abc", terms))
+        self.assertFalse(board.names_main_only("reinstagram.community", terms))
+
     def test_term_match_whole_word(self):
         terms = ["brew", ".env.prod", "VectorCraft", "computer use", "PR merge", "/trevskills-migrate"]
         for text, want in (("Install it with Homebrew", False), ("run brew install x", True), ("BREW it", True),
