@@ -4178,10 +4178,11 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "never reuses a version number", "`edit-builder`", "`edit-reviewer`",
                        "`View: QuickTime Player <the master's absolute path>`"):
             self.assertIn(phrase, animation, phrase)
-        # Trevor 2026-11-24: one storyboard, notes on it start the build, captures are reused, and the reviewer watches
+        # Trevor 2026-11-24: one storyboard per film (a new version of a film he has watched gets none), notes on it start the build, captures are reused, and the reviewer watches
         # the rendered master, never stills of the page.
         for step, end, phrases in (
-                ("3. **Storyboard.**", "\n4. **", ("Made once", "`Storyboard: none` (a reframe of an approved film) skips this step",
+                ("3. **Storyboard.**", "\n4. **", ("Made once per film", "A film he has already watched", "`Storyboard: none` (a reframe of an approved film)",
+                                                  "`Storyboard: new`", "A storyboard this job already made is never skipped",
                                                   "A rework note does the same", "asks to see a new one re-runs this step")),
                 ("4. **Build.**", "\n5. **", ("Changes from the storyboard", "Use the captures already in the folder")),
                 ("5. **Review.**", "\n6. **", ("Review the rendered video itself, never page stills", "sheet.py <master>",

@@ -19,7 +19,7 @@ Motion ads made with the saas-animation skill (`$HOME/.claude/skills/saas-animat
    - <ISO time> (storyboard | v<V>): <his note, word for word>
    ```
    Each of Trevor's notes is also copied word for word into `<folder>/notes.md` with its round, as saas-animation step 8 says. A resume never re-asks an approved storyboard and never reuses a version number: the next cut is one more than the highest `v<V>` in the ledger, whatever happened to the files. An `approve` means the storyboard while `Storyboard:` is pending, else the newest version. A `rework` note goes to the same one, and a note on a pending storyboard approves it with that note (step 3).
-3. **Storyboard.** Made once. A feature.md line `Storyboard: none` (a reframe of an approved film) skips this step: write `Storyboard: none` in the ledger, go to step 4, and its approved film stands in for the storyboard everywhere below. Otherwise `B set $ID stage=spec`. Spawn `edit-builder` and wait for it, with this prompt:
+3. **Storyboard.** Made once per film, the first time Trevor sees it, never once per version. A film he has already watched (a cut of it is in `~/Desktop/videos/` or the folder before this job starts) skips this step, and so does a feature.md line `Storyboard: none` (a reframe of an approved film): write `Storyboard: none` in the ledger, go to step 4, and the film's last cut plus his notes stand in for the storyboard everywhere below. A feature.md line `Storyboard: new` (he asked for one) makes it anyway. A storyboard this job already made is never skipped. Otherwise `B set $ID stage=spec`. Spawn `edit-builder` and wait for it, with this prompt:
    ```
    KIND: edit-animation. Step: storyboard. FOLDER: <folder>. JOB_DIR: <JOB_DIR> (job ledger video.md). Brief:
    <JOB_DIR>/feature.md. Follow $HOME/.claude/skills/saas-animation/SKILL.md workflow steps 1 to 3. Build a numbered
@@ -33,7 +33,8 @@ Motion ads made with the saas-animation skill (`$HOME/.claude/skills/saas-animat
 4. **Build.** `B set $ID stage=build`. Before every build round after the first, apply step 7. Spawn `edit-builder` and wait for it, with this prompt:
    ```
    KIND: edit-animation. Step: build. FOLDER: <folder>. JOB_DIR: <JOB_DIR> (job ledger video.md). Follow
-   $HOME/.claude/skills/saas-animation/SKILL.md workflow steps 4 and 6. Build the approved storyboard; apply
+   $HOME/.claude/skills/saas-animation/SKILL.md workflow steps 4 and 6. Build the approved storyboard (ledger `Storyboard: none`:
+   the film's last cut, every shot his notes leave alone kept as it is); apply
    every note in the ledger's "Trevor's notes" section and every must fix line in the newest review-N.md whose first
    line is RECUT. The storyboard is the plan: when a shot does not work once
    it moves, fix it inside the rules and Trevor's notes and add a line (shot, what changed, no reason) to the ledger's
