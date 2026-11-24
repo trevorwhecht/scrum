@@ -10905,7 +10905,25 @@ class RouteCheckTest(unittest.TestCase):
         self.assertIsNone(self.lilguy({"src/a.py": "x\n"}, check_fails=2))
         self.assertEqual(self.route(check_fails=3)["promote"], "check failed 3 times")
         board.cmd_set(self.root, self.job, ["worktree="])
-        self.assertIsNone(self.route(check_fails=3)["promote"])  # lilguy in the main checkout: no promotion
+        self.assertEqual(self.route(check_fails=3)["promote"], "worktree unset")
+
+    def test_route_check_lilguy_worktree_unset_no_folder_promotes(self):
+        self.round(1)
+        self.lilguy({"src/a.py": "x\n"})
+        board.cmd_set(self.root, self.job, ["worktree="])
+        self.assertEqual(self.route()["promote"], "worktree unset")
+        self.assertFalse(board.find(board.read_board(self.root), self.job).get("worktree"))
+
+    def test_route_check_lilguy_worktree_unset_reads_repo_worktree_folder(self):
+        self.round(1)
+        self.lilguy({"src/a.py": "x\n" * 31})
+        board.cmd_set(self.root, self.job, ["worktree="])
+        folder = Path(self.tmp.name) / ".claude" / "worktrees" / f"scrum-{self.job}"
+        folder.parent.mkdir(parents=True)
+        self.wt.rename(folder)
+        self.assertEqual(self.route()["promote"], "diff over 30 added lines (31)")
+        recorded = board.find(board.read_board(self.root), self.job).get("worktree")
+        self.assertEqual(Path(recorded).resolve(), folder.resolve())
 
     # --- can't tell ---
     def test_route_check_unreadable_diff_is_conservative(self):
