@@ -1859,6 +1859,7 @@ def write_pulse(root, digest_id):
     unregistered one); no filter when it is empty."""
     since = _pulse_since_any(root, digest_id)
     lines = sorted((l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and "orphan_killed" not in l
+                    and "idle_release" not in l
                     and (since is None or l["t"] >= since)),  # serve.py stop_orphans' kill lines are no tick
                    key=lambda l: l["t"])  # in time order, so no total passes the window when two writers interleave
     out = [f"# Pulse: digest {digest_id}", ""]
@@ -6146,6 +6147,8 @@ CPU_SAMPLES = 3  # cpu_busy_pct: the mean of at most this many watchdog samples 
 CPU_SAMPLE_SECS = 300  # ... from the last this many seconds (about 3 watchdog ticks), so one spike never flips the gate
 SWAP_FREE_RAM_PCT = 35  # ... but swap alone is stale (macOS keeps it until pressure returns): it blocks only below this free RAM
 SWAP_GROWTH_SECS = 600  # ... or when swap grew within this window (2026-10-25: idle machine, 71% free, blocked for an hour)
+IDLE_HOLD_SECS = 1800  # machine_ok: a memory warn or swap hold with no live session releases one claim after this long
+#                        (2026-11-24: warn with no job running and the biggest process 0.3 GB held the queue about 14 h)
 WARN_SESSIONS = 3  # vm_pressure_reason: up to this many live sessions, kernel level 2 with free RAM at SWAP_FREE_RAM_PCT or
 #                    more and swap flat is no reason (Trevor 2026-11-23: held 81% of a day at 36-43% free, 1 session live).
 #                    pulse.log 11-10 to 11-23, 15 min after a warn: critical 0 of 749 readings at 0-4 sessions, 5.4% of 445 at 5+
@@ -6386,6 +6389,41 @@ def swap_pressing(ram, swap, limit):
     return swap is not None and swap > limit and ((ram is not None and ram < SWAP_FREE_RAM_PCT) or swap_grew(swap))
 
 
+def idle_hold_release(held) -> bool:
+    """True when `held` (a memory warn or swap reason from machine_ok) has refused work for IDLE_HOLD_SECS with no live
+    session, so one claim may start (job 1460). The first refusal time is kept in SCRUM_IDLE_HOLD (default: system temp
+    dir, like swap_grew's log) and dropped when nothing is held or a session is live, so the next release waits another
+    IDLE_HOLD_SECS. Critical memory pressure (kernel level 4+) never releases. The release is one line in pulse.log:
+    {"t", "idle_release": reason}. An unreadable or unwritable file never releases."""
+    log = Path(os.environ.get("SCRUM_IDLE_HOLD") or os.path.join(tempfile.gettempdir(), "scrum-idle-hold.json"))
+    level = vm_pressure_level()
+    if not held or (level is not None and level >= 4) or live_sessions() > 0:
+        log.unlink(missing_ok=True)
+        return False
+    now = time.time()
+    try:
+        state = json.loads(log.read_text())
+        since = float(state["since"])
+    except (OSError, ValueError, TypeError, KeyError):
+        state, since = {}, None
+    if since is None or since > now:
+        try:
+            log.write_text(json.dumps({"since": now}))
+        except OSError:
+            pass
+        return False
+    if now - since < IDLE_HOLD_SECS:
+        return False
+    if not state.get("released"):  # one pulse line a release, not one a caller
+        try:
+            with open(pulse_path(), "a") as fh:
+                fh.write(json.dumps({"t": int(now), "idle_release": held}) + "\n")
+            log.write_text(json.dumps({"since": since, "released": now}))
+        except OSError:
+            pass
+    return True
+
+
 def machine_ok(path, manual=False, claim=False, own_load=False):
     """None when the machine has room for new work, else why not: cool-down (only for an automatic start of new or
     not-yet-started work, claim=True, and skipped for Trevor's manual clicks), then free RAM, then the kernel memory
@@ -6402,11 +6440,13 @@ def machine_ok(path, manual=False, claim=False, own_load=False):
     ram = free_ram_pct()
     if ram is not None and ram < MIN_FREE_RAM_PCT:
         return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
-    if mem := vm_pressure_reason(new=1):
-        return mem
     swap = swap_used_pct()
-    if swap_pressing(ram, swap, MAX_SWAP_PCT):
-        return f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
+    held = vm_pressure_reason(new=1)
+    if not held and swap_pressing(ram, swap, MAX_SWAP_PCT):
+        held = f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
+    if not idle_hold_release(held):
+        if held:
+            return held
     disk = free_disk_gb(path)
     if disk is not None and disk < MIN_FREE_DISK_GB:
         return f"free disk {disk:.1f} GB (< {MIN_FREE_DISK_GB} GB)"
