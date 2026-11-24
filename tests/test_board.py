@@ -7601,7 +7601,8 @@ class SpawnTest(unittest.TestCase):
 st, null = os.fstat(0), os.stat(os.devnull)
 rec = {"argv": sys.argv[1:], "cwd": os.getcwd(), "notifier": os.environ.get("CLAUDE_NOTIFIER_DISABLE"),
        "new_session": os.getsid(0) == os.getpid(), "stdin_devnull": (st.st_dev, st.st_ino) == (null.st_dev, null.st_ino),
-       "claude_mds": os.environ.get("CLAUDE_CODE_DISABLE_CLAUDE_MDS")}
+       "claude_mds": os.environ.get("CLAUDE_CODE_DISABLE_CLAUDE_MDS"),
+       "auto_memory": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY")}
 with open(os.environ["STUB_OUT"], "a") as fh:
     fh.write(json.dumps(rec) + "\\n")
 print("stub out")
@@ -7911,7 +7912,7 @@ print("stub err", file=sys.stderr)
         self.assertIsInstance(line["pid"], int)
         rec = self.records()[0]
         self.assertEqual(rec["argv"], ["-p", "/trevskills-scrum start 123-some-job", "--model", "sonnet",
-                                       "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX])
+                                       "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX, "--disallowedTools", *board.UNUSED_TOOLS])
         self.assertEqual(os.path.realpath(rec["cwd"]), os.path.realpath(self.repo))
         self.assertEqual(rec["notifier"], "1")
         self.assertTrue(rec["new_session"])
@@ -7926,7 +7927,7 @@ print("stub err", file=sys.stderr)
         out = self.cli("123-some-job", "approve", "/trevskills-scrum approve 123-some-job it's; rm -rf ~")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(self.records(2)[1]["argv"], ["-p", "/trevskills-scrum approve 123-some-job it's; rm -rf ~",
-                                                      "--model", "sonnet", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX])  # job 1344: approve gets the model
+                                                      "--model", "sonnet", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX, "--disallowedTools", *board.UNUSED_TOOLS])  # job 1344: approve gets the model
 
     def test_big_ticket_model(self):
         (self.root / "board.json").write_text(json.dumps({"jobs": [
@@ -7965,21 +7966,21 @@ print("stub err", file=sys.stderr)
 
     def test_spawn_model_selection(self):
         project = self.root / "project.md"
-        plain = ["-p", "/p", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX]
+        plain = ["-p", "/p", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX, "--disallowedTools", *board.UNUSED_TOOLS]
         for line, model in (("- Orchestrator model: opus\n", "opus"), ("- Orchestrator model: inherit\n", None),
                             ("- Orchestrator model: Inherit\n", None), ("- Orchestrator model: so net; rm\n", "sonnet"),
                             ("- Orchestrator model: $(touch x)\n", "sonnet"), ("- Orchestrator model:   \n", "sonnet"),
                             ("- Stack: Python\n", "sonnet")):
             project.write_text("# Project profile\n" + line)
             for action in ("start", "resume", "rework", "approve"):  # job 1344
-                expect = plain if model is None else ["-p", "/p", "--model", model, "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX]
+                expect = plain if model is None else ["-p", "/p", "--model", model, "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX, "--disallowedTools", *board.UNUSED_TOOLS]
                 self.assertEqual(self.argv(action), expect, (line, action))
             self.assertEqual(self.argv("digest"), plain, line)  # an action with no orchestrator model
         project.write_text("- Orchestrator model: opus\n")
         self.assertEqual(self.argv("digest", model="sonnet"),
-                         ["-p", "/p", "--model", "sonnet", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX])
+                         ["-p", "/p", "--model", "sonnet", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX, "--disallowedTools", *board.UNUSED_TOOLS])
         self.assertEqual(self.argv("start", model="haiku"),
-                         ["-p", "/p", "--model", "haiku", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX])
+                         ["-p", "/p", "--model", "haiku", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX, "--disallowedTools", *board.UNUSED_TOOLS])
         for bad in ("so net", "$(touch x)", "", "-x y"):
             with self.assertRaises(SystemExit, msg=bad):
                 board.spawn(self.root, "999-not-a-job", "approve", "/p", model=bad)
@@ -8047,6 +8048,8 @@ print("stub err", file=sys.stderr)
                     "hookify@claude-plugins-official": False, "claude-seo@seo": False}, job_id)
                 self.assertEqual(settings["hooks"]["PreToolUse"][0]["matcher"], "Agent|Task", job_id)
                 self.assertEqual(rec["claude_mds"], mds, job_id)
+                self.assertEqual(rec["auto_memory"], mds, job_id)  # job 1469: lilguy keeps memory with CLAUDE.md
+                self.assertEqual(rec["argv"][-5:], ["--disallowedTools", *board.UNUSED_TOOLS], job_id)  # job 1469
         with mock.patch.dict(os.environ):
             os.environ.pop("CLAUDE_CODE_DISABLE_CLAUDE_MDS", None)
             self.assertEqual(run("001-std")[0]["claude_mds"], "1")
@@ -8140,7 +8143,7 @@ print("stub err", file=sys.stderr)
         out = self.cli("run-all", "run-all", "/trevskills-scrum run-all")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertRegex(json.loads(out.stdout)["log"], r"^runs/\d{8}-\d{6}-run-all-run-all\.log$")
-        self.assertEqual(self.records()[0]["argv"], ["-p", "/trevskills-scrum run-all", "--model", "sonnet", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX])
+        self.assertEqual(self.records()[0]["argv"], ["-p", "/trevskills-scrum run-all", "--model", "sonnet", "--permission-mode", "acceptEdits", "--strict-mcp-config", "--settings", board.NO_CACHE_TAX, "--disallowedTools", *board.UNUSED_TOOLS])
 
     def test_spawn_cloud_home_gets_orchestrator_model(self):
         out = self.cli("999-x", "cloud-home", "/trevskills-scrum cloud-home 999-x")
