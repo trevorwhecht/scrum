@@ -514,8 +514,10 @@ PULSE_HOLD_TTL_S = 180  # pulse_tick reports a hold this long after it was last 
 
 def note_hold(root, reason):
     """Remember `reason` (a held-job token or a run-all start hold) for root's project (keyed by its resolved scrum/ path): pulse_tick adds `held:<reason>`
-    to that project's gates, so write_pulse counts the idle minutes as gated and names the gate."""
-    PULSE_HOLDS.setdefault(Path(root).resolve(), {})[reason] = time.time()
+    to that project's gates, so write_pulse counts the idle minutes as gated and names the gate. Writes under PULSE_LOCK."""
+    key, now = Path(root).resolve(), time.time()
+    with PULSE_LOCK:
+        PULSE_HOLDS.setdefault(key, {})[reason] = now
 
 
 def note_held(root, reason, job_ids):
@@ -4652,7 +4654,7 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     blocks every one of those waiting jobs), and top-level gates: ram_room when board.ram_room(floor=0) < 1, plus a PULSE_GATES token (other when
     unrecognised) for the first project's machine_ok(claim=True) refusal other than COOLING. A gates list that raised
     is null. A hold start_ready or auto_continue_tick noted (note_hold: a child left to the shop, finish_first, a running
-    run-all, SWEEP_HELD, a machine or usage hold; play_queue_tick's queued_launch:<id> for a launch spawn still holds) in the last PULSE_HOLD_TTL_S adds `held:<token>` to that project's gates, which
+    run-all, SWEEP_HELD, a machine or usage hold; play_queue_tick's queued_launch:<id> for a launch spawn still holds) in the last PULSE_HOLD_TTL_S (read from a copy taken under PULSE_LOCK) adds `held:<token>` to that project's gates, which
     board.write_pulse counts as gated even beside claimable work. guard: the first project's machine_ok(claim=False) refusal, else the allowance reason when
     board.pick_account has no account or the live count reaches its allowance (the 5h pace included), else null.
     stuck_alert gets the machine_ok refusal alone (never the allowance reason) and the same sessions count, in its own
@@ -4686,7 +4688,10 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
             gates = []
             for hit in hits if hits and all(hits) else []:  # one resumable job means the project is not gated
                 gates += ["runs_alone"] if hit == "this job runs alone" else [f"overlap:{i}" for i in hit.ids]
-            gates += [f"held:{r}" for r, t in PULSE_HOLDS.get(root.resolve(), {}).items() if now - t <= PULSE_HOLD_TTL_S]
+            key = root.resolve()
+            with PULSE_LOCK:  # note_hold writes from other threads; iterate a copy
+                holds = dict(PULSE_HOLDS.get(key, {}))
+            gates += [f"held:{r}" for r, t in holds.items() if now - t <= PULSE_HOLD_TTL_S]
             projects[project]["gates"] = list(dict.fromkeys(gates))
         except (Exception, SystemExit) as e:
             print(f"watchdog: pulse: {project}: gates: {e}", file=sys.stderr, flush=True)

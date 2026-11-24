@@ -170,5 +170,35 @@ class PulseLockTest(unittest.TestCase):
         self.assertEqual((len(bad), bad[:5]), (0, []))  # count and the first few bad snapshot sizes
 
 
+class PulseHoldsRaceTest(unittest.TestCase):
+    """Job 1447: a hold note_hold adds from another thread while pulse_tick reads the project's holds never makes its
+    gates None. PulseTest's fixture (two projects, fake readings) is reused."""
+    NOW = test_serve.PulseTest.NOW
+    setUp = test_serve.PulseTest.setUp
+    lines = test_serve.PulseTest.lines
+
+    def test_pulse_holds_mutation_during_gates(self):
+        s = self.serve
+        root = (self.base / "app" / "scrum").resolve()
+        s.PULSE_HOLDS.clear()
+        self.addCleanup(s.PULSE_HOLDS.clear)
+        added = []
+
+        class Stamp(float):
+            """A hold time that, when pulse_tick's gates step reads it, has a thread note a new hold for the project."""
+            def __rsub__(self, now):
+                t = threading.Thread(target=lambda: (s.note_hold(root, "mid_gates"), added.append(1)), daemon=True)
+                t.start()
+                t.join(30)
+                return 0.0
+        s.PULSE_HOLDS[root] = {"before": Stamp(self.NOW)}
+        with mock.patch("sys.stderr", new=io.StringIO()) as err:
+            s.pulse_tick({}, now=self.NOW)
+        self.assertEqual(added, [1])  # note_hold finished while pulse_tick was mid-iteration (not blocked on the lock)
+        self.assertNotIn("gates:", err.getvalue())
+        self.assertEqual(self.lines()[-1]["projects"]["app"]["gates"], ["held:before"])
+        self.assertEqual(set(s.PULSE_HOLDS[root]), {"before", "mid_gates"})
+
+
 if __name__ == "__main__":
     unittest.main()
