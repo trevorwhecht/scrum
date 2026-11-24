@@ -5852,6 +5852,36 @@ class BoardTest(unittest.TestCase):
         cells = board._timing_row(self.root, "j", {"updatedAt": job["updatedAt"]}, {})[0]  # a local job has no Cloud
         self.assertEqual(cells[11], "-")
 
+    def test_timing_shop_needs_human_before_home_build_is_human_wait(self):
+        t0 = 1_700_000_000
+        stamp = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        for at, rel in ((0, "feature.md"), (7200, "spec.md"), (7200, "round-1/head.txt")):
+            p = self.write(f"j/{rel}", "x\n")
+            os.utime(p, (t0 + at, t0 + at))
+        (self.root / "jobs/j/shop-at.txt").write_text(f"{t0 + 600}\n")
+        runs = self.root / "runs"
+        runs.mkdir()
+        (runs / f"{stamp(t0 + 5400)}-rework-j.log").write_text("x")  # the rework run, 30 min after the stop
+        (runs / f"{stamp(t0 + 6000)}-start-j.log").write_text("x")
+        job = {"worker": "shopmac", "updatedAt": datetime.fromtimestamp(t0 + 7200, timezone.utc).isoformat()}
+        cells = board._timing_row(self.root, "j", job, {}, (), [(t0 + 3600, t0 + 5400)])[0]
+        self.assertEqual((cells[3], cells[7]), ("10m", "30m"))  # Queue: rework to home build start; the stop-to-rework span is Human wait
+        cells = board._timing_row(self.root, "j", job, {})[0]  # no needs-human stop: Queue runs from the dispatch as before
+        self.assertEqual((cells[3], cells[7]), ("1h30m", "0m"))
+
+    def test_timing_queue_never_exceeds_wall(self):
+        t0 = 1_700_000_000
+        for rel in ("feature.md", "spec.md"):
+            p = self.write(f"j/{rel}", "x\n")
+            os.utime(p, (t0, t0))
+        runs = self.root / "runs"
+        runs.mkdir()
+        stamp = datetime.fromtimestamp(t0 + 3600, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        (runs / f"{stamp}-start-j.log").write_text("x")
+        job = {"updatedAt": datetime.fromtimestamp(t0 + 1800, timezone.utc).isoformat()}
+        cells = board._timing_row(self.root, "j", job, {})[0]
+        self.assertEqual((cells[1], cells[3]), ("30m", "30m"))
+
     def test_timing_no_spec_counts_feature_to_first_run_as_queue(self):
         t0 = 1_700_000_000
         p = self.write("j/feature.md", "x\n")
