@@ -12327,6 +12327,20 @@ class JobCostTest(unittest.TestCase):
                 self.jobs()
                 self.assertEqual(tt.call_count, calls + 1, "after 300 s: one new read")
 
+    def test_newest_row_is_the_sign_of_life_of_a_job_with_no_worktree(self):
+        old, live = "2026-01-01T00:00:00+00:00", 1_900_000_000
+        edit = {"lane": "edit", "stage": "spec", "updatedAt": old}
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "1-a", **edit}, {"id": "2-b", **edit, "worktree": str(self.tmp)}, {"id": "3-c", **edit, "waiting": "you"},
+            {"id": "4-d", **edit, "stage": "waiting"}, {"id": "5-e", **edit}]}))
+        rows = [{**self.row(j), "ts": t} for t in (live - 5, live) for j in ("1-a", "2-b", "3-c", "4-d")]
+        rows.append({**self.row("5-e", project="other"), "ts": live})
+        with mock.patch.object(self.serve.board, "transcript_tokens", return_value=rows):
+            jobs = self.jobs()
+        self.assertEqual(jobs["1-a"]["activity"], {"text": "storyboard being made", "at": live})
+        for j in ("2-b", "3-c", "4-d", "5-e"):
+            self.assertLess(jobs[j]["activity"]["at"], live, j)
+
     def test_failed_or_empty_read_shows_no_cost(self):
         for kw in ({"side_effect": OSError("boom")}, {"return_value": []}):
             self.serve.JOB_COST_CACHE.clear()

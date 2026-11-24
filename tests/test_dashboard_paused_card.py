@@ -46,6 +46,8 @@ class PausedCard(unittest.TestCase):
         self.assertRegex(html, r'<span class="badge" data-agent-hint="[^"]+">stalled</span>')
         old, = render_run(f"out(card({json.dumps({**job, 'stalled': False})}));")
         self.assertIn("stale since", old)  # the contrast: the same job unflagged is stale
+        queued, = render_run(f"out(card({json.dumps({**job, 'stalled': False, 'play_queued': True})}));")
+        self.assertNotIn("stale since", queued)  # waiting its turn, not stuck
 
     def test_paused_child_waits_on_trevor(self):
         self.assertTrue(run('needsYou({stage: "build", paused: true})'))

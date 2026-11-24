@@ -6158,6 +6158,8 @@ def activity(root, job):
     if wt and (t := worktree_mtime(wt)):
         events.append((t, "files changed"))
     text = STAGE_TEXT.get(job["stage"], job["stage"])
+    if job.get("lane") == "edit" and job["stage"] == "spec":  # no spec writer in lanes/edit.md: stage spec is its storyboard
+        text = "storyboard being made"
     if job.get("pr") and job["stage"] in ("merging", "needs-human"):
         text = "CI running" if job["stage"] == "merging" else "PR ready"
     if job.get("play_queued"):  # Trevor already clicked Play: beats the stage text and "PR ready"
@@ -6587,7 +6589,7 @@ def hog_alert(today: str | None = None) -> str | None:
 
 
 JOB_COST_TTL = 300  # seconds one board.transcript_tokens read serves every project's job costs
-JOB_COST_CACHE = {}  # "at" -> time.monotonic() of the read; "costs" -> {project: {job: (tokens, usd)}}
+JOB_COST_CACHE = {}  # "at" -> time.monotonic() of the read; "costs" -> {project: {job: (tokens, usd)}}; "last" -> {(project, job): ts of its newest transcript row}
 JOB_COST_LOCK = threading.Lock()  # guards JOB_COST_CACHE and JOB_COST_BUSY only, never held across the read
 JOB_COST_BUSY = [False]  # True while one refresh reads; a poll that finds it set serves the last known costs
 REAL_TRANSCRIPT_TOKENS = board.transcript_tokens  # job_costs skips the real read under unittest unless a test replaced it
@@ -6615,16 +6617,19 @@ def refresh_job_costs():
     """One transcript read (no lock held), then store it. A failed read logs to stderr and keeps the last known costs
     (no costs when there are none); either way `at` moves on, so a failing read is not retried every poll."""
     try:
-        costs = None
+        costs = last = None
         if not ("unittest" in sys.modules and board.transcript_tokens is REAL_TRANSCRIPT_TOKENS
                 and not os.environ.get("SCRUM_TRANSCRIPTS")):
             now = time.time()
             try:
-                costs = board.cost_by_job(board.transcript_tokens(now - board.JOB_COST_DAYS * 86400, now))
+                rows = board.transcript_tokens(now - board.JOB_COST_DAYS * 86400, now)
+                costs = board.cost_by_job(rows)
+                last = {(r["project"], r["job"]): r["ts"] for r in rows}  # rows are sorted by ts
             except Exception as e:  # noqa: BLE001  a bad transcript never breaks the board
                 print(f"job costs: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         with JOB_COST_LOCK:
-            JOB_COST_CACHE.update(at=time.monotonic(), costs=costs if costs is not None else JOB_COST_CACHE.get("costs", {}))
+            JOB_COST_CACHE.update(at=time.monotonic(), costs=costs if costs is not None else JOB_COST_CACHE.get("costs", {}),
+                                  last=last if last is not None else JOB_COST_CACHE.get("last", {}))
     finally:
         with JOB_COST_LOCK:
             JOB_COST_BUSY[0] = False
@@ -6754,7 +6759,10 @@ def board_with_activity(root, project):
             job["costTokens"], job["costUsd"] = cost
         if job.get("stage") not in ("done", "aborted"):  # a final job's routed flag is cached by cached_board
             job["routed"] = (root / "jobs" / str(job.get("id")) / "routing.log").is_file()
-            job["activity"] = activity(root, job)
+            job["activity"] = act = activity(root, job)
+            # no worktree (an edit job, a spec): no files or commits to watch, so its session's newest message is the sign of life
+            if act and not job.get("worktree") and not job.get("waiting") and job.get("stage") in board.ACTIVE:
+                act["at"] = max(act["at"], JOB_COST_CACHE.get("last", {}).get((project, job.get("id")), 0))
             if "fable" in (board.orchestrator_model(root, job.get("id")) or "").lower():
                 job["fable"] = True  # the card's Fable chip
             job["runsOn"] = board.stored_runs_on(root, job)  # the card's Runs on chip

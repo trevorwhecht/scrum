@@ -213,13 +213,13 @@ class StopBox(unittest.TestCase):
             j({{stage: "needs-human", reason: "blocked: x", question: "Ship /a/b/spec.md now?"}}),
             j({{waiting: "permission: Bash"}}), j({{stage: "waiting", setup: "pending"}}),
             j({{}}), j({{stage: "spec"}}), j({{stage: "cloud"}}), j({{stage: "waiting"}}), j({{stage: "odd"}}),
-            j({{updatedAt: "garbage"}}), j({{updatedAt: undefined}})].map(statusLine).concat([clock(new Date(at))]));""")
+            j({{updatedAt: "garbage"}}), j({{updatedAt: undefined}}), j({{lane: "edit", stage: "spec"}})].map(statusLine).concat([clock(new Date(at))]));""")
         c = got.pop()
         self.assertEqual(got, ["Done", "Aborted", "Waiting on 9 (x)", "Paused by you", "Paused by you", "Waiting on 222, 223 (shares SKILL.md)",
                                "Waiting: can't resume yet: 222.", "Waiting on you: The migration drops a column.",
                                "Waiting on you: Ship spec.md now?", "Waiting on you: permission: Bash",
                                "Waiting on you: setup", f"Building, started {c}", f"Writing spec, started {c}", f"Running in cloud, started {c}",
-                               f"Queued, started {c}", f"odd, started {c}", "Building", "Building"])
+                               f"Queued, started {c}", f"odd, started {c}", "Building", "Building", f"Making the storyboard, started {c}"])
         for line in got:
             self.assertNotIn("/", line)
         text = DASHBOARD.read_text()

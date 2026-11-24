@@ -22,7 +22,8 @@ Motion ads made with the saas-animation skill (`$HOME/.claude/skills/saas-animat
    KIND: edit-animation. Step: storyboard. FOLDER: <folder>. JOB_DIR: <JOB_DIR> (job ledger video.md). Brief:
    <JOB_DIR>/feature.md. Follow $HOME/.claude/skills/saas-animation/SKILL.md workflow steps 1 to 3. Build a numbered
    storyboard from real captures and real assets in the folder: frames plus a page filled from the skill's
-   templates/storyboard.html, saved in the folder. Screenshot that page at desktop and phone width and open both
+   templates/storyboard.html, saved in the folder. Keep every site capture in one script in the folder that replays the
+   whole flow, or one named shot, on its own: a note re-shoots only the shots it changes. Screenshot that page at desktop and phone width and open both
    screenshots before you finish. Do not build, render, run Blender or make sound. Last line of your reply: the page
    path, or BLOCKED: <reason>.
    ```

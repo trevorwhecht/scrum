@@ -635,8 +635,8 @@ function card(job) {
   const stall = isStalled(job), held = limitHeld(job), hold = heldByTrevor(job);
   const asked = job.stage === "needs-human" && !playQueued(job) && !stall && !answering(job);
   const human = asked || paused(job), titled = asked && stopTitleText(job), setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
-  // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), and cloud runs elsewhere, so they never go stale.
-  const stale = !human && !hold && !held && !stall && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
+  // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), as does a queued job, and cloud runs elsewhere, so they never go stale.
+  const stale = !human && !hold && !held && !stall && !job.play_queued && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
   return `<button class="card${human || setup ? " human" : ""}${asked && approveStop(job) ? " approve" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}${shop ? " shop" : ""}" data-key="${esc(job.key)}">
     ${tag(job.project, job.kind)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.account ? `<span class="lanechip">${esc(job.account)}</span>` : ""}${GROUPED[job.stage] && colOf(job) === GROUPED[job.stage] ? `<span class="lanechip">${esc(job.stage)}</span>` : ""}${job.fable ? '<span class="lanechip">Fable</span>' : ""}${runsOn ? `<span class="lanechip" title="Runs on">${runsOn}</span>` : ""}${shop ? `<span class="lanechip">${job.worker ? `Shop · ${esc(job.worker)}` : "Shop"}</span>` : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${titled ? `<span class="badge">${esc(titled)}</span>` : ""}${hold ? '<span class="badge">paused</span>' : ""}${stall || held ? `<span class="badge" data-agent-hint="The session stopped (usage limit, RAM guard, crash or the 30-minute watchdog). serve.py resumes it by itself at the retry time; Resume in its panel starts it now.">${job.nextRetryAt ? `stalled · retry ${esc(when(job.nextRetryAt))}` : "stalled"}</span>` : ""}
@@ -1277,7 +1277,7 @@ const statusLine = job => !job.waitingOn && job.play_queued && job.ram_hold && !
   : job.e2eWait ? e2eWaitLine(job.e2eWait)
   : job.buildLockWait ? "Waiting for the build lock"
   : job.shopWait ? "Waiting for a shop Mac slot"
-  : `${job.stage === "cloud" && job.shop ? "Running on shop Mac" : VERBS[job.stage] || job.stage}${Number.isNaN(Date.parse(job.updatedAt)) ? "" : `, started ${clock(new Date(job.updatedAt))}`}`);
+  : `${job.stage === "cloud" && job.shop ? "Running on shop Mac" : job.lane === "edit" && job.stage === "spec" ? "Making the storyboard" : VERBS[job.stage] || job.stage}${Number.isNaN(Date.parse(job.updatedAt)) ? "" : `, started ${clock(new Date(job.updatedAt))}`}`);
 
 // The modal subtitle: the red stop box already holds the full reason, so a needs-human job with the box shows only its short title.
 const modalStatus = job => {
