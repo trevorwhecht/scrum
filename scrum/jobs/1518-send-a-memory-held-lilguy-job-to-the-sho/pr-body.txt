@@ -1,0 +1,8 @@
+- A lilguy job held by swap or vm_pressure may go to the shop after 30 min (SHOP_LILGUY_MEM_HELD_SECS = 1800); other gates keep 2 h.
+- The hold is counted from the held seconds in current-gates.json, not play_queued or updatedAt.
+- Pool and Runs on lines in lanes/shop.md updated; cases added in tests/test_board_runs_on.py.
+
+Scrum lane: fast
+Fast lane: check gate + code review. Spec and review: scrum/jobs/1518-send-a-memory-held-lilguy-job-to-the-sho/
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
