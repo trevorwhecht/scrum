@@ -92,6 +92,7 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 - Write `{"id": "pN", "kind": "backlog", "why": "...", "backlog": "<one line>"}` with no `target`, `old` or `new`.
 - The `backlog` line names the cause, its count, its job ids and the pipeline change in board.py, serve.py or the dashboard, with each file it changes and its test file as a backticked repo path (`skills/trevskills-scrum/board.py`, `tests/test_board.py`), never a possessive like board.py's.
 - When the change adds logic plus its tests, likely over 30 added lines, end the line with `Lane: fast.`: a line naming files otherwise starts in the lilguy lane on a 10-lines-per-file estimate and is promoted mid-job (jobs 1458 and 1460, 128 and 87 lines).
+- When it is likely 30 to 60 added lines, end it with `Lane: fast. Complex: no.` instead, so a Sonnet builder runs it (job 1528: 54 lines, Opus at Jev score 1.65, builder $3.51 of $5.06).
 - Skip the entry when `scrum/backlog.md` already holds an open `- [ ]` item for that cause (read it first).
 - It counts toward the at-most-8 cap.
 
