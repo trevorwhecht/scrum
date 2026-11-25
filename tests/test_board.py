@@ -10604,6 +10604,87 @@ class CheckReuseTest(unittest.TestCase):
         self.assertEqual(board.cmd_check_reuse(self.root, self.job), {"reused": None})
 
 
+class RelatedTestsTest(unittest.TestCase):
+    """board.py related-tests: the test files a fast-lane Check gate runs for a non-jest Test (job 1534)."""
+
+    FILES = ("app/__init__.py", "app/store.py", "app/other.py", "tests/test_store.py", "tests/test_store_extra.py",
+             "tests/core/test_store_nested.py", "tests/test_other.py", "tests/test_unrelated.py", "tests/helpers.py",
+             "tests/fixture.json", "README.md", "app/edit-check.py", "tests/test_edit_check.py")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.repo, self.wt = base / "repo", base / "wt"
+        self.root = self.repo / "scrum"
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "no-projects.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        for f in self.FILES:
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / f).write_text("x = 1\n")
+        self.git(self.repo, "init", "-q", "-b", "main")
+        self.git(self.repo, "add", "-A")
+        self.git(self.repo, "commit", "-q", "-m", "base")
+        self.job = board.cmd_new(self.root, "Related")
+        self.git(self.repo, "worktree", "add", "-q", "-b", f"scrum/{self.job}", str(self.wt))
+        board.cmd_set(self.root, self.job, [f"worktree={self.wt}", "base=main"])
+
+    def git(self, cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def commit(self, edits=(), removes=()):
+        for f in edits:
+            (self.wt / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.wt / f).write_text("x = 2\n")
+        for f in removes:
+            (self.wt / f).unlink()
+        self.git(self.wt, "add", "-A")
+        self.git(self.wt, "commit", "-q", "-m", "change")
+
+    def related(self):
+        r = run_board("--dir", str(self.root), "related-tests", self.job)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def test_prints_changed_tests_and_each_changed_module_tests(self):
+        self.commit(edits=("app/store.py", "tests/test_unrelated.py", "tests/cart_test.py"))
+        self.assertEqual(self.related(), "tests/cart_test.py\ntests/core/test_store_nested.py\ntests/test_store.py\n"
+                                         "tests/test_store_extra.py\ntests/test_unrelated.py\n")
+
+    def test_docs_and_fixture_only_diff_prints_nothing(self):
+        self.commit(edits=("README.md", "tests/fixture.json"))
+        self.assertEqual(self.related(), "")
+
+    def test_module_with_no_test_file_prints_nothing(self):
+        self.commit(edits=("app/lonely.py",))
+        self.assertEqual(self.related(), "")
+
+    def test_deleted_test_file_is_not_printed(self):
+        self.commit(edits=("app/other.py",), removes=("tests/test_unrelated.py",))
+        self.assertEqual(self.related(), "tests/test_other.py\n")
+
+    def test_hyphenated_module_maps_to_its_underscore_test(self):  # edit-check.py is tested by test_edit_check.py
+        self.commit(edits=("app/edit-check.py",))
+        self.assertEqual(self.related(), "tests/test_edit_check.py\n")
+
+    def test_base_starting_with_a_dash_is_refused(self):
+        with self.assertRaises(SystemExit) as e:
+            board.related_tests(self.wt, "-x")
+        self.assertIn("starts with '-'", str(e.exception))
+
+    def test_job_without_worktree_is_refused(self):
+        job = board.cmd_new(self.root, "No worktree")
+        r = run_board("--dir", str(self.root), "related-tests", job)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("has no worktree", r.stderr)
+        self.assertEqual(r.stdout, "")
+
+    def test_usage_names_the_command(self):
+        self.assertIn("board.py related-tests <id>", board.__doc__)
+
+
 class MoveRatioTest(unittest.TestCase):
     """board.py move-ratio: the share of a job's added lines that git marks as moved (SKILL.md Review MOVE_ONLY)."""
 
