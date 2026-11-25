@@ -5346,6 +5346,35 @@ class BoardTest(unittest.TestCase):
         self.assertIn("digest-start: escapes: ", err)
         self.assertIsNone(text)
 
+    def test_digest_start_escapes_bug_lane_line_outside_debug(self):
+        """Job 1528: a lilguy job whose feature.md, or a fast job whose spec.md, has a `Lane:` line naming bug is traced
+        to its origin job like a debug job."""
+        self.round_file("100-origin", 1, "review-code.md", "VERDICT: PASS\nreal\n")
+        self.write("200-lilbug/feature.md", "Fix b\nLane: lilguy — bug, cause pinned: b is wrong\n")
+        self.write("300-fastbug/feature.md", "Fix c\nLane: fast.\n")
+        self.write("300-fastbug/spec.md", "Fix c\nLane: fast — Bug, cause pinned: c is wrong\nHard stops: none\n")
+        commits = [({"app.py": "a\nb\nc\n"}, "Add app\n\nJob files: scrum/jobs/100-origin/"),
+                   ({"app.py": "a\nB\nc\n"}, "Fix b\n\nJob files: scrum/jobs/200-lilbug/"),
+                   ({"app.py": "a\nB\nC\n"}, "Fix c\n\nJob files: scrum/jobs/300-fastbug/")]
+        jobs = [{"id": "100-origin", "rounds": [{"check": "PASS", "code": "PASS"}]},
+                {"id": "200-lilbug", "lane": "lilguy"}, {"id": "300-fastbug", "lane": "fast"}]
+        text, _, _ = self.escape_digest(jobs, commits)
+        self.assertEqual(text, "- 200-lilbug ← 100-origin · 1 lines in app.py · passed by: code\n"
+                               "- 300-fastbug ← 100-origin · 1 lines in app.py · passed by: code\n")
+
+    def test_digest_start_escapes_bug_word_off_the_lane_line(self):
+        """Job 1528: bug written outside a `Lane:` line, or only inside a longer word on it, leaves a fast or lilguy job
+        untraced."""
+        self.write("200-fast/feature.md", "Fix the bug in b\nLane: fast.\n")
+        self.write("300-lil/spec.md", "Fix c\nLane: lilguy — debugger output, bugs list\n")
+        commits = [({"app.py": "a\nb\nc\n"}, "Add app\n\nJob files: scrum/jobs/100-origin/"),
+                   ({"app.py": "a\nB\nc\n"}, "Fix b\n\nJob files: scrum/jobs/200-fast/"),
+                   ({"app.py": "a\nB\nC\n"}, "Fix c\n\nJob files: scrum/jobs/300-lil/")]
+        jobs = [{"id": "100-origin", "rounds": [{"check": "PASS", "code": "PASS"}]},
+                {"id": "200-fast", "lane": "fast"}, {"id": "300-lil", "lane": "lilguy"}]
+        text, _, _ = self.escape_digest(jobs, commits)
+        self.assertEqual(text, "No bug jobs\n")
+
     def pulse_digest(self, lines, since=None, error_since=None, boards=None, digests=None, own=False):
         """digest-start over a pulse.log of `lines` (dicts or raw strings); `since` and `error_since` (epoch) set the
         jobs.txt mtime of an earlier digest 001, and of a failed digest 002 after it. `boards` ({project: jobs}) writes
