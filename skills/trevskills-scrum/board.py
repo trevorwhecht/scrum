@@ -3254,7 +3254,8 @@ def cmd_process_health(root, digest_id: str) -> dict:
         old = old if is_num(old) else None
         flag = None
         if value is not None and old is not None:
-            flag = "worse" if value > old else "over twice" if value > limit and old > limit else None
+            trend = value > old and (name != "stops_per_job" or len(hits[name]) >= 2)  # one stop is not a trend
+            flag = "worse" if trend else "over twice" if value > limit and old > limit else None
         metrics[name] = {"value": value, "previous": old, "limit": limit, "jobs": sorted(set(hits[name])), "flag": flag}
     metrics["test_waste_jobs"]["minutes"] = round(seconds / 60)
     out = {"digest": str(digest_id), "previous": prev_id, "metrics": metrics,
