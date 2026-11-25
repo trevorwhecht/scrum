@@ -163,6 +163,16 @@ class LeftoverTest(unittest.TestCase):
         self.assertEqual(line["jobs"], ["002-kid"])
         self.assertEqual(sorted(line["pids"]), [100, 101, 102, 200])
         self.assertEqual(line["cpu_min"], 6.7)
+        self.assertEqual(line["session"], "/trevskills-scrum build 002-kid --permission-mode x")
+        self.assertEqual(line["stage"], "done")
+        self.assertIn(30, (line["finished_min"], line["finished_min"] - 1))
+        self.assertIn("python3 -m unittest discover -s tests", line["commands"])
+
+    def test_logged_commands_trimmed_to_120_chars(self):
+        self.procs[2] = (102, 101, 3.2, "python3 -m unittest " + "x" * 200)
+        self.run_pass()
+        (line,) = self.lines()
+        self.assertTrue(line["commands"] and all(len(c) <= 120 for c in line["commands"]))
 
     def test_stop_job_servers_passes_job_id(self):
         with mock.patch.object(board, "stop_worktree_servers") as servers:
