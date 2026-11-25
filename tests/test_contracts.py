@@ -2458,9 +2458,13 @@ class ContractTest(unittest.TestCase):
                        "Notes>` in place of `Follow-up:`; the main Mac adds it after the merge."):
             self.assertEqual(text.count(phrase), 1, phrase)
         start = text.index(head)
-        end = text.index("- Write no code and touch no file")
+        end = text.index("- **Nothing Trevor asked for is dropped silently.**")
         self.assertLess(start, end)
         self.assertEqual(text[start:end].count("\n"), 1)
+        nothing = text[end:text.index("- Write no code and touch no file")]
+        for phrase in ("optional parts included", "never a bare Out line", "already backlogged keeps the bare line",
+                       "Trevor's quoted words win over feature.md's paraphrase", "becomes a criterion even when the numbered list drops it"):
+            self.assertIn(phrase, nothing, phrase)
         self.assertTrue(text[start:end].endswith("\n"))
 
     def test_spec_writer_digest_001_p3_p4(self):
