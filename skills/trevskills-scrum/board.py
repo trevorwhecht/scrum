@@ -4302,7 +4302,8 @@ def cmd_e2e_specs(root, job_id) -> dict:
 def related_tests(wt, base: str) -> list:
     """The test files a fast-lane Check gate runs for a `Test:` that is not jest (lanes/newjob.md **Fast lane Test**),
     sorted: each test_*.py or *_test.py file the diff base...HEAD adds or changes that still exists, plus every
-    test_<stem>*.py under wt/tests/ (any depth) for each other .py file the diff touches, a deleted one included.
+    test_<stem>*.py under wt/tests/ (any depth) for each other .py file the diff touches, a deleted one included; a
+    stem's `-` also matches `_` (edit-check.py: test_edit_check.py, as a test module name holds no `-`).
     [] when nothing matches or the diff can't be read: the gate then runs the full Test."""
     if base.startswith("-"):
         raise SystemExit(f"base {base!r} starts with '-'")
@@ -4315,7 +4316,7 @@ def related_tests(wt, base: str) -> list:
             if (wt / f).is_file():
                 out.add(f)
         else:
-            stems.add(Path(f).stem)
+            stems.update({Path(f).stem, Path(f).stem.replace("-", "_")})
     if stems and (wt / "tests").is_dir():
         out.update(p.relative_to(wt).as_posix() for p in (wt / "tests").rglob("test_*.py")
                    if any(p.name.startswith(f"test_{s}") for s in stems))

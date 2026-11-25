@@ -10580,7 +10580,7 @@ class RelatedTestsTest(unittest.TestCase):
 
     FILES = ("app/__init__.py", "app/store.py", "app/other.py", "tests/test_store.py", "tests/test_store_extra.py",
              "tests/core/test_store_nested.py", "tests/test_other.py", "tests/test_unrelated.py", "tests/helpers.py",
-             "tests/fixture.json", "README.md")
+             "tests/fixture.json", "README.md", "app/edit-check.py", "tests/test_edit_check.py")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -10635,6 +10635,15 @@ class RelatedTestsTest(unittest.TestCase):
     def test_deleted_test_file_is_not_printed(self):
         self.commit(edits=("app/other.py",), removes=("tests/test_unrelated.py",))
         self.assertEqual(self.related(), "tests/test_other.py\n")
+
+    def test_hyphenated_module_maps_to_its_underscore_test(self):  # edit-check.py is tested by test_edit_check.py
+        self.commit(edits=("app/edit-check.py",))
+        self.assertEqual(self.related(), "tests/test_edit_check.py\n")
+
+    def test_base_starting_with_a_dash_is_refused(self):
+        with self.assertRaises(SystemExit) as e:
+            board.related_tests(self.wt, "-x")
+        self.assertIn("starts with '-'", str(e.exception))
 
     def test_job_without_worktree_is_refused(self):
         job = board.cmd_new(self.root, "No worktree")
