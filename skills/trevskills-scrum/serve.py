@@ -5287,8 +5287,7 @@ def stuck_idle_text(now: float) -> str:
 def stuck_alert(now: float, why: str | None, sessions: int, send=None, background=None) -> str | None:
     """Text Trevor when this Mac holds every start with nothing running (job 1413). why is the first project's
     board.machine_ok(claim=False) refusal (pulse_tick; never COOLING, never a usage hold). It fires when why is set
-    and sessions is 0 on STUCK_ALERT_PULSES pulses in a row, once an episode: a pulse with sessions > 0, or
-    STUCK_ALERT_CLEAR clear pulses in a row, ends it, and a hold still on STUCK_ALERT_REPEAT_S after the last text texts
+    and sessions is 0 on STUCK_ALERT_PULSES pulses in a row, once an episode: STUCK_ALERT_CLEAR clear pulses in a row (no hold, or a live session; job 1539) end it, and a hold still on STUCK_ALERT_REPEAT_S after the last text texts
     once more. The state {"held", "clear", "sent"} (pulse counts in a row, capped at STUCK_ALERT_PULSES and
     STUCK_ALERT_CLEAR; the last text's time) lives in stuck-alert.json beside pulse.log, so a reload neither repeats
     nor forgets; an unreadable file is no state. It is written (tmp + os.replace, under STUCK_LOCK) only when it
@@ -5320,7 +5319,7 @@ def stuck_alert(now: float, why: str | None, sessions: int, send=None, backgroun
         num = lambda k: old[k] if board.is_num(old.get(k)) else None
         held = min((num("held") or 0) + 1, STUCK_ALERT_PULSES) if why and why != board.COOLING and sessions == 0 else 0
         clear = 0 if held else min((num("clear") or 0) + 1, STUCK_ALERT_CLEAR)
-        sent = None if sessions > 0 or clear >= STUCK_ALERT_CLEAR else num("sent")  # the episode ended
+        sent = None if clear >= STUCK_ALERT_CLEAR else num("sent")  # the episode ended
         fire = held >= STUCK_ALERT_PULSES and (sent is None or now - sent >= STUCK_ALERT_REPEAT_S)
         # job 1498: the idle trigger: 0 sessions, no `why` and nothing holding or running work, STUCK_IDLE_S in a row
         quiet = not why and sessions == 0 and stuck_idle_ok(now)
