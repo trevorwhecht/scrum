@@ -4045,7 +4045,8 @@ def stop_leftovers(procs=None) -> list[int]:
     (proc_cwds, one lsof call) is a registered project's repo or inside it, whose job and hand-off family are finished
     (leftover_job, LEFTOVER_GRACE_MIN), and with a descendant still running a test, server or build (LEFTOVER_WORK_RE).
     Each one gets stop_tree, then board.stop_worktree_servers on its job's worktree and base copies, and one
-    board.log_waste("leftover") line (once per session pid: LEFTOVER_LOGGED). procs defaults to process_scan(). Returns
+    board.log_waste("leftover") line (once per session pid: LEFTOVER_LOGGED) that also names the session's
+    /trevskills-scrum command, each stopped command (120 chars), the job's stage and the minutes since it finished. procs defaults to process_scan(). Returns
     every pid signalled. SCRUM_IDLE_CLEANUP=0 turns it off, as idle_cleanup."""
     if os.environ.get("SCRUM_IDLE_CLEANUP") == "0":
         return []
@@ -4091,7 +4092,11 @@ def stop_leftovers(procs=None) -> list[int]:
         stopped += [p for p in pids if p not in stopped]
         if pids and spid not in LEFTOVER_LOGGED:
             LEFTOVER_LOGGED.add(spid)
-            board.log_waste("leftover", name, [job_id], pids, round(sum(cpu.get(p, 0.0) for p in pids), 1))
+            since = datetime.fromisoformat(job["updatedAt"])
+            board.log_waste("leftover", name, [job_id], pids, round(sum(cpu.get(p, 0.0) for p in pids), 1),
+                            session=cmds[spid][cmds[spid].index("/trevskills-scrum"):][:120],
+                            commands=[cmds[p][:120] for p in pids if p in cmds], stage=job["stage"],
+                            finished_min=round((datetime.now(timezone.utc) - since).total_seconds() / 60))
     return stopped
 
 
