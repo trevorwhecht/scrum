@@ -4607,8 +4607,18 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("never promotes a `Lane: lilguy — mechanical` job", self.lane("lilguy"))
         step2 = self.lane("newjob")
         for phrase in ("**Fast lane Test** runs only the tests related to the diff", "npx jest --findRelatedTests --passWithNoTests <files>",
-                       "any other test runner runs the full `Test:` command", "`Test: related only`"):
+                       "`Test: related only`"):
             self.assertIn(phrase, step2, phrase)
+
+    def test_fast_lane_test_runs_related_test_files(self):  # job 1534: a non-jest fast-lane Test runs only related files
+        step2 = self.section(self.lane("newjob"), "2. **Runtime files**", "\n3. ")
+        rule = step2[step2.index("**Fast lane Test**"):step2.index("Every other lane runs")]
+        self.assertIn("any other runner runs `Test:` plus the files `B related-tests $ID` prints (none: the full `Test:`)", rule)
+        self.assertNotIn("runs the full `Test:` command", rule)
+        self.assertIn("board.py related-tests <id>", (SKILL_DIR / "board.py").read_text())
+        promotion = next(l for l in self.lane("lilguy").splitlines() if l.startswith("**Promotion.**"))
+        self.assertIn("so a `Test:` that is not jest runs whole test files per the **Fast lane Test** rule", promotion)
+        self.assertLessEqual(len(self.lane("newjob")), 30000)
 
     def test_e2e_reviewer_skips_checked_specs(self):
         review = self.section(skill_text(), "## Review (WAIT FOR ALL)", "## Approve")
