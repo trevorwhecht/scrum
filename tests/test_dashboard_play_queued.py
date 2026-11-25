@@ -150,6 +150,15 @@ class PlayQueued(unittest.TestCase):
         self.assertEqual(re.findall(r'data-col="([^"]+)">', html)[-2:], ["waiting", "done"])
         self.assertEqual(column_of(html, job["key"]), "waiting")
 
+    def test_approved_status_line_names_machine_hold(self):
+        """Job 1540: an approved card held by board.machine_ok (serve.py machine_hold) names the check after its line."""
+        job = {**OFF_TRACK, "reason": "video storyboard: ready", "stopTitle": "EDIT_APPROVE",
+               "queued_launch": {"action": "approve", "stage": "needs-human"}}
+        held, plain = run(f"""const a = {json.dumps(job)};
+            out(statusLine({{...a, machine_hold: "CPU load 340% of 8 cores (> 300%)"}})); out(statusLine(a));""")
+        self.assertEqual(held, "Approved, starts when this Mac has room: CPU load 340% of 8 cores (> 300%)")
+        self.assertEqual(plain, "Approved, starts when this Mac has room")
+
     def test_stages_group_into_fewer_columns(self):
         stages = ["spec", "build", "check", "review", "approve", "merging", "deploying", "cloud"]
         jobs = [{**ASK, "key": f"p/4{i}-x", "id": f"4{i}-x", "stage": st, "reason": "", "title": "T"} for i, st in enumerate(stages)]

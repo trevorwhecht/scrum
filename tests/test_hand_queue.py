@@ -200,6 +200,20 @@ class HandQueueTickTest(Base):
             serve.watchdog_tick()
         self.assertEqual(self.spawned(spawn), [("b", "001-hand", "start")])
 
+    def test_tick_refusal_names_machine_hold_on_queued_approve(self):
+        """Job 1540: watchdog_tick's machine_ok refusal zeroes the budget; the queued approve it stops names it."""
+        approve = {"id": "001-edit", "stage": "needs-human", "play_queued": "2026-11-24T22:50:00+00:00",
+                   "queued_launch": {"action": "approve", "prompt": "/trevskills-scrum approve 001-edit", "stage": "needs-human"}}
+        self.put(self.a, approve)
+        with self.tick_mocks(), mock.patch.object(serve, "spawn", return_value="log") as spawn, \
+                mock.patch.object(board, "machine_ok", return_value="CPU load 340% of 8 cores (> 300%)"):
+            serve.watchdog_tick()
+        spawn.assert_not_called()
+        job = self.jobs(self.a)["001-edit"]
+        self.assertEqual(job["machine_hold"], "CPU load 340% of 8 cores (> 300%)")
+        self.assertEqual(job["queued_launch"]["action"], "approve")
+        self.assertIsNone(serve.MACHINE_WHY, "cleared once the tick ends")
+
 
 if __name__ == "__main__":
     unittest.main()

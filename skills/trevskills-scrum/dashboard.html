@@ -1265,7 +1265,8 @@ const VERBS = {spec: "Writing spec", plan: "Planning", build: "Building", check:
 // on, without serve.py's "waiting: " prefix; its fixed label sits outside noPaths, which would cut "CPU/". Any other
 // queued job (paused, or in its own stage) reads as queued, never "Paused by you" or a doubled "Waiting: waiting:".
 // A launch spawn's RAM gate held over 1h names its reading (serve.py ram_hold), next to the Start now button; one its CPU
-// gate holds reads "Waiting for CPU 2h 10m" (serve.py cpuHeldSecs).
+// gate holds reads "Waiting for CPU 2h 10m" (serve.py cpuHeldSecs). An approved launch names the machine_ok check that
+// holds it (serve.py machine_hold) after "Approved, starts when this Mac has room", inside the noPaths chain.
 // An answered or reworked needs-human job whose session runs reads as that run, not as a question; a Discuss session keeps the question.
 // A job tagged Runs on shop that waits or has a queued start (serve.py shopWait) reads "Waiting for a shop Mac slot",
 // never "Queued, starts next": this Mac never starts it.
@@ -1286,7 +1287,8 @@ const statusLine = job => !job.waitingOn && job.play_queued && job.ram_hold && !
   : job.heldBy ? `Held by ${job.heldBy}`
   : job.paused ? "Paused by you"
   : job.resumeRefusal ? `${String(job.resumeRefusal).startsWith("lilguy job") ? "Can't resume" : "Waiting"}: ${String(job.resumeRefusal).split(" Fix: ")[0]}`
-  : playQueued(job) ? job.queued_launch?.action === "approve" ? "Approved, starts when this Mac has room" : "Queued, starts next"
+  : playQueued(job) ? job.queued_launch?.action === "approve"
+    ? `Approved, starts when this Mac has room${job.machine_hold ? `: ${job.machine_hold}` : ""}` : "Queued, starts next"
   : isStalled(job) ? `Stalled: ${stopIssue(job.reason)}`
   : limitHeld(job) ? "Stalled: usage limit"
   : answering(job) ? runLine(runs[job.key])
