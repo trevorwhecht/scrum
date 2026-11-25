@@ -115,6 +115,9 @@
                                    "uncovered","trigger"}: the E2E specs the diff's UI files map to (full, scoped or none;
                                    lanes/newjob.md Check gate step 2); the <id> form adds a 10 min
                                    --global-timeout and leaves out the diff's changed spec files
+  board.py related-tests <id>      print the test files a fast-lane Check gate runs for a Test that is not jest, one per
+                                   line: each test_*.py or *_test.py file the diff changes, plus tests/**/test_<stem>*.py
+                                   for each other changed .py file; nothing printed: run the full Test (lanes/newjob.md)
   board.py e2e-budget <id> <log>   print {"over_budget","passed","failed","not_run","slowest","line","backlog"} for a
                                    job E2E run's output; over budget with no failed test files one deduped
                                    "Speed up the slowest job E2E spec files" backlog item (lanes/newjob.md Check gate)
@@ -4282,12 +4285,48 @@ def e2e_specs(wt, base: str, project_file, budget=False) -> dict:
     return out
 
 
-def cmd_e2e_specs(root, job_id) -> dict:
-    """e2e_specs for the job's worktree and base with root/project.md, with the job E2E time budget."""
+def worktree_job(root, job_id) -> dict:
+    """The board job, for a command that reads its worktree's diff: SystemExit when it has no worktree or no base."""
     job = find(read_board(root), check_id(job_id))
     if not job.get("worktree") or not job.get("base"):
         raise SystemExit(f"job {job_id} has no {'worktree' if not job.get('worktree') else 'base'} on the board")
+    return job
+
+
+def cmd_e2e_specs(root, job_id) -> dict:
+    """e2e_specs for the job's worktree and base with root/project.md, with the job E2E time budget."""
+    job = worktree_job(root, job_id)
     return e2e_specs(job["worktree"], job["base"], Path(root) / "project.md", budget=True)
+
+
+def related_tests(wt, base: str) -> list:
+    """The test files a fast-lane Check gate runs for a `Test:` that is not jest (lanes/newjob.md **Fast lane Test**),
+    sorted: each test_*.py or *_test.py file the diff base...HEAD adds or changes that still exists, plus every
+    test_<stem>*.py under wt/tests/ (any depth) for each other .py file the diff touches, a deleted one included; a
+    stem's `-` also matches `_` (edit-check.py: test_edit_check.py, as a test module name holds no `-`).
+    [] when nothing matches or the diff can't be read: the gate then runs the full Test."""
+    if base.startswith("-"):
+        raise SystemExit(f"base {base!r} starts with '-'")
+    wt = Path(wt)
+    out, stems = set(), set()
+    for f in _names(wt, f"{base}...HEAD") or ():
+        if not f.endswith(".py"):
+            continue
+        if is_test_path(Path(f).name):
+            if (wt / f).is_file():
+                out.add(f)
+        else:
+            stems.update({Path(f).stem, Path(f).stem.replace("-", "_")})
+    if stems and (wt / "tests").is_dir():
+        out.update(p.relative_to(wt).as_posix() for p in (wt / "tests").rglob("test_*.py")
+                   if any(p.name.startswith(f"test_{s}") for s in stems))
+    return sorted(out)
+
+
+def cmd_related_tests(root, job_id) -> list:
+    """related_tests for the job's worktree and base."""
+    job = worktree_job(root, job_id)
+    return related_tests(job["worktree"], job["base"])
 
 
 PW_TIMEOUT_RE = re.compile(r"Timed out waiting \d+(?:\.\d+)?s for the")
@@ -4426,9 +4465,7 @@ def render_paths(wt, base: str, project_file, spec_file=None) -> dict:
 
 def cmd_render_paths(root, job_id) -> dict:
     """render_paths for the job's worktree and base with root/project.md and the job's spec.md."""
-    job = find(read_board(root), check_id(job_id))
-    if not job.get("worktree") or not job.get("base"):
-        raise SystemExit(f"job {job_id} has no {'worktree' if not job.get('worktree') else 'base'} on the board")
+    job = worktree_job(root, job_id)
     return render_paths(job["worktree"], job["base"], Path(root) / "project.md",
                         Path(root) / "jobs" / job["id"] / "spec.md")
 
@@ -9643,6 +9680,7 @@ def main(argv=None):
     es2.add_argument("id")
     es2.add_argument("--since", type=float)
     sub.add_parser("check-reuse").add_argument("id")
+    sub.add_parser("related-tests").add_argument("id")
     sub.add_parser("render-paths").add_argument("id")
     sub.add_parser("ui-sweep-record").add_argument("review")
     cu = sub.add_parser("chain-unlock")
@@ -9813,6 +9851,9 @@ def main(argv=None):
         print(json.dumps(cmd_e2e_stopped(a.dir, a.id, a.since)))
     elif a.cmd == "check-reuse":
         print(json.dumps(cmd_check_reuse(a.dir, a.id)))
+    elif a.cmd == "related-tests":
+        if files := cmd_related_tests(a.dir, a.id):
+            print("\n".join(files))
     elif a.cmd == "render-paths":
         print(json.dumps(cmd_render_paths(a.dir, a.id)))
     elif a.cmd == "ui-sweep-record":
