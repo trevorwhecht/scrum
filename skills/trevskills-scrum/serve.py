@@ -8569,6 +8569,9 @@ def digest_skill_check(root, digest_id, pid):
     return {"ok": True, "target": rel}
 
 
+DIGEST_PUSH_RETRY_WAIT = 5  # seconds digest_apply waits before its one in-call retry of a failed push
+DIGEST_PUSH_RETRIES = 3  # how many times digest_retry_tick re-applies a hold queued as `push failed`
+DIGEST_PUSH_RETRY_GAP = 300  # seconds between two of those retries
 DIGEST_CONTRACT_TESTS = [sys.executable, "-m", "unittest", "tests.test_contracts"]  # run from the target repo's root
 
 
@@ -8622,7 +8625,7 @@ def digest_mark_applied(root, digest_id, pids, from_status="pending", companions
 
 
 def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | None = None, feature: str | None = None,
-                 mark_applied: bool = True, from_status: str = "pending") -> tuple[list[dict], list[dict], str | None]:
+                 mark_applied: bool = True, from_status: str = "pending", ask: bool = True) -> tuple[list[dict], list[dict], str | None]:
     """Apply one repo's edit proposals in a temporary detached worktree at origin/<branch>, running the contract tests
     there after each, commit the ones that passed under one lilguy board job in that repo's scrum/, push that commit to
     origin/<branch> and fast-forward the main checkout, which is never written to directly. Refuses (queues everything)
@@ -8633,7 +8636,10 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
     the applied proposals are flipped from. When the contract tests fail after an edit, the same old to new swap is tried
     in the one tests/*.py file holding the old text once, and lands in the same commit if the tests then pass; each
     applied entry carries that file as `companion`. A proposal carrying a `companion` (a revert) swaps old to new in that
-    tests/*.py file first, which must hold the old text once, whether or not the tests would fail without it."""
+    tests/*.py file first, which must hold the old text once, whether or not the tests would fail without it.
+    A failed push is retried once after DIGEST_PUSH_RETRY_WAIT seconds. A commit or push failure parks the job with a
+    DIGEST question offering only Abort and Remove (a lilguy bookkeeping job has no pipeline to resume); ask=False
+    aborts the job instead, for a retry that has more tries left."""
     repo = repo_of(props[0]["target"])[0]
     staged = {}  # companion path as recorded -> the resolved file git must stage
     comp = {}  # proposal id -> repo-relative companion test file
@@ -8749,11 +8755,21 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
             r = git_run(wt, "commit", "-q", "-m", f"[scrum {job_id}] {title}\n\n{lines}", "--", *files)
         step = "commit"
         if not r.returncode:
-            r, step = git_run(wt, "push", "-q", "origin", f"HEAD:refs/heads/{branch}"), "push"
+            push = ["push", "-q", "origin", f"HEAD:refs/heads/{branch}"]
+            r, step = git_run(wt, *push), "push"
+            if r.returncode:  # a transient remote error (HTTP 500) usually clears within seconds
+                time.sleep(DIGEST_PUSH_RETRY_WAIT)
+                r = git_run(wt, *push)
         if r.returncode:
             applied, queued = undo(f"{step} failed: {first(r)}")
-            board.cmd_ask(scrum, job_id, f"digest apply: git {step} failed: {first(r)}",
-                          [f"Retry=resume {job_id}", f"Abort=abort {job_id}"], title="DIGEST")
+            try:
+                if ask:
+                    board.cmd_ask(scrum, job_id, f"digest apply: git {step} failed: {first(r)}",
+                                  [f"Abort=abort {job_id}", f"Remove this job=abort {job_id} --cascade"], title="DIGEST")
+                else:
+                    board.cmd_abort(scrum, job_id, False, reason=f"digest retry: git {step} failed: {first(r)}")
+            except SystemExit:
+                pass
             return applied, queued, job_id
         # the commit is on origin: re-check the Merge guard on the live checkout, then fast-forward it; never stash or reset
         not_live = None
@@ -8909,29 +8925,67 @@ def digest_auto(root, digest_id):
                 queue(by_id[q["id"]], q["reason"])
     with DIGEST_LOCK:
         digest_set_statuses(root, digest_id, updates)
+        if job_id := out["job"]:
+            digest_note(root, digest_id, {q["id"] for q in out["queued"] if q["reason"].startswith("push failed")}, job=job_id)
     return out
+
+
+def digest_note(root, digest_id, pids, **fields):
+    """Set these extra keys on the proposals with these ids (valid_proposal ignores them). The caller holds DIGEST_LOCK."""
+    path = root / "digests" / digest_id / "proposals.json"
+    data, raw = read_proposals(path)
+    hit = [e for e in raw if isinstance(e, dict) and e.get("id") in pids]
+    for e in hit:
+        e.update(fields)
+    if hit:
+        tmp = path.with_name("proposals.json.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, path)
 
 
 def digest_retry_tick(project, repo, root):
     """Re-run digest_apply for repo edit proposals held as queued `uncommitted changes` in root/digests, once their target repo's
-    checkout is clean (the target may be another registered repo than `repo`). A
+    checkout is clean (the target may be another registered repo than `repo`), and for ones held as `push failed`, at most
+    DIGEST_PUSH_RETRIES times, DIGEST_PUSH_RETRY_GAP seconds apart (a retry that fails with tries left aborts its own job;
+    the last one parks a DIGEST card, and the job of the first failure is then aborted, as it is when a retry lands). A
     landed one becomes applied; stale old text is skipped; a contract-test failure becomes a backlog item; a board job,
     commit or push failure keeps its new reason so it is not retried. Any other refusal leaves it queued for the next tick. Status writes are under DIGEST_LOCK with from_status="queued"."""
     held = {}  # (digest id, target repo) -> props: a digest in this root may target another registered repo
+    pushed = {}  # (digest id, proposal id) -> its raw entry, for a hold queued as `push failed`
     for d in sorted((root / "digests").glob("*")) if (root / "digests").is_dir() else []:
         if not board.DIGEST_RE.fullmatch(d.name):
             continue
         with DIGEST_LOCK:
             raw = read_proposals(d / "proposals.json")[1]
         for v in raw:
-            if ((v := valid_proposal(v)) and v["status"] == "queued" and v.get("reason") == "uncommitted changes"
-                    and v["kind"] not in ("backlog", "skill") and not digest_denied(v["target"]) and (r := repo_of(v["target"]))):
+            e, v = v, valid_proposal(v)
+            if not (v and v["status"] == "queued" and v["kind"] not in ("backlog", "skill") and not digest_denied(v["target"])
+                    and (r := repo_of(v["target"]))):
+                continue
+            if v.get("reason") == "uncommitted changes":
                 held.setdefault((d.name, Path(os.path.realpath(r[0]))), []).append(v)
+            elif (v.get("reason") or "").startswith("push failed") and isinstance(e.get("retries", 0), int) \
+                    and e.get("retries", 0) < DIGEST_PUSH_RETRIES \
+                    and time.time() - (e["retry_at"] if isinstance(e.get("retry_at"), (int, float)) else 0) >= DIGEST_PUSH_RETRY_GAP:
+                held.setdefault((d.name, Path(os.path.realpath(r[0]))), []).append(v)
+                pushed[(d.name, v["id"])] = e
     ready = {}
     for (digest_id, target_repo), props in held.items():
         if ready.setdefault(target_repo, digest_apply_ready(target_repo)):
             continue
-        _, not_applied, job_id = digest_apply(root, digest_id, props, from_status="queued")
+        mine = [p["id"] for p in props if (digest_id, p["id"]) in pushed]
+        last = all(pushed[(digest_id, i)].get("retries", 0) + 1 >= DIGEST_PUSH_RETRIES for i in mine)
+        if mine:
+            with DIGEST_LOCK:
+                for i in mine:
+                    digest_note(root, digest_id, {i}, retries=pushed[(digest_id, i)].get("retries", 0) + 1, retry_at=time.time())
+        _, not_applied, job_id = digest_apply(root, digest_id, props, from_status="queued", ask=last)
+        if job_id and (last or len(not_applied) < len(props)):  # the retry landed something or parked its own card
+            for old in {pushed[(digest_id, i)].get("job") for i in mine} - {job_id, None}:
+                try:
+                    board.cmd_abort(target_repo / "scrum", old, False, reason="digest retry: superseded by a retry")
+                except SystemExit:
+                    pass  # already done or aborted
         board.log_process("Digest retry", "retried", repo=str(repo), digest=digest_id, proposals=len(props),
                           not_applied=len(not_applied))
         by_id = {p["id"]: p for p in props}
@@ -8947,6 +9001,9 @@ def digest_retry_tick(project, repo, root):
         if updates:
             with DIGEST_LOCK:
                 digest_set_statuses(root, digest_id, updates, from_status="queued")
+                fresh = {i for i, (st, why) in updates.items() if st == "queued" and (why or "").startswith("push failed") and i not in mine}
+                if fresh:  # a hold's first failed push counts as try 1, so the next tick waits the gap
+                    digest_note(root, digest_id, fresh, retries=1, retry_at=time.time(), job=job_id)
 
 
 def weekly_set_status(path: Path, pid: str, status: str, reason: str, from_status: str = "pending") -> None:

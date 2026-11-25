@@ -5786,6 +5786,9 @@ class DigestTest(unittest.TestCase):
         guard.start()
         self.addCleanup(guard.stop)
         self.addCleanup(self.serve.RUNS.pop, "reg/digest", None)
+        wait = mock.patch.object(self.serve, "DIGEST_PUSH_RETRY_WAIT", 0)  # no real pause before the in-call push retry
+        wait.start()
+        self.addCleanup(wait.stop)
 
     def done_job(self, title="shipped"):
         job_id = self.board.cmd_new(self.scrum, title)
@@ -6676,6 +6679,75 @@ class DigestTest(unittest.TestCase):
         [p] = json.loads((self.scrum / "digests" / "001" / "proposals.json").read_text())["proposals"]
         self.assertEqual((p["status"], p["reason"]), ("queued", "push failed: remote: origin says no"))
 
+    def flaky_origin(self, fails):
+        """A pre-receive hook that rejects the first `fails` pushes (a transient remote error), then accepts."""
+        counter = self.origin / "push-count"
+        counter.write_text("0")
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text(f"#!/bin/sh\nn=$(cat '{counter}'); echo $((n+1)) > '{counter}'\n"
+                        f"if [ \"$n\" -lt {fails} ]; then echo 'Internal Server Error' >&2; exit 1; fi\n")
+        hook.chmod(0o755)
+
+    def test_push_is_retried_once_in_call(self):
+        """One transient push failure is retried after a short wait: the edit lands, no card is parked."""
+        self.git_repo()
+        self.flaky_origin(1)
+        self.contract_tests()
+        self.digest([self.prop("p1", self.reg / "agents" / "scrum-x.md")])
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual((self.statuses(), len(out["applied"]), out["queued"]), (["applied"], 1, []))
+        [job] = self.jobs()
+        self.assertEqual(job["stage"], "done")
+
+    def test_retry_tick_retries_push_failure_limited_times(self):
+        """A hold queued as `push failed` is re-applied by the tick, spaced by the gap and at most DIGEST_PUSH_RETRIES
+        times; failed tries leave no card of their own, the last parks one with only options that work, and the first
+        failure's card is aborted."""
+        self.git_repo()
+        self.flaky_origin(99)
+        self.contract_tests()
+        self.digest([self.prop("p1", self.reg / "agents" / "scrum-x.md")])
+        self.serve.digest_auto(self.scrum, "001")
+        [first] = self.jobs()
+        self.assertEqual(first["stage"], "needs-human")
+        tick = lambda: self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+        with mock.patch.object(self.serve, "DIGEST_PUSH_RETRY_GAP", 0):
+            tick()
+            self.assertEqual([j["stage"] for j in self.jobs()], ["needs-human", "aborted"])  # its own job aborts itself
+            tick()
+            self.assertEqual([j["stage"] for j in self.jobs()], ["needs-human", "aborted", "aborted"])
+            tick()  # the last try parks a card and aborts the first failure's
+            self.assertEqual([j["stage"] for j in self.jobs()], ["aborted", "aborted", "aborted", "needs-human"])
+            self.assertEqual([o["label"] for o in self.jobs()[-1]["options"]], ["Abort", "Remove this job"])
+            tick()  # retries spent
+            self.assertEqual(len(self.jobs()), 4)
+        [p] = json.loads((self.scrum / "digests" / "001" / "proposals.json").read_text())["proposals"]
+        self.assertEqual((p["status"], p["retries"]), ("queued", 3))
+        self.assertTrue(p["reason"].startswith("push failed"))
+
+    def test_retry_tick_waits_between_push_retries(self):
+        self.git_repo()
+        self.flaky_origin(99)
+        self.contract_tests()
+        self.digest([self.prop("p1", self.reg / "agents" / "scrum-x.md")])
+        self.serve.digest_auto(self.scrum, "001")
+        self.serve.digest_retry_tick("reg", self.reg, self.scrum)  # try 1
+        self.serve.digest_retry_tick("reg", self.reg, self.scrum)  # inside the gap: nothing
+        self.assertEqual(len(self.jobs()), 2)
+
+    def test_retry_tick_lands_after_transient_push_failure(self):
+        """The origin recovers: the tick lands the edit, marks it applied and aborts the first failure's card."""
+        self.git_repo()
+        self.flaky_origin(2)  # the first digest_auto push and its in-call retry both fail
+        self.contract_tests()
+        self.digest([self.prop("p1", self.reg / "agents" / "scrum-x.md")])
+        self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(self.statuses(), ["queued"])
+        with mock.patch.object(self.serve, "DIGEST_PUSH_RETRY_GAP", 0):
+            self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+        self.assertEqual(self.statuses(), ["applied"])
+        self.assertEqual([j["stage"] for j in self.jobs()], ["aborted", "done"])
+
     def test_retry_tick_applies_hold_from_another_root(self):
         """A digest in another project's scrum/ holding an edit to reg is retried against reg, not the tick's own repo."""
         self.held_dirty()
@@ -6775,7 +6847,7 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(job["stopTitle"], "DIGEST")
         self.assertEqual(job["question"], job["reason"])
         self.assertEqual([(o["label"], o["command"]) for o in job["options"]],
-                         [("Retry", f"resume {job['id']}"), ("Abort", f"abort {job['id']}")])
+                         [("Abort", f"abort {job['id']}"), ("Remove this job", f"abort {job['id']} --cascade")])
         [line] = (self.scrum / "questions.log").read_text().splitlines()
         self.assertEqual(json.loads(line)["job"], job["id"])
         self.assert_landed(1)
@@ -6867,7 +6939,7 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(job["stage"], "needs-human")
         self.assertTrue(job["reason"].startswith("digest apply: git push failed: remote: origin says no"), job["reason"])
         self.assertEqual([(o["label"], o["command"]) for o in job["options"]],
-                         [("Retry", f"resume {job['id']}"), ("Abort", f"abort {job['id']}")])
+                         [("Abort", f"abort {job['id']}"), ("Remove this job", f"abort {job['id']} --cascade")])
         self.assertEqual(self.statuses(), ["queued", "queued"])
         self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
                          ["Apply digest 001 p1 to agents/scrum-x.md: Seen in 001-a and 002-b (p1).",
