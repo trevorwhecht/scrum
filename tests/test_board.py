@@ -11706,6 +11706,65 @@ class LilguyFitTest(unittest.TestCase):
         self.touch("src/a.ts")
         self.assertEqual(board.lilguy_estimate("Add src/new.ts; see SKILL.md and lanes/merge.md\n", repo), (1, 10))
 
+    def tracked(self, files):
+        """Write each repo-relative path -> text under the repo (the scrum dir's parent), then make it a git repo that
+        tracks everything there, the scrum folder and the job's feature.md too."""
+        repo = self.root.parent
+        for name, text in files.items():
+            p = repo / name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
+        for args in (("init", "-q"), ("add", "-A")):
+            subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+    def test_lilguy_fit_price_change_naming_no_file_passes(self):
+        """Job 017 (the-ritzy-mist-google): a price change that names no file fits when 1 to LILGUY_MAX_FILES repo
+        files hold the price it changes from; the job's own tracked feature.md is not counted."""
+        (self.jd / "feature.md").write_text("on the services page the mobile spray tan needs to change from starting at "
+                                            "$75 to starting at $90 (Weslee text 2026-11-21)\n")
+        self.tracked({"src/components/PriceList.tsx": "<p>starting at $75</p>\n",
+                      "src/lib/prices.ts": 'export const spray = "$75";\n', "src/lib/lash.ts": 'export const lash = "$90";\n'})
+        self.assertEqual(self.fit(), {"fit": True, "why": "names no file; changes '$75', held by 2 repo file(s)"})
+
+    def test_lilguy_fit_quoted_copy_change_passes(self):
+        (self.jd / "feature.md").write_text('Change the hero button from "Book now" to "Get a quote"\n')
+        self.tracked({"src/Hero.tsx": "<button>Book now</button>\n", "src/Footer.tsx": "<a>Get a quote</a>\n"})
+        self.assertEqual(self.fit(), {"fit": True, "why": "names no file; changes 'Book now', held by 1 repo file(s)"})
+        (self.jd / "feature.md").write_text('Change the hero button “Book now” to “Get a quote” in src/Hero.tsx\n')
+        self.assertEqual(self.fit(), {"fit": True, "why": "names 1 file(s), estimate about 10 added lines"})
+
+    def test_lilguy_fit_copy_change_with_leading_dash_is_text(self):
+        (self.jd / "feature.md").write_text('Change the sale badge "-10% off" to "-15% off"\n')
+        self.tracked({"src/Badge.tsx": "<b>-10% off</b>\n", "src/Other.tsx": "<b>sale</b>\n"})
+        self.assertEqual(self.fit(), {"fit": True, "why": "names no file; changes '-10% off', held by 1 repo file(s)"})
+
+    def test_lilguy_fit_copy_change_file_count_limits(self):
+        (self.jd / "feature.md").write_text("Change the spray tan from $75 to $90\n")
+        self.assertEqual(self.fit(), {"fit": False, "why": "not tiny: no points, no Jev model answer"})  # not a git repo
+        self.tracked({"src/a.ts": "price $60\n"})
+        self.assertEqual(self.fit(), {"fit": False, "why": "not tiny: no points, no Jev model answer, '$75' in 0 files"})
+        self.tracked({f"src/p{i}.ts": "from $75\n" for i in range(10)})
+        self.assertEqual(self.fit(), {"fit": True, "why": "names no file; changes '$75', held by 10 repo file(s)"})
+        self.tracked({"src/p10.ts": "from $75\n"})
+        self.assertEqual(self.fit(), {"fit": False, "why": "not tiny: no points, no Jev model answer, '$75' in 11 files"})
+        (self.jd / "feature.md").write_text("Change the pricing from $75 to $90\n")
+        self.tracked({f"src/p{i}.ts": "" for i in range(1, 11)})
+        self.assertEqual(self.fit(), {"fit": False, "why": "hard-stop word 'pricing' in feature.md"})
+
+    def test_copy_from_literals(self):
+        for text, want in (("change from starting at $75 to starting at $90", ["$75"]),
+                           ('replace "Book now" with "Get a quote"', ["Book now"]),
+                           ("show ‘Get a quote’ instead of ‘Book now’", ["Book now"]),
+                           ("“Our team” → “Who we are”, and $1,200.50 should be $1,300.", ["Our team", "$1,200.50"]),
+                           ("Trevor's note: change 'Hi' to 'Hello', don't touch 'Bye'", ["Hi"]),
+                           ('change "A" to "B" then "A" to "C"', ["A"]),
+                           ('the "Services" page and the "About" page', []),
+                           ('"Book now" is fine. Go to "Contact"', []),
+                           ('make it "Book" and leave the rest', []),
+                           ("keep $75 to $75", [])):
+            with self.subTest(text):
+                self.assertEqual(board.copy_from_literals(text), want)
+
     def test_lilguy_fit_unknown_job_exits(self):
         r = run_board("--dir", str(self.root), "lilguy-fit", "999-nope")
         self.assertNotEqual(r.returncode, 0)

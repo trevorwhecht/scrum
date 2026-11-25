@@ -135,8 +135,9 @@
                                    git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
   board.py lane-read               print one line `read: <sed -n commands>` for the lane parts a fast or standard job runs
                                    (lanes/newjob.md from step 2, review.md, merge.md from step 3), or `read: none`
-  board.py lilguy-fit <id>         print {"fit","why"} (+ "read": a sed command for the lane parts a lilguy job runs, when fit): whether the job is tiny (backlog points 1, or jev.log's last model
-                                   answer score < 1.5 at confidence >= 0.7, or feature.md names a file path) with no
+  board.py lilguy-fit <id>         print {"fit","why"} (+ "read": a sed command for the lane parts a lilguy job runs, when fit): whether the job is tiny (backlog points 1 or 2, or jev.log's last model
+                                   answer score < 1.5 at confidence >= 0.7, or feature.md names a file path, or names
+                                   none and quotes a text or dollar amount it changes from that 1-10 repo files hold) with no
                                    hard-stop word in feature.md and an estimate (10 lines per named path) within 30
                                    lines, 10 files (SKILL.md New job step 3's Lilguy route)
   board.py claude-paths <id>       print {"paths","headless"}: the project .claude/ files spec.md's Likely files name, and
@@ -4880,8 +4881,9 @@ def _read_parts(parts, lane_dir: Path | None) -> str | None:
     return "; ".join(f"sed -n {shlex.quote(';'.join(r))} {shlex.quote(str(lane_dir / n))}" for n, r in ranges.items())
 
 
-# --- lilguy-fit: SKILL.md New job step 3's Lilguy route. Tiny (1 point, Jev confident it is trivial, or a named file)
-# with no hard-stop word in feature.md and a small size estimate. Anything unreadable counts as not tiny.
+# --- lilguy-fit: SKILL.md New job step 3's Lilguy route. Tiny (1 or 2 points, Jev confident it is trivial, a named file,
+# or a copy or price literal it changes that few repo files hold) with no hard-stop word in feature.md and a small size
+# estimate. Anything unreadable counts as not tiny.
 LILGUY_HARD_STOP_RE = re.compile(
     r"\b(?:schema|migrations?|migrate|prisma|sql|money|payments?|pricing|billing|checkout|stripe|auth[nz]?"
     r"|authenticat(?:ion|e)|authoriz(?:ation|e)|login|passwords?|permissions?|secrets?|credentials?"
@@ -4911,6 +4913,46 @@ def lilguy_estimate(text: str, repo) -> tuple[int, int]:
     files = sum(1 for p in set(LILGUY_PATH_RE.findall(text))
                 if (repo / p).exists() or ("/" in p and (repo / p).parent.is_dir()))
     return files, files * LILGUY_LINES_PER_FILE
+
+
+# copy_from_literals: a literal a request quotes or prices ("text", “text”, 'text', ‘text’ or a dollar amount), the
+# words that join the literal it changes from to the one it changes to, and how many of those words may sit between.
+COPY_LITERAL_RE = re.compile(r"\"([^\"\n]+)\"|“([^”\n]+)”|(?<!\w)'([^'\n]+)'(?!\w)|‘([^’\n]+)’|(\$\d+(?:,\d{3})*(?:\.\d+)?)")
+COPY_TO_RE = re.compile(r"\b(?:to|with|into|becomes?|should\s+(?:be|read|say))\b|→|->|=>", re.I)
+COPY_GAP_MAX_WORDS = 5
+
+
+def copy_from_literals(text: str) -> list[str]:
+    """The quoted or dollar-amount literals text changes from, in order without repeats: of two literals with at most
+    COPY_GAP_MAX_WORDS words and no sentence end between them, the first when those words hold a COPY_TO_RE connector
+    ("from starting at $75 to starting at $90" gives $75), the second when they are `instead of`."""
+    lits = [(m.start(), m.end(), next(g for g in m.groups() if g is not None).strip())
+            for m in COPY_LITERAL_RE.finditer(text)]
+    out: list[str] = []
+    for (_, end, a), (start, _, b) in zip(lits, lits[1:]):
+        gap = text[end:start]
+        if not a or not b or a == b or re.search(r"[.;!?\n]", gap) or len(gap.split()) > COPY_GAP_MAX_WORDS:
+            continue
+        lit = b if re.fullmatch(r"\W*instead\s+of\W*", gap, re.I) else a if COPY_TO_RE.search(gap) else None
+        if lit and lit not in out:
+            out.append(lit)
+    return out
+
+
+def copy_literal_files(literals: list[str], root) -> int | None:
+    """How many files tracked in root's repo (root's parent, root's own folder left out: it holds the job's feature.md)
+    hold any of literals, by `git grep -lF`; None when there is no literal, the repo has no .git or git fails. The
+    literals reach git on stdin (`-f -`), so one that starts with `-` is never read as an option."""
+    repo = Path(root).parent
+    if not literals or not (repo / ".git").exists():
+        return None
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "grep", "--no-color", "-lzIF", "-f", "-", "--", ".",
+                            f":(exclude){Path(root).name}"], input="\n".join(literals).encode(), capture_output=True,
+                           timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return len({p for p in r.stdout.split(b"\0") if p}) if r.returncode in (0, 1) else None
 
 
 def _lilguy_refuses(folder: Path) -> bool:
@@ -5244,7 +5286,8 @@ def _lilguy_verdict(root, job_id: str) -> dict:
     """{"fit", "why"}: a job already on another lane never fits, nor one whose feature.md or spec.md names a
     repo-relative `.claude/` path (CLAUDE_DIR_RE); then a feature.md header `Lane:` line decides (lilguy
     fits, any other lane doesn't); then a LILGUY_HARD_STOP_RE word in feature.md, or a lilguy_estimate over
-    LILGUY_MAX_LINES / LILGUY_MAX_FILES, refuses; else fit when tiny by backlog points, by Jev, or by naming a file."""
+    LILGUY_MAX_LINES / LILGUY_MAX_FILES, refuses; else fit when tiny by 1 backlog point, by Jev, by naming a file, by 2
+    backlog points, or, naming no file, by a copy_from_literals literal that 1 to LILGUY_MAX_FILES repo files hold."""
     job = find(read_board(root), check_id(job_id))
     lane = job.get("lane")
     if lane and lane != "lilguy":
@@ -5274,9 +5317,15 @@ def _lilguy_verdict(root, job_id: str) -> dict:
         return {"fit": True, "why": f"names {files} file(s), estimate about {lines} added lines"}
     if item and item["points"] == 2:  # the estimate is within the limits here: an over-limit one was refused above
         return {"fit": True, "why": "backlog item is 2 points, estimate within lilguy limits"}
+    lits = copy_from_literals(text)  # names no file here: a named one fit above
+    held = copy_literal_files(lits, root)
+    quoted = ", ".join(map(repr, lits))
+    if held and held <= LILGUY_MAX_FILES:
+        return {"fit": True, "why": f"names no file; changes {quoted}, held by {held} repo file(s)"}
     pts = f"{item['points']} points" if item and item["points"] else "no points"
     jev = f"Jev score {score} at confidence {conf}" if raw else "no Jev model answer"
-    return {"fit": False, "why": f"not tiny: {pts}, {jev}"}
+    copy = f", {quoted} in {held} files" if held is not None else ""
+    return {"fit": False, "why": f"not tiny: {pts}, {jev}{copy}"}
 
 
 # --- move-ratio: SKILL.md Review gives reviewers MOVE_ONLY=yes when nearly every added line is a verbatim move.
