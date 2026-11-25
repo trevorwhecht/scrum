@@ -549,12 +549,33 @@ PULSE_HOLDS: dict[Path, dict[str, float]] = {}  # resolved scrum/ root -> {hold 
 PULSE_HOLD_TTL_S = 180  # pulse_tick reports a hold this long after it was last seen (a few watchdog ticks)
 
 
-def note_hold(root, reason):
+CLAIM_HOLD_TEXT: dict[Path, tuple[str, float]] = {}  # resolved scrum/ root -> (why text, epoch s) of the newest hold note_hold got a text for; guarded by PULSE_LOCK
+
+
+def claim_hold_text(root, now=None):
+    """The why text of root's project's newest claim hold (board.finish_first's full text or a machine_ok refusal) that
+    note_hold recorded within PULSE_HOLD_TTL_S, else None: the dashboard's `New work held:` header line. An older one is dropped."""
+    key = Path(root).resolve()
+    with PULSE_LOCK:
+        text, at = CLAIM_HOLD_TEXT.get(key, (None, 0))
+        if text is None:
+            return None
+        now = time.time() if now is None else now
+        if now - at > PULSE_HOLD_TTL_S:
+            del CLAIM_HOLD_TEXT[key]
+            return None
+    return text
+
+
+def note_hold(root, reason, text=None):
     """Remember `reason` (a held-job token or a run-all start hold) for root's project (keyed by its resolved scrum/ path): pulse_tick adds `held:<reason>`
-    to that project's gates, so write_pulse counts the idle minutes as gated and names the gate. Writes under PULSE_LOCK."""
+    to that project's gates, so write_pulse counts the idle minutes as gated and names the gate. `text` (the full why) is also kept
+    for claim_hold_text. Writes under PULSE_LOCK."""
     key, now = Path(root).resolve(), time.time()
     with PULSE_LOCK:
         PULSE_HOLDS.setdefault(key, {})[reason] = now
+        if text:
+            CLAIM_HOLD_TEXT[key] = (str(text), now)
 
 
 def note_held(root, reason, job_ids, text=None):
@@ -563,7 +584,7 @@ def note_held(root, reason, job_ids, text=None):
     for job_id in job_ids:
         note_queue_gate(root, job_id, reason, reason=text)
     if job_ids:
-        note_hold(root, reason)
+        note_hold(root, reason, text)
 
 
 def ready_waiting(root, parent_id=None):
@@ -3512,7 +3533,7 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
                     note_hold(root, held_gate(refused))
                     continue
                 if refused or (fin := board.finish_first(root)):  # no room on this machine, or work in flight first
-                    note_hold(root, held_gate(refused or fin))
+                    note_hold(root, held_gate(refused or fin), refused or fin)
                     SWEEP_HELD.add(project)
                     return
                 if board.heavy_cap_reason(root) and not any(  # job 1314: only heavy lines left: the shop takes them
@@ -7518,6 +7539,7 @@ def board_with_activity(root, project):
         data["uiSweep"]["open"] = sum(1 for i in board.read_backlog(root)[1]
                                       if not i["done"] and i["text"].startswith("UI sweep"))
     data["autoOff"] = auto_off(project, root)  # the dashboard's "Auto continue off since" header line
+    data["claimHold"] = claim_hold_text(root)  # the dashboard's "New work held:" header line
     return data
 
 

@@ -15503,6 +15503,41 @@ class PulseTest(unittest.TestCase):
         s.pulse_tick({}, now=self.NOW + s.PULSE_HOLD_TTL_S + 1)
         self.assertEqual(self.lines()[-1]["projects"]["app"]["gates"], [])
 
+    def test_claim_hold_text_published_then_dropped(self):
+        """Job 1552: a finish_first hold the sweep notes is published with its job text, a machine_ok refusal replaces it,
+        and one older than PULSE_HOLD_TTL_S is dropped."""
+        s = self.serve
+        root = (self.base / "app" / "scrum").resolve()
+        self.addCleanup(s.PULSE_HOLDS.clear)
+        self.addCleanup(s.CLAIM_HOLD_TEXT.clear)
+        fin = "finishing work in flight first: app/1998 waits on the Check queue"
+        with mock.patch.object(s.time, "time", return_value=self.NOW):
+            self.assertIsNone(s.claim_hold_text(root))
+            s.note_hold(root, "finish_first", fin)
+            s.note_hold(root, "heavy_cap")  # no text: keeps the last one
+        self.assertEqual(s.claim_hold_text(root, self.NOW + 10), fin)
+        self.assertIsNone(s.claim_hold_text(root.parent / "other" / "scrum", self.NOW + 10))
+        with mock.patch.object(s.time, "time", return_value=self.NOW + 20):
+            s.note_hold(root, "cool_down", "cool-down")
+        self.assertEqual(s.claim_hold_text(root, self.NOW + 30), "cool-down")
+        self.assertIsNone(s.claim_hold_text(root, self.NOW + 20 + s.PULSE_HOLD_TTL_S + 1))
+        self.assertNotIn(root, s.CLAIM_HOLD_TEXT)
+
+    def test_sweep_finish_first_hold_is_published(self):
+        """Job 1552: auto_continue_tick's finish_first refusal reaches claim_hold_text with the full text."""
+        s = self.serve
+        root = (self.base / "app" / "scrum").resolve()
+        self.addCleanup(s.PULSE_HOLDS.clear)
+        self.addCleanup(s.CLAIM_HOLD_TEXT.clear)
+        self.addCleanup(s.SWEEP_HELD.clear)
+        fin = "finishing work in flight first: app/1998 waits on the Check queue"
+        with mock.patch.object(s, "running", return_value=False), mock.patch.object(s, "claimable", return_value=True), \
+                mock.patch.object(s, "auto_continue", return_value=1), \
+                mock.patch.object(s.board, "machine_ok", return_value=None), \
+                mock.patch.object(s.board, "finish_first", return_value=fin):
+            s.auto_continue_tick({"app": True})
+        self.assertEqual(s.claim_hold_text(root), fin)
+
     def test_start_ready_notes_shop_left_and_run_all_hold(self):
         """Job 1215: start_ready notes runs_on_shop when cmd_ready left children for the shop and claimed none; a running
         run-all with claimable work is noted by auto_continue_tick."""
