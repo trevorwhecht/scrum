@@ -88,7 +88,8 @@
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt (+ questions.lines), and every windows/
                                    scorecard no live digest lists as windows.txt + windows.json, plus timing.md (per-job wall
                                    time, rounds, no-change rounds, E2E lock waits; jobs waiting on the E2E queue),
-                                   and escapes.md (each debug job's origin job by git blame, with its PASS reviewers),
+                                   and escapes.md (each bug job's origin job by git blame, with its PASS reviewers; a
+                                   bug job is a debug job or one whose feature.md or spec.md Lane: line says bug),
                                    print {"id","jobs","windows"}
                                    (id null = nothing new; starts with no jobs when the questions trigger fired); then a
                                    pipeline health check parks one "Pipeline health: <tool>" job at needs-human per tool
@@ -3600,18 +3601,19 @@ def write_timing(root, digest_id, jobs):
     (Path(root) / "digests" / digest_id / "timing.md").write_text("\n".join(lines) + "\n")
 
 
-# --- escapes: digest-start writes digests/<NNN>/escapes.md, each debug job traced by git blame to its origin job ---
+# --- escapes: digest-start writes digests/<NNN>/escapes.md, each bug job traced by git blame to its origin job ---
 ESCAPE_SKIP_RE = re.compile(r"(^|/)(__tests__|e2e|tests?)/|(^|/)test_[^/]*\.py$|\.(test|spec)\.[cm]?[jt]sx?$")
 ESCAPE_JOB_RE = re.compile(r"scrum/jobs/([^/\s]+)/")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? ", re.M)
 BLAME_SHA_RE = re.compile(r"^([0-9a-f]{40,64}) \d+ \d+", re.M)
 ESCAPE_UI_RE = re.compile(r"\.(tsx|jsx|css|scss|html)$", re.I)
 ESCAPE_SECURITY_RE = re.compile(r"auth|injection|secret|token|password|session|permission|xss|data exposure", re.I)
+ESCAPE_BUG_LANE_RE = re.compile(r"^Lane:.*\bbug\b", re.M | re.I)  # `Lane: lilguy — bug, cause pinned: ...`
 
 
 def _escape_lines(repo, bug, board, root=None):
-    """The escapes.md lines for debug job `bug`: its newest HEAD commit naming scrum/jobs/<bug>/, each non-test file's
-    -a,b hunks blamed on <sha>^, and every other board job named in a blamed commit's body, with its last-round PASSes
+    """The escapes.md lines for bug job `bug` (_bug_job): its newest HEAD commit naming scrum/jobs/<bug>/, each non-test
+    file's -a,b hunks blamed on <sha>^, and every other board job named in a blamed commit's body, with its last-round PASSes
     (a PASS whose jobs/<origin>/round-<last>/review-<name>.md under `root` is missing or a skip stub is left out; `ui` is left out
     unless a blamed file matches ESCAPE_UI_RE, `security` unless the bug's feature.md matches ESCAPE_SECURITY_RE)."""
     shas = _git(repo, "log", "HEAD", "-F", f"--grep=scrum/jobs/{bug}/", "--format=%H").decode().split()
@@ -3658,12 +3660,28 @@ def _escape_lines(repo, bug, board, root=None):
     return out
 
 
+def _bug_job(root, job_id, lane) -> bool:
+    """True when job_id is a bug fix: board lane `debug`, or a `Lane:` line in its feature.md or spec.md naming the word
+    bug (ESCAPE_BUG_LANE_RE, a lilguy or fast bug fix, job 1528); an unreadable file counts as no line."""
+    if lane == "debug":
+        return True
+    d = Path(root) / "jobs" / job_id
+    for name in ("feature.md", "spec.md"):
+        try:
+            if ESCAPE_BUG_LANE_RE.search((d / name).read_text(encoding="utf-8", errors="replace")):
+                return True
+        except OSError:
+            pass
+    return False
+
+
 def write_escapes(root, digest_id, jobs):
-    """digests/<NNN>/escapes.md: for every claimed `"lane": "debug"` job, the origin jobs whose lines its fix changed
+    """digests/<NNN>/escapes.md: for every claimed bug job (_bug_job), the origin jobs whose lines its fix changed
     (_escape_lines, git in the repo that holds root), or `No bug jobs`."""
     board = {j["id"]: j for j in read_board(root)["jobs"]}
     repo = Path(root).resolve().parent
-    lines = [l for j in jobs if board.get(j, {}).get("lane") == "debug" for l in _escape_lines(repo, j, board, root)]
+    bugs = [j for j in jobs if _bug_job(root, j, board.get(j, {}).get("lane"))]
+    lines = [l for j in bugs for l in _escape_lines(repo, j, board, root)]
     (Path(root) / "digests" / digest_id / "escapes.md").write_text("\n".join(lines or ["No bug jobs"]) + "\n")
 
 
