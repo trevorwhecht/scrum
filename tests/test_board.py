@@ -13707,24 +13707,43 @@ class ProcessHealthTest(unittest.TestCase):
         self.assertEqual((m["resume_abort_stops"]["value"], m["resume_abort_stops"]["jobs"]), (0, []))
         self.assertEqual(m["stops_per_job"]["jobs"], ["101-alpha"])  # the stop is read, just not counted as resume/abort
 
+    def stops_flag(self, stops):
+        """stops_per_job's (value, flag) in digest 002 for `stops` stopped jobs out of 3, after a 0.01 previous."""
+        ids = ("101-a", "102-b", "103-c")
+        self.board(*[(i, "done", "standard", None, "merged") for i in ids])
+        self.lines("questions.log", [{"job": i, "kind": "stall", "reason": "stalled in build"} for i in ids[:stops]])
+        self.digest("001", *ids)
+        self.put("digests/001/health.json", json.dumps({"digest": "001", "previous": None, "metrics": {
+            "stops_per_job": {"value": 0.01}}}))
+        self.digest("002", *ids)
+        m = self.run_health("002")["metrics"]["stops_per_job"]
+        return m["value"], m["flag"]
+
+    def test_stops_per_job_one_stop_is_not_worse(self):
+        self.assertEqual(self.stops_flag(1), (0.33, None))
+
+    def test_stops_per_job_two_stops_are_worse(self):
+        self.assertEqual(self.stops_flag(2), (0.67, "worse"))
+
     def test_previous_and_flags(self):
-        self.board(("101-alpha", "done", "standard", None, "merged"))
-        self.lines("questions.log", [{"job": "101-alpha", "kind": "stall", "reason": "stalled in build"}])
-        self.digest("001", "101-alpha")
+        self.board(("101-alpha", "done", "standard", None, "merged"), ("102-beta", "done", "standard", None, "merged"))
+        self.lines("questions.log", [{"job": "101-alpha", "kind": "stall", "reason": "stalled in build"},
+                                     {"job": "102-beta", "kind": "stall", "reason": "stalled in build"}])
+        self.digest("001", "101-alpha", "102-beta")
         self.put("digests/001/health.json", json.dumps({"digest": "001", "previous": None, "metrics": {
             "stops_per_job": {"value": 0.25}, "not_shipped": {"value": 3}, "cheaper_lane_jobs": {"value": 0}}}))
-        self.digest("002", "101-alpha")
+        self.digest("002", "101-alpha", "102-beta")
         self.put("digests/002/error.md", "digester produced no valid proposals\n")
         self.put("digests/002/health.json", json.dumps({"digest": "002", "previous": None, "metrics": {
             "stops_per_job": {"value": 5}, "not_shipped": {"value": 0}}}))
-        self.digest("003", "101-alpha")
+        self.digest("003", "101-alpha", "102-beta")
         got = self.run_health("003")
         self.assertEqual(got["previous"], "001")
         m = got["metrics"]
         self.assertEqual((m["stops_per_job"]["value"], m["stops_per_job"]["previous"], m["stops_per_job"]["flag"]),
                          (1.0, 0.25, "worse"))
         self.assertEqual((m["not_shipped"]["value"], m["not_shipped"]["previous"], m["not_shipped"]["flag"]),
-                         (1, 3, "over twice"))
+                         (2, 3, "over twice"))
         self.assertEqual((m["cheaper_lane_jobs"]["previous"], m["cheaper_lane_jobs"]["flag"]), (0, None))
         self.assertEqual((m["unused_windows"]["previous"], m["unused_windows"]["flag"]), (None, None))
         fresh = Path(self.tmp.name) / "fresh"
