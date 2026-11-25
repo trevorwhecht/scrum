@@ -5923,7 +5923,7 @@ class BoardTest(unittest.TestCase):
         (runs / f"{stamp}-start-j.log").write_text("x")
         job = {"depends_on": ["a"], "updatedAt": datetime.fromtimestamp(t0 + 3600, timezone.utc).isoformat()}
         cells = board._timing_row(self.root, "j", job, {})[0]
-        self.assertEqual((cells[1], cells[2], cells[3], cells[4]), ("1h00m", "-", "30m", "depends_on:a"))
+        self.assertEqual((cells[1], cells[2], cells[3], cells[4]), ("1h00m", "-", "30m", "depends_on:a 30m"))
 
     def timing_cell(self, waits, files=((6600, "round-1/a.md"), (7200, "round-1/head.txt"))):
         """Round-1 time cell for a 2h round (spec.md at t0) with the given wait starts (secs after t0)."""
@@ -5956,10 +5956,10 @@ class BoardTest(unittest.TestCase):
     def test_timing_depends_on_fills_empty_queue_gate(self):
         self.timing_two_hour(1_700_000_000)
         job = {"depends_on": ["1439-a", "1440-b"]}
-        self.assertEqual(board._timing_row(self.root, "j", job, {})[0][4], "depends_on:1439-a, depends_on:1440-b")
+        self.assertEqual(board._timing_row(self.root, "j", job, {})[0][4], "depends_on:1439-a 0m, depends_on:1440-b 0m")
         self.assertEqual(board._timing_row(self.root, "j", {}, {})[0][4], "-")
         self.write("j/queue-gates.txt", "ram_room\n")
-        self.assertEqual(board._timing_row(self.root, "j", job, {})[0][4], "ram_room")
+        self.assertEqual(board._timing_row(self.root, "j", job, {})[0][4], "ram_room 0m")
 
     def test_timing_ignores_other_stalls(self):
         t0 = 1_700_000_000
@@ -6063,13 +6063,13 @@ class BoardTest(unittest.TestCase):
         stamp = datetime.fromtimestamp(t0 + 3 * 3600, timezone.utc).strftime("%Y%m%d-%H%M%S")
         (self.root / "runs" / f"{stamp}-start-{job}.log").write_text("x")
         cells = lambda: board._timing_row(self.root, job, {}, {})[0][2:5]
-        self.assertEqual(cells(), ["20m", "2h50m", f"depends_on:{blocker}"])
+        self.assertEqual(cells(), ["20m", "2h50m", f"depends_on:{blocker} 2h50m"])  # no board map: the whole Queue
         (folder / "dep-waits.txt").unlink()
-        self.assertEqual(cells(), ["3h10m", "0m", f"depends_on:{blocker}"])
+        self.assertEqual(cells(), ["3h10m", "0m", f"depends_on:{blocker} 0m"])
         (folder / "dep-waits.txt").write_text("garbage\n")
-        self.assertEqual(cells(), ["3h10m", "0m", f"depends_on:{blocker}"])
+        self.assertEqual(cells(), ["3h10m", "0m", f"depends_on:{blocker} 0m"])
         (folder / "dep-waits.txt").write_text(f"{t0 - 7200} {blocker}\n{t0 + 600} {blocker}\n")  # one before created
-        self.assertEqual(cells(), ["10m", "3h00m", f"depends_on:{blocker}"])  # clipped at created, overlap counted once
+        self.assertEqual(cells(), ["10m", "3h00m", f"depends_on:{blocker} 3h00m"])  # clipped at created, overlap counted once
 
     def test_timing_stall_minutes_to_resume(self):
         t0 = 1_700_000_000
@@ -6115,7 +6115,7 @@ class BoardTest(unittest.TestCase):
         gates.write_text("")
         self.assertEqual(cell(), "-")  # empty file
         gates.write_text("ram_room\ncpu_load\n")
-        self.assertEqual(cell(), "ram_room, cpu_load")
+        self.assertEqual(cell(), "ram_room 0m, cpu_load 0m")
 
     def test_timing_row_queue_gate_held_times(self):
         """Job 1485: each gate shows its head's held time from current-gates.json, longest first; a gate with none
@@ -6129,9 +6129,46 @@ class BoardTest(unittest.TestCase):
                                        "ram_room": {"at": 1.0, "text": "ram_room", "held": 120},
                                        "cpu_load": {"at": 1.0, "text": "cpu_load"},
                                        "runs_on_shop": 5.0}))
-        self.assertEqual(cell(), "vm_pressure 6h10m, swap 1h02m, ram_room(free=10%) 2m, cpu_load(95%), runs_on_shop")
+        self.assertEqual(cell(), "vm_pressure 6h10m, swap 1h02m, ram_room(free=10%) 2m, cpu_load(95%) 0m, runs_on_shop 0m")
         current.write_text("not json")
-        self.assertEqual(cell(), "cpu_load(95%), swap, ram_room(free=10%), vm_pressure, runs_on_shop")
+        self.assertEqual(cell(), "cpu_load(95%) 0m, swap 0m, ram_room(free=10%) 0m, vm_pressure 0m, runs_on_shop 0m")
+
+    def test_timing_row_every_gate_carries_held_minutes(self):
+        """Job 1558: every head in the Queue gate cell prints its held minutes, 0m when current-gates.json has none
+        (onewitharts digest 163 printed `overlap_skipped:<id>`, `cpu_queue` and `ram_room` bare), longest first, ties
+        in file order; serve.py shop_tick's shop_full:<alias> is one more held gate."""
+        cell = lambda: board._timing_row(self.root, "j", {}, {})[0][4]
+        self.write("j/spec.md", "s\n")
+        self.write("j/queue-gates.txt", "overlap_skipped:2018-preorder\ncpu_queue\nram_room(free=81%,est=2%)\n"
+                                        "vm_pressure\nshop_full:shopmac\n")
+        self.write("j/current-gates.json", json.dumps({
+            "overlap_skipped:2018-preorder": {"at": 1.0, "text": "overlap_skipped:2018-preorder"},
+            "cpu_queue": {"at": 1.0, "text": "cpu_queue", "held": 0},
+            "ram_room": {"at": 1.0, "text": "ram_room", "held": "soon"},
+            "vm_pressure": {"at": 1.0, "text": "vm_pressure", "held": 1020},
+            "shop_full:shopmac": {"at": 1.0, "text": "shop_full:shopmac", "held": 5400}}))
+        self.assertEqual(cell(), "shop_full:shopmac 1h30m, vm_pressure 17m, overlap_skipped:2018-preorder 0m, "
+                                 "cpu_queue 0m, ram_room(free=81%,est=2%) 0m")
+
+    def test_timing_row_depends_on_gate_carries_held_minutes(self):
+        """Job 1558: a depends_on:<id> gate filled in from the board prints the Queue part before that blocker's
+        updatedAt when every blocker is done on by_id, else the whole Queue."""
+        t0 = 1_700_000_000
+        self.claim_clock_job(t0)  # Queue 3h05m: feature.md to the claim at 3h, then 5m from spec.md to the start
+        at = lambda secs: datetime.fromtimestamp(t0 + secs, timezone.utc).isoformat()
+        done = lambda secs: {"stage": "done", "updatedAt": at(secs)}
+        row = lambda job, by_id: board._timing_row(self.root, "j", job, {}, by_id=by_id)[0][3:5]
+        self.assertEqual(row({"depends_on": ["1-a", "2-b"]}, {"1-a": done(3600), "2-b": done(9000)}),
+                         ["3h05m (35m after depends_on)", "depends_on:2-b 2h30m, depends_on:1-a 1h00m"])
+        self.assertEqual(row({"depends_on": ["1-a"]}, {"1-a": done(3600)}),
+                         ["3h05m (2h05m after depends_on)", "depends_on:1-a 1h00m"])
+        self.assertEqual(row({"depends_on": ["1-a", "2-b"]}, {"1-a": done(3600)}),
+                         ["3h05m", "depends_on:2-b 3h05m, depends_on:1-a 1h00m"])  # 2-b not on the board: whole Queue
+        self.assertEqual(row({"depends_on": ["1-a"]}, None), ["3h05m", "depends_on:1-a 3h05m"])
+        self.write("j/queue-gates.txt", "depends_on:1-a\nram_room\n")  # cmd_ready's gate, re-stamped while it held
+        self.write("j/current-gates.json", json.dumps({"depends_on:1-a": {"at": 1.0, "held": 1200}}))
+        self.assertEqual(row({}, None), ["3h05m", "depends_on:1-a 20m, ram_room 0m"])  # blocker unknown: its held time
+        self.assertEqual(row({}, {"1-a": done(3600)}), ["3h05m", "depends_on:1-a 1h00m, ram_room 0m"])
 
     def test_timing_row_stall_holds_cell(self):
         """Job 927: stall-holds.txt (serve.py note_stall_hold) names what held the job's stalls in its Stalls cell."""
@@ -6211,7 +6248,7 @@ class BoardTest(unittest.TestCase):
         row = next(l for l in (self.root / "digests" / "001" / "timing.md").read_text().splitlines()
                    if l.startswith(f"| {job} |"))
         self.assertEqual([c.strip() for c in row.strip("|").split("|")][3:5],
-                         ["3h05m (35m after depends_on)", f"depends_on:{blocker}"])
+                         ["3h05m (35m after depends_on)", f"depends_on:{blocker} 2h30m"])
 
     def test_timing_row_queue_after_depends_on(self):
         """Job 1268: a depends_on job whose blockers are all done splits out the Queue after the latest blocker's
@@ -6255,9 +6292,9 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(row(dep, blocker(updatedAt=at(-600)))[3], "3h05m (3h05m after depends_on)")  # before feature.md
         self.assertEqual(row(dep, blocker(), "none")[3], "-")  # no spec.md: no Queue
         cells = row(dep, blocker())
-        self.assertEqual((cells[4], len(cells)), ("depends_on:1-a", 12))  # one cell more would break the table header
+        self.assertEqual((cells[4], len(cells)), ("depends_on:1-a 2h30m", 12))  # one cell more would break the table header
         self.write("j/queue-gates.txt", "ram_room\n")
-        self.assertEqual(row(dep, blocker())[3:5], ["3h05m (35m after depends_on)", "ram_room"])
+        self.assertEqual(row(dep, blocker())[3:5], ["3h05m (35m after depends_on)", "ram_room 0m"])
 
     def test_bad_window_thresholds(self):
         self.assertEqual((board.BAD_WASTED_PCT, board.BAD_FIRST_PASS, board.BAD_MIN_JOBS, board.EARLY_DIGEST_MIN),

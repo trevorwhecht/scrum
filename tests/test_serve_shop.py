@@ -309,6 +309,53 @@ class ShopTickTest(unittest.TestCase):
         self.assertEqual(self.calls(), [], "both workers full")
         self.assertEqual(self.job(root, "044-b")["stage"], "waiting")
 
+    def test_full_workers_stamp_shop_full_gate(self):
+        """Job 1558: when no worker is free, each pool job shop_tick passes over gets `shop_full:<alias>` for every
+        worker at its max, in queue-gates.txt and through board.note_current_gate in current-gates.json, so its held
+        seconds grow tick on tick for timing.md's Queue gate; a job outside the pool, a worker with a free slot that is
+        backed off or down, and a dispatch get none."""
+        self.workers("shopmac 2 owa,main\nnewmac 1 main\n")
+        root = self.project("mm", self.runall({"id": "043-a"}, {"id": "045-p", "paused": True}) + [self.queued("050-q")])
+        busy = [{"id": "010-x", "stage": "cloud", "shop": "11", "account": "main"},  # no worker field: shopmac
+                {"id": "011-x", "stage": "cloud", "shop": "12", "account": "owa", "worker": "shopmac"}]
+        self.project("aa", busy + [{"id": "012-x", "stage": "cloud", "shop": "13", "account": "main", "worker": "newmac"}])
+        path = lambda j: root / "jobs" / j / "queue-gates.txt"
+        gates = lambda j: path(j).read_text() if path(j).exists() else None
+        current = lambda j: json.loads((root / "jobs" / j / "current-gates.json").read_text())
+        (root / "jobs" / "043-a" / "current-gates.json").write_text(json.dumps(
+            {"shop_full:shopmac": {"at": time.time() - 120, "text": "shop_full:shopmac", "held": 60}}))
+        self.assertEqual(self.tick(), (False, "", ""))
+        self.assertEqual(self.calls(), [], "both workers full: none is probed")
+        for job_id in ("043-a", "050-q"):
+            self.assertEqual(gates(job_id), "shop_full:shopmac\nshop_full:newmac\n", job_id)
+        self.assertEqual(sorted(current("050-q")), ["shop_full:newmac", "shop_full:shopmac"])
+        self.assertGreaterEqual(current("043-a")["shop_full:shopmac"]["held"], 180)  # 60 s held plus 120 s since its last hit
+        self.assertIsNone(gates("045-p"), "paused: never in the pool")
+        self.assertEqual((self.job(root, "043-a")["stage"], self.job(root, "050-q")["stage"]), ("waiting", "spec"))
+        with self.subTest("a job tagged Runs on main never goes to the shop: no shop_full gate"):
+            root = self.project("mm", self.runall({"id": "043-a", "runs_on": "main"}, {"id": "044-b"}))
+            self.assertEqual(self.tick(), (False, "", ""))
+            self.assertEqual((gates("043-a"), gates("044-b")), (None, "shop_full:shopmac\nshop_full:newmac\n"))
+        with self.subTest("newmac has a free slot but is backed off: only full shopmac is named"):
+            root = self.project("mm", self.runall({"id": "043-a"}))
+            self.project("aa", busy)
+            self.serve.SHOP_RETRY_AT["newmac"] = time.time() + 600
+            self.assertEqual(self.tick(), (False, "", ""))
+            self.assertEqual(gates("043-a"), "shop_full:shopmac\n")
+        with self.subTest("the one worker is down with a free slot: no gate"):
+            self.serve.SHOP_RETRY_AT.clear()
+            self.workers("shopmac 2 owa,main\n")
+            self.sh.ready.return_value = dict(READY, ready=False)
+            root = self.project("mm", self.runall({"id": "043-a"}))
+            self.project("aa", [])
+            self.assertEqual(self.tick(), (False, "", ""))
+            self.assertIsNone(gates("043-a"))
+        with self.subTest("a worker with a free slot takes the job: no gate"):
+            self.sh.ready.return_value = READY
+            root = self.project("mm", self.runall({"id": "043-a"}))
+            self.assertIs(self.tick()[0], True)
+            self.assertIsNone(gates("043-a"))
+
     def test_unready_worker_skipped_for_next(self):
         self.workers("shopmac 2 owa,main\nnewmac 2 owa,main\nthird 2 owa,main\n")
         self.sh.ready.side_effect = lambda alias: READY if alias == "newmac" else dict(READY, ready=False)

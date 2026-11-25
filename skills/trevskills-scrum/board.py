@@ -3411,9 +3411,11 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
     then ` (held: <tokens>)` from stall-holds.txt (serve.py note_stall_hold: what auto_resume passed it over for).
     Each `queued` epoch (a questions.log queue-wait line) runs to the job's next run log, else the round's end, is
     subtracted like `waits` and adds one to E2E lock waits. An autoPlayed job's Round times start `paused `, and a job
-    whose board entry lists depends_on gets `depends_on:<id>` as its Queue gate when queue-gates.txt gives none; a
-    gate whose head has "held" seconds in current-gates.json (note_current_gate) shows them, e.g. `vm_pressure 6h10m`,
-    held gates first, longest first, then the rest in file order.
+    whose board entry lists depends_on gets `depends_on:<id>` as its Queue gate when queue-gates.txt gives none. Every
+    gate prints its held minutes, longest first, ties in file order (job 1558): its head's "held" seconds in
+    current-gates.json (note_current_gate), 0m with none, e.g. `vm_pressure 6h10m, cpu_queue 0m`; a depends_on:<id>
+    gate's are the Queue pieces before that blocker's updatedAt when by_id has it at stage done, else its held
+    seconds, else the whole Queue.
     by_id (write_timing's {id: board job}): when every depends_on blocker is on it at stage done (_deps_done_at), the
     Queue cell is `<total> (<after> after depends_on)`, <after> being the part of each Queue piece (feature.md to the
     claim, each dep-waits.txt span, spec.md to round 1's start) after the latest blocker's updatedAt."""
@@ -3491,20 +3493,16 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
         total = min(total, spec)
         spec, queue = spec - total, queue + total
     try:  # serve.py note_queue_gate: the launch gates that queued it
-        gates = (folder / "queue-gates.txt").read_text(encoding="utf-8", errors="replace").split()
+        gates = list(dict.fromkeys((folder / "queue-gates.txt").read_text(encoding="utf-8", errors="replace").split()))
     except OSError:
         gates = []
-    try:  # note_current_gate's held seconds per head: each gate with its held time, longest first (job 1485)
+    try:  # note_current_gate's held seconds per head: every gate prints its held time, 0m with none (jobs 1485, 1558)
         seen = json.loads((folder / CURRENT_GATES).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         seen = None
     seen = seen if isinstance(seen, dict) else {}
-    held = {g: h for g in gates if isinstance(v := seen.get(g.split("(", 1)[0]), dict)
-            and type(h := v.get("held")) in (int, float) and h > 0}
-    gates = ", ".join([f"{g} {_mins(held[g])}" for g in sorted(held, key=lambda g: -held[g])]
-                      + [g for g in gates if g not in held]) or "-"
-    if gates == "-" and isinstance(job.get("depends_on"), list) and job["depends_on"]:  # waited on an earlier job by plan
-        gates = ", ".join(f"depends_on:{d}" for d in job["depends_on"])
+    secs = lambda v: v["held"] if isinstance(v, dict) and type(v.get("held")) in (int, float) and v["held"] > 0 else 0
+    held = {g: secs(seen.get(g.split("(", 1)[0])) for g in gates}
     stall_cell, resume = [], 0
     for at in sorted(stalls.get(job_id, ()), key=lambda t: (t is None, t or 0)):  # dated in order, then undated
         nxt = None if at is None else after(at)
@@ -3515,11 +3513,20 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
         hwaits = [(hwaits[0] if hwaits else 0) + pre_human, *hwaits[1:]]
     if queue and wall is not None:  # Queue is part of Wall, never more
         queue = min(queue, wall)
+    if not gates and isinstance(job.get("depends_on"), list):  # waited on an earlier job by plan
+        gates = list(dict.fromkeys(f"depends_on:{d}" for d in job["depends_on"]))
+    for g in gates:  # job 1558: a depends_on head holds the Queue before its blocker's done updatedAt, else its held time, else all of it
+        if g.startswith("depends_on:"):
+            dep = (by_id or {}).get(g[11:])
+            end = _epoch(dep.get("updatedAt")) if isinstance(dep, dict) and dep.get("stage") == "done" else None
+            held[g] = ((held.get(g) or queue or 0) if end is None
+                       else min(sum(max(min(b, end) - a, 0) for a, b in pieces), queue or 0))
+    gate_cell = ", ".join(f"{g} {_mins(held[g])}" for g in sorted(gates, key=lambda g: -held[g])) or "-"
     queue_cell = _mins(queue)
     if queue is not None and (blocked := _deps_done_at(job, by_id)) is not None:  # the part after the planned wait
         after = min(sum(max(b - max(a, blocked), 0) for a, b in pieces), queue)
         queue_cell += f" ({_mins(after)} after depends_on)"
-    cells = [job_id, _mins(wall), _mins(spec), queue_cell, gates, str(len(rounds)), paused + ", ".join(times) or "-",
+    cells = [job_id, _mins(wall), _mins(spec), queue_cell, gate_cell, str(len(rounds)), paused + ", ".join(times) or "-",
              ", ".join(map(_mins, hwaits)) or "-", f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0",
              _mins(done - cloud if cloud and done and done >= cloud else None)]
     try:  # serve.py note_stall_hold: what held its stalls
@@ -3536,7 +3543,7 @@ RAM_HOLD_RE = re.compile(r"^\S+ free=(?:(\d+)%|unknown) sessions=(\d+)$", re.M) 
 
 def write_timing(root, digest_id, jobs):
     """digests/<NNN>/timing.md: one row per claimed job (wall, spec, queue (with the part after a done depends_on
-    blocker's updatedAt: _timing_row's by_id is this board), queue gate = queue-gates.txt (each gate with its current-gates.json held time, longest first), rounds, round times, no-change rounds = a
+    blocker's updatedAt: _timing_row's by_id is this board), queue gate = queue-gates.txt (every gate with its held minutes, 0m with none, longest first), rounds, round times, no-change rounds = a
     head.txt equal to the previous round's, E2E lock waits = `exit 124` in check.md plus queue-wait lines, questions.log stall lines, each as
     its minutes to the next run log),
     totals, every job on every registered board (and this one) now stalled or held (queue_waiting) on the E2E queue, and per claimed
