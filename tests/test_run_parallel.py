@@ -7,13 +7,16 @@ RUNNER = Path(__file__).resolve().parent / "run_parallel.py"
 class RunParallelTest(unittest.TestCase):
     """tests/run_parallel.py over a temp folder of tiny test modules."""
 
-    def run_on(self, modules, *args):
+    def run_on(self, modules, *args, paths=()):
+        """paths: module names (sub/test_x) passed as test file paths after args."""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         for name, text in modules.items():
+            (Path(tmp.name) / f"{name}.py").parent.mkdir(parents=True, exist_ok=True)
             (Path(tmp.name) / f"{name}.py").write_text(text)
-        return subprocess.run([sys.executable, str(RUNNER), "--start", tmp.name, *args], capture_output=True, text=True,
-                              timeout=120)
+        files = [str(Path(tmp.name) / f"{n}.py") for n in paths]
+        return subprocess.run([sys.executable, str(RUNNER), "--start", tmp.name, *args, *files], capture_output=True,
+                              text=True, timeout=120)
 
     @staticmethod
     def shard_lines(out):
@@ -70,6 +73,33 @@ class RunParallelTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual(self.shard_lines(r.stdout), [])
         self.assertNotIn("Ran ", r.stdout)
+
+    # job 1534: the fast-lane Check gate passes the files `board.py related-tests` prints
+    PASS2 = "import unittest\nclass A(unittest.TestCase):\n    def test_one(self): pass\n    def test_two(self): pass\n"
+    FAIL1 = "import unittest\nclass B(unittest.TestCase):\n    def test_boom(self): self.fail('b ran')\n"
+
+    def test_paths_run_only_those_files(self):
+        mods = {"test_a": self.PASS2, "test_b": self.FAIL1, "pkg/__init__": "",
+                "pkg/test_c": self.PASS2.replace("class A", "class C")}
+        r = self.run_on(mods, "-j", "2", paths=("test_a", "pkg/test_c"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("b ran", r.stdout)
+        self.assertNotIn("not in the suite", r.stdout)
+        self.assertTrue(r.stdout.rstrip().splitlines()[-1].startswith("Ran 4 tests in "), r.stdout)
+
+    def test_missing_path_is_refused_before_running(self):
+        r = self.run_on({"test_a": self.PASS2}, paths=("test_gone",))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("no such test file", r.stderr)
+        self.assertIn("test_gone.py", r.stderr)
+        self.assertEqual(self.shard_lines(r.stdout), [])
+
+    def test_file_discovery_skips_is_named_and_runs_nothing(self):
+        r = self.run_on({"test_a": self.PASS2, "loose/test_d": self.FAIL1}, paths=("test_a", "loose/test_d"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertRegex(r.stdout, r"(?m)^not in the suite: \S*loose/test_d\.py$")
+        self.assertNotIn("b ran", r.stdout)
+        self.assertTrue(r.stdout.rstrip().splitlines()[-1].startswith("Ran 2 tests in "), r.stdout)
 
 
 if __name__ == "__main__":
