@@ -4016,6 +4016,20 @@ class BoardTest(unittest.TestCase):
             self.assertNotIn("play_queued", job, job["id"])
             self.assertNotIn("ram_hold", job, job["id"])
 
+    def test_abort_and_pause_clear_machine_hold(self):
+        """Job 1540: a paused or aborted job never keeps the machine_ok reason its queued launch waited on."""
+        launch = {"action": "approve", "prompt": "/trevskills-scrum approve x", "stage": "build"}
+        paused, aborted = board.cmd_new(self.root, "paused"), board.cmd_new(self.root, "aborted")
+        for job_id in (paused, aborted):
+            board.cmd_set(self.root, job_id, ["stage=build"])
+            with board.locked_board(self.root) as b:
+                board.find(b, job_id).update(play_queued="2026-11-24T16:19:36Z", queued_launch=launch,
+                                             machine_hold="CPU load 340% of 8 cores (> 300%)")
+        with mock.patch.object(board, "play"):
+            board.cmd_pause(self.root, paused)
+        board.cmd_abort(self.root, aborted, False)
+        self.assertEqual({j["id"]: "machine_hold" in j for j in self.jobs()}, {paused: False, aborted: False})
+
     @mock.patch.object(board, "MAX_YOUNG_SESSIONS", 2 * board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
     def test_ready_claims_only_up_to_ram_room(self):
         """The 2026-10-24 crash: one ready call claimed 7 children at once. Claims stop at the free RAM's room."""

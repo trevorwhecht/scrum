@@ -1259,6 +1259,13 @@ class ServeTest(unittest.TestCase):
         self.serve.unqueue(self.root, self.stage_of(dropped))
         self.assertNotIn("ram_hold", self.stage_of(dropped))
 
+    def test_spawn_start_clears_machine_hold(self):
+        """Job 1540: a queued launch spawn starts (a Start now click as well as the tick) drops its machine_hold."""
+        job_id = self.held_job("Machine hold then start", 0.5)
+        self.edit_job(job_id, machine_hold="CPU load 340% of 8 cores (> 300%)")
+        self.assertEqual(self.ram_spawn(job_id)[0], f"runs/{job_id}-approve.log")
+        self.assertNotIn("machine_hold", self.stage_of(job_id))
+
     def test_spawn_ram_hold_unknown_ram(self):
         job_id = self.held_job("RAM hold unknown", 2)
         out, err = self.ram_spawn(job_id, sessions=3, free=None, ram=0)
@@ -17838,3 +17845,110 @@ class ProjectNotesTickTest(unittest.TestCase):
         self.assertLess(src.index("cloud_tick(project, root, jobs)"), at)
         self.assertLess(at, src.index("shop_tick(project, repo, root)"))
         self.assertTrue(src[:at].rstrip().endswith("try:  # its own guard: a project note failure must not skip shop_tick"))
+
+
+class MachineHoldTest(unittest.TestCase):
+    """Job 1540: a queued launch the machine_ok gate holds names that reason on the job (machine_hold), and the reason
+    goes once the launch starts, is dropped or unqueued."""
+    CPU = "CPU load 340% of 8 cores (> 300%)"
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name) / "repo"
+        self.root = repo / "scrum"
+        (self.root / "jobs").mkdir(parents=True)
+        reg = Path(tmp.name) / "projects.json"
+        reg.write_text(json.dumps([str(repo)]))
+        for p in (mock.patch.dict(os.environ, SCRUM_REGISTRY=str(reg)),
+                  mock.patch.object(serve, "run_terminal", side_effect=AssertionError("no Terminal under test"))):
+            p.start()
+            self.addCleanup(p.stop)
+        for name in ("RESUME_ROOM", "RESUME_ONLY", "MACHINE_WHY"):
+            self.addCleanup(setattr, serve, name, None)
+
+    def put(self, *jobs):
+        (self.root / "board.json").write_text(json.dumps({"jobs": list(jobs)}))
+
+    def job(self, job_id):
+        return self.serve.board.find(self.serve.board.read_board(self.root), job_id)
+
+    @staticmethod
+    def queued(job_id, action, stage, **extra):
+        return dict({"id": job_id, "stage": stage, "play_queued": "2026-11-24T22:50:00+00:00",
+                     "queued_launch": {"action": action, "prompt": f"/trevskills-scrum {action} {job_id}", "stage": stage}},
+                    **extra)
+
+    def approve(self, **extra):
+        return self.queued("001-edit", "approve", "needs-human", **extra)
+
+    def test_hand_queue_tick_records_machine_hold(self):
+        # board.hand_queued takes only a `start` launch, so the hand pass's job is a hand-queued start
+        self.put(self.queued("001-hand", "start", "spec", started_by="hand"))
+        with mock.patch.object(self.serve, "spawn", return_value="log") as spawn, \
+                mock.patch.object(self.serve.board, "machine_ok", return_value=self.CPU):
+            self.serve.RESUME_ROOM = 3
+            self.assertEqual(self.serve.hand_queue_tick(), set())
+        spawn.assert_not_called()
+        self.assertEqual(self.serve.RESUME_ROOM, 0)
+        job = self.job("001-hand")
+        self.assertEqual(job["machine_hold"], "CPU load 340% of 8 cores (> 300%)")
+        self.assertEqual(job["play_queued"], "2026-11-24T22:50:00+00:00")
+        self.assertEqual(job["queued_launch"]["action"], "start")
+
+    def test_hand_queue_tick_free_disk_skip_writes_none(self):
+        self.put(self.queued("001-hand", "start", "spec", started_by="hand"))
+        with mock.patch.object(self.serve, "spawn", return_value="log") as spawn, \
+                mock.patch.object(self.serve.board, "machine_ok", return_value="free disk 3 GB (< 10 GB)"):
+            self.serve.RESUME_ROOM = 3
+            self.serve.hand_queue_tick()
+        spawn.assert_not_called()
+        self.assertNotIn("machine_hold", self.job("001-hand"))
+
+    def test_launch_queued_stop_records_machine_hold(self):
+        job = self.approve()
+        self.put(job)
+        self.serve.RESUME_ROOM, self.serve.MACHINE_WHY = 0, self.CPU  # watchdog_tick's refusal zeroed the budget
+        with mock.patch.object(self.serve, "spawn", return_value="log") as spawn:
+            self.assertEqual(self.serve.launch_queued("repo", self.root, job, [job]), "stop")
+        spawn.assert_not_called()
+        live = self.job("001-edit")
+        self.assertEqual(live["machine_hold"], "CPU load 340% of 8 cores (> 300%)")
+        self.assertEqual(live["queued_launch"]["action"], "approve")
+        self.assertEqual(live["play_queued"], "2026-11-24T22:50:00+00:00")
+
+    def test_launch_queued_stop_without_machine_refusal_writes_none(self):
+        job = self.approve()
+        self.put(job)
+        with mock.patch.object(self.serve, "spawn", return_value="log") as spawn:
+            self.serve.RESUME_ROOM, self.serve.MACHINE_WHY = 0, None  # the budget is spent, no machine refusal
+            self.assertEqual(self.serve.launch_queued("repo", self.root, job, [job]), "stop")
+            # solo_only holds it beside a queued solo run: not a machine refusal, even with a reason this tick
+            self.serve.RESUME_ROOM, self.serve.MACHINE_WHY = 2, self.CPU
+            self.serve.RESUME_ONLY = (str(self.root.resolve()), "009-solo")
+            self.assertEqual(self.serve.launch_queued("repo", self.root, job, [job]), "stop")
+        spawn.assert_not_called()
+        self.assertNotIn("machine_hold", self.job("001-edit"))
+
+    def test_machine_hold_cleared_on_start_and_unqueue(self):
+        held = self.approve(machine_hold=self.CPU)
+        moved = dict(self.queued("002-moved", "approve", "needs-human", machine_hold=self.CPU), stage="build")
+        other = self.queued("003-other", "approve", "needs-human", machine_hold=self.CPU)
+        self.put(held, moved, other)
+        self.serve.RESUME_ROOM, self.serve.MACHINE_WHY = 1, self.CPU
+        with mock.patch.object(self.serve, "spawn", return_value="log"):
+            self.assertEqual(self.serve.launch_queued("repo", self.root, held, [held]), "started")
+            self.assertEqual(self.serve.launch_queued("repo", self.root, moved, [moved]), "dropped")
+        self.assertNotIn("machine_hold", self.job("001-edit"))
+        self.assertNotIn("machine_hold", self.job("002-moved"))
+        self.serve.unqueue(self.root, other)
+        self.assertNotIn("machine_hold", self.job("003-other"))
+        self.assertNotIn("queued_launch", self.job("003-other"))
+
+    def test_note_machine_hold_skips_unqueued_job(self):
+        self.put({"id": "001-edit", "stage": "needs-human"})
+        self.serve.note_machine_hold(self.root, "001-edit", self.CPU)
+        self.serve.note_machine_hold(self.root, "404-gone", self.CPU)  # gone from the board: no error
+        self.assertNotIn("machine_hold", self.job("001-edit"))

@@ -475,6 +475,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 live.pop("play_queued_manual", None)
                 live.pop("queued_launch", None)
                 live.pop("ram_hold", None)
+                live.pop("machine_hold", None)  # job 1540: started, so no machine_ok check holds it
                 if manual:  # Trevor's click: this session's cool-down checkpoints let it through
                     live["manual_run"] = True
                 else:
@@ -751,6 +752,7 @@ RESUME_ROOM: int | None = None  # watchdog_tick's per-tick resume budget (board.
 E2E_RESUMED: bool | None = None  # one E2E-queue resume per watchdog_tick across projects; None outside a tick = one per call
 RESUME_ONLY: tuple[str, str] | None = None  # (resolved scrum path, job id) of the queued solo holder (resume_budget):
 # only its own queued launch may spend RESUME_ROOM; None = any job may
+MACHINE_WHY: str | None = None  # job 1540: the board.machine_ok refusal that zeroed this tick's RESUME_ROOM, None when clear
 
 
 def solo_only(root, job_id) -> bool:
@@ -815,8 +817,19 @@ def launched_since(project, t) -> bool:
 PLAY_QUEUED = "queued, starts next"
 
 
+def note_machine_hold(root, job_id, why):
+    """Job 1540: write machine_hold (the board.machine_ok refusal `why`) on the live job, under the board lock, only
+    while it still has play_queued or queued_launch, so its card names the check it waits on. A job gone from the
+    board is left alone."""
+    with board.locked_board(root) as b:
+        live = next((j for j in b["jobs"] if j.get("id") == job_id), None)
+        if live and (live.get("play_queued") or live.get("queued_launch")):
+            live["machine_hold"] = why
+
+
 def unqueue(root, job):
-    """Drop the job's play_queued flag (with its play_queued_manual marker and ram_hold) and queued_launch, when it has one."""
+    """Drop the job's play_queued flag (with its play_queued_manual marker, ram_hold and machine_hold) and queued_launch,
+    when it has one."""
     if job.get("play_queued") or job.get("queued_launch"):
         with board.locked_board(root) as b:
             live = board.find(b, job["id"])
@@ -824,6 +837,7 @@ def unqueue(root, job):
             live.pop("play_queued_manual", None)
             live.pop("queued_launch", None)
             live.pop("ram_hold", None)
+            live.pop("machine_hold", None)
 
 
 def launch_queued(project, root, job, jobs) -> str:
@@ -833,7 +847,9 @@ def launch_queued(project, root, job, jobs) -> str:
     "waits" (spawn held it again: the room goes back, and when the job is still queued (re-read; LiveSession unqueues
     it) the hold is noted queued_launch:<id> (note_hold) for pulse_tick) or "started". One held past RAM_HOLD_SECS
     (held_over) re-runs with idle=True, as idle_claim's does, while board.machine_ok(root, claim=True) passes (job
-    1356). A click Trevor made (play_queued_manual) is gated as his click: no CPU gate."""
+    1356). A click Trevor made (play_queued_manual) is gated as his click: no CPU gate. A "stop" while MACHINE_WHY names
+    this tick's machine_ok refusal (never a solo_only hold) writes it as machine_hold (note_machine_hold); once
+    take_room passes, machine_hold is dropped (job 1540)."""
     launch, manual = job["queued_launch"], bool(job.get("play_queued_manual"))
     if running(project, job["id"]) or job["stage"] != launch["stage"]:
         unqueue(root, job)
@@ -842,7 +858,12 @@ def launch_queued(project, root, job, jobs) -> str:
         return "skip"  # Runs on: shop never starts here; it stays queued for shop_tick
     if not take_room(root, job["id"]):
         mark_ram_hold(project, root, jobs)
+        if MACHINE_WHY and RESUME_ROOM is not None and not solo_only(root, job["id"]):
+            note_machine_hold(root, job["id"], MACHINE_WHY)
         return "stop"
+    if job.get("machine_hold"):  # job 1540: past the machine gate, so its reason no longer holds it
+        with board.locked_board(root) as b:
+            board.find(b, job["id"]).pop("machine_hold", None)
     # job 1356: held past RAM_HOLD_SECS while machine_ok(claim=True) has room, it skips the RAM gate as idle_claim's does
     idle = held_over(job.get("play_queued")) and not board.machine_ok(root, claim=True)
     if spawn(project, root, job["id"], launch["action"], launch["prompt"], manual=manual, idle=idle) is None:
@@ -861,7 +882,8 @@ def hand_queue_tick() -> set[str]:
     """watchdog_tick's first launch pass (job 1454), before any project's play_queue_tick or auto_resume: start every
     registered project's hand-queued starts (board.hand_queued), oldest play_queued first across projects (ties: project,
     then id), each through launch_queued on the tick's resume budget. Before each, board.machine_ok(root): a refusal
-    other than free disk sets RESUME_ROOM to 0 (inside a tick) and ends the pass, a free-disk refusal skips that job; a "stop" from
+    other than free disk sets RESUME_ROOM to 0 (inside a tick), writes the refusal as that job's machine_hold
+    (note_machine_hold, job 1540) and ends the pass, a free-disk refusal skips that job; a "stop" from
     launch_queued ends the pass too. A job solo_only holds is skipped (job 1375). Returns the projects where one started
     ("started"), waits on spawn's gate ("waits") or was left queued by a "stop", so watchdog_tick claims nothing new."""
     global RESUME_ROOM
@@ -883,6 +905,7 @@ def hand_queue_tick() -> set[str]:
         if refused:
             if RESUME_ROOM is not None:
                 RESUME_ROOM = 0  # inside watchdog_tick: no room on this machine, nothing starts or resumes this tick
+            note_machine_hold(root, job_id, refused)
             break
         result = launch_queued(project, root, job, jobs)
         if result in ("started", "waits", "stop"):
@@ -4777,7 +4800,7 @@ def watchdog_tick():
     guard; job 1312), then hard_stop_tick once (stops every scrum session on an account at board.HARD_STOP_PCT 7d, in
     its own guard; Trevor 2026-11-20). A no-git project (board.no_git, job 1362) runs every pass, and each git or gh
     pass returns early for it (main_ff_tick, e2e_full_tick, ui_sweep_tick, reclaim_disk, cloud_tick, actions_alert)."""
-    global RESUME_ROOM, E2E_RESUMED, RESUME_ONLY
+    global RESUME_ROOM, E2E_RESUMED, RESUME_ONLY, MACHINE_WHY
     try:
         board.record_cpu_sample()  # cpu_busy_pct's reading; first, so this tick's machine_ok sees it
     except (Exception, SystemExit) as e:
@@ -4813,7 +4836,7 @@ def watchdog_tick():
         print(f"watchdog: hard stop: {e}", file=sys.stderr, flush=True)
     busy, alive, seen, candidates, idle = {}, once(lambda: board.session_alive_fn()), [], [], []
     pending = disk_short = False
-    RESUME_ROOM, E2E_RESUMED = resume_budget(), False
+    RESUME_ROOM, E2E_RESUMED, MACHINE_WHY = resume_budget(), False, None
     try:
         hand = set()
         try:  # job 1454: hand-queued starts across projects, oldest first, before any resume or claim spends the room
@@ -4845,6 +4868,7 @@ def watchdog_tick():
                     disk_short = bool(refused and refused.startswith("free disk"))
                 if refused:
                     RESUME_ROOM = 0  # no room on this machine: nothing resumes this tick
+                    MACHINE_WHY = refused  # job 1540: a queued launch launch_queued stops names it (machine_hold)
                 tick_start = time.time()
                 resumed = play_queue_tick(project, root, jobs)  # Trevor's queued Play goes first
                 resumed = auto_resume(project, root, jobs) or resumed
@@ -4879,7 +4903,7 @@ def watchdog_tick():
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: idle claim: {e}", file=sys.stderr, flush=True)
     finally:
-        RESUME_ROOM, E2E_RESUMED, RESUME_ONLY = None, None, None
+        RESUME_ROOM, E2E_RESUMED, RESUME_ONLY, MACHINE_WHY = None, None, None, None
     played = False
     if not pending and candidates and board.live_sessions() == 0:
         try:

@@ -1029,6 +1029,7 @@ def abort_job(root, job, requeue, reason):
     job.pop("play_queued_manual", None)
     job.pop("queued_launch", None)
     job.pop("ram_hold", None)
+    job.pop("machine_hold", None)  # job 1540: never a stale machine_ok reason on an aborted card
     if requeue:
         requeue_job(root, job, folder, feature)
     job["files"] = job_files(folder)  # after the spec move, so it never names a file that left the folder
@@ -9091,6 +9092,7 @@ def cmd_pause(root, job_id):
             j.pop("play_queued_manual", None)
             j.pop("queued_launch", None)
             j.pop("ram_hold", None)
+            j.pop("machine_hold", None)
             if j.get("autoPlayed"):
                 j["holdPause"] = True  # re-paused after an auto-play: deliberate, so the watchdog leaves it paused
         return [j["id"] for j in hit]
