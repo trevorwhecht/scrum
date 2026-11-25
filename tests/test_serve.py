@@ -8429,6 +8429,33 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(resume.call_args.kwargs, {"note": self.CHECKNOTE})
         self.assertNotIn("p/chk", s.AUTO_RESUME)
 
+    QUIETWAIT = "stalled: waiting on a quiet machine: the checks ran at load5 23.78 on 8 cores"
+
+    def quiet_sweep(self, load_pct, refusal=None):
+        s = self.serve
+        self.jobs = [{"id": "chk", "stage": "check", "stalled": True, "reason": self.QUIETWAIT, "loadWaits": 1}]
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT=str(load_pct)), mock.patch.object(s, "note_stall_hold") as hold:
+            resume = self.load_sweep(refusal)
+        self.assertNotIn("p/chk", s.AUTO_RESUME)
+        return resume, hold
+
+    def test_auto_resume_quiet_check_wait_holds_while_load_over_cores(self):
+        """Job 1536: the gates let 250% through, but the checks re-run only once the load is at or under the cores."""
+        resume, hold = self.quiet_sweep(250)
+        resume.assert_not_called()
+        hold.assert_called_once_with(self.root, "chk", "quiet_wait")
+
+    def test_auto_resume_quiet_check_wait_holds_on_gate_refusal(self):
+        resume, _ = self.quiet_sweep(40, self.serve.board.MACHINE_WAIT + "free RAM 1 GB")
+        resume.assert_not_called()
+
+    def test_auto_resume_quiet_check_wait_reruns_checks_on_quiet_mac(self):
+        resume, hold = self.quiet_sweep(100)
+        resume.assert_called_once()
+        self.assertEqual(resume.call_args.args[2]["id"], "chk")
+        self.assertEqual(resume.call_args.kwargs, {"note": self.CHECKNOTE})
+        hold.assert_not_called()
+
     SOLOWAIT = "stalled: waiting for a solo run: failed under machine load 3 times"
 
     def solo_sweep(self, refusal, live):

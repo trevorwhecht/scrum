@@ -2412,7 +2412,9 @@ def auto_resume(project, root, jobs):
     E2E cap and one-per-call Check and Build caps, spending no try and never parked as spent. A job waiting for a solo
     run (board.LOAD_SOLO_WAIT) resumes only when board.live_sessions() is 0, no full E2E runs (E2E_FULL) and nothing
     refuses it; board.mark_solo_run reserves the Mac for it first (board.solo_hold), and no other job resumes after it
-    in this call (noted solo_run), nor, inside a tick, in any later project (RESUME_ROOM = 0)."""
+    in this call (noted solo_run), nor, inside a tick, in any later project (RESUME_ROOM = 0). A check that failed at
+    load5 over cores (board.QUIET_CHECK_WAIT, job 1536) re-runs, spending no try, only once board.cpu_load_pct() is at
+    most 100 and nothing refuses it; until then it is noted quiet_wait."""
     global E2E_RESUMED, RESUME_ROOM
     now, busy, e2e_resumed, check_resumed, build_resumed = time.time(), False, bool(E2E_RESUMED), False, False
     solo_run = False  # a solo job resumed in this call: nothing else resumes after it (job 1361)
@@ -2509,6 +2511,13 @@ def auto_resume(project, root, jobs):
                 busy = True
                 CI_BILLING[key] = (False, now)
                 resume_job(project, root, job, jobs)
+            continue
+        if str(job.get("reason") or "").startswith(board.STALL + board.QUIET_CHECK_WAIT):  # job 1536: no try spent, never spent
+            if (board.cpu_load_pct() or 0) > 100:  # the gates pass up to MAX_CPU_LOAD_PCT; these checks failed above the cores
+                note_stall_hold(root, job["id"], "quiet_wait")
+            elif refused(job) is None and room(job):
+                busy = True
+                resume_job(project, root, job, jobs, note=LOAD_WAIT_NOTE)
             continue
         if str(job.get("reason") or "").startswith(board.STALL + board.LOAD_BLOCK_WAIT):  # no try spent, never spent
             if refused(job) is None and room(job):
