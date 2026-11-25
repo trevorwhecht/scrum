@@ -4356,12 +4356,17 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             text_k = kind_files[kind]
             self.assertNotIn("not built yet", text_k, kind)
             self.assertGreater(len(text_k.splitlines()), 10, kind)
-            for phrase in (f"$HOME/.claude/skills/{skill_name}/SKILL.md", "Spawn `edit-builder`", "fresh `edit-reviewer`",
+            for phrase in (f"$HOME/.claude/skills/{skill_name}/SKILL.md", "Spawn `edit-builder`",
                            (f"`$F/jobs/$ID/view.md` as one line `View: {app} <the file's absolute path>`" if kind != "edit-embroidery"
                             else "`View: Preview <absolute path of out/preview.png>`"),
                            f"$F/jobs/$ID/{ledger}", "--title EDIT_APPROVE"):
                 self.assertIn(phrase, text_k, (kind, phrase))
             self.assertEqual("--mcp-config" in text_k, kind != "edit-embroidery", kind)
+            # Job 1526: embroidery is one agent that builds and checks its own file; the other kinds keep their reviewer.
+            self.assertEqual("fresh `edit-reviewer`" in text_k, kind != "edit-embroidery", kind)
+            self.assertEqual("stage=review" in text_k, kind != "edit-embroidery", kind)
+        for phrase in ("End check", "## Checks", "**No garment:**", "structured or unstructured"):
+            self.assertIn(phrase, kind_files["edit-embroidery"], phrase)
         text = (skill / "SKILL.md").read_text()
         self.assertNotIn("## Video lane", text)
         body = [l for l in self.h2(text, "## Edit lane").splitlines()[2:] if l.strip()]
@@ -4374,13 +4379,10 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_edit_embroidery_ships_pdf_worksheet(self):
         """Job 1525: the embroidery lane builds, reviews and delivers the PDF worksheet."""
         text = self.lane("edit-embroidery")
-        s3 = text[text.index("\n3. **Build.**"):text.index("\n4. **Review.**")]
-        s4 = text[text.index("\n4. **Review.**"):text.index("\n5. **Version round.**")]
+        s3 = text[text.index("\n3. **Build.**"):text.index("\n4. **Check.**")]
         s6 = text[text.index("\n6. **One current version.**"):]
         for phrase in ("scripts/worksheet.py", "--title", "--garment", "after every rebuild"):
             self.assertIn(phrase, s3, phrase)
-        for phrase in ("PDF", "RECUT", "older than the DST"):
-            self.assertIn(phrase, s4, phrase)
         for phrase in ("DST, SVG and PDF", "`cmp`"):
             self.assertIn(phrase, s6, phrase)
 
