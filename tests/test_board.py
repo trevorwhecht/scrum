@@ -3503,6 +3503,14 @@ class BoardTest(unittest.TestCase):
         (d / "spec.md").write_text("# T\nLane: fast\n")
         self.assertFalse(board.light_job(self.root, {"id": "5-x", "lane": "standard"}), "the board lane wins")
 
+    def test_two_lane_clause_pins_nothing(self):
+        """`Lane: lilguy or fast.` names two lanes: feature_text writes no header line and header_in reads None (job 1560)."""
+        item = "Fix x. Lane: lilguy or fast. Hard stop auth."
+        self.assertEqual(board.feature_text(item), item + "\n")
+        self.assertIsNone(board.header_in(f"Fix x\nLane: lilguy or fast.\n", "Lane", board.LANES))
+        self.assertEqual(board.header_in("Fix x\nLane: fast, then more.\n", "Lane", board.LANES), "fast")
+        self.assertIn("Lane: debug", board.feature_text("Fix x. Lane: debug, cause unknown. Complex: no."))
+
     def test_light_job_project_profile(self):
         """project.md's Build: none and Has UI: no make a standard-lane job light; anything else or missing is not."""
         d = self.root / "jobs" / "6-y"

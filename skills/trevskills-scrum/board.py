@@ -5008,8 +5008,9 @@ def header_value(path: Path, key: str, words: tuple[str, ...]) -> str | None:
 
 def header_in(text: str, key: str, words: tuple[str, ...]) -> str | None:
     """header_value over text already read."""
-    m = re.search(rf"^{key}:\s*({'|'.join(words)})\b", re.split(r"^## ", text, maxsplit=1, flags=re.M)[0], re.M | re.I)
-    return m[1].lower() if m else None
+    w = "|".join(words)
+    m = re.search(rf"^{key}:\s*({w})\b(?!\W*\s+or\s+(?:{w})\b)", re.split(r"^## ", text, maxsplit=1, flags=re.M)[0], re.M | re.I)
+    return m[1].lower() if m else None  # `Lane: lilguy or fast.` names two words: pins neither (job 1560)
 
 
 def feature_text(text: str) -> str:
@@ -5018,7 +5019,8 @@ def feature_text(text: str) -> str:
     hdr = {}
     for m in re.finditer(r"\b(Lane|Complex|Runs on):\s*(\w+\b.*?)(?=\s+(?:Lane|Complex|Runs on):|\Z)", text, re.S):
         key, rest = m[1], " ".join(m[2].split())
-        if re.match(r"\w+", rest)[0].lower() in {"Lane": LANES, "Complex": ("yes", "no")}.get(key, RUNS_ON):  # "debug," / "no." count
+        words = {"Lane": LANES, "Complex": ("yes", "no")}.get(key, RUNS_ON)
+        if re.match(r"\w+", rest)[0].lower() in words and not re.match(rf"\w+\W*\s+or\s+(?:{'|'.join(words)})\b", rest, re.I):  # "debug," / "no." count; `<lane> or <lane>` pins none
             hdr[key] = rest
     first, _, more = text.rstrip("\n").partition("\n")
     return first + "\n" + "".join(f"{k}: {v}\n" for k, v in hdr.items()) + (more + "\n" if more else "")
