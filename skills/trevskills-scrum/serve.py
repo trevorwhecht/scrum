@@ -5081,7 +5081,7 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
         stuck_alert(now, why, sessions)
     except (Exception, SystemExit) as e:
         print(f"watchdog: pulse: stuck alert: {e}", file=sys.stderr, flush=True)
-    for step in (disk_alert_tick, claude_missing_tick):  # job 1497: low disk on 2 pulses, a missing claude CLI
+    for step in (disk_alert_tick, claude_missing_tick, signin_alert_tick):  # job 1497: low disk on 2 pulses, a missing claude CLI; job 1527: a sign-in near its end
         try:
             step(now)
         except (Exception, SystemExit) as e:
@@ -5185,7 +5185,7 @@ def stuck_mark(path: Path, now: float, key: str = "sent") -> None:
         except (OSError, ValueError):
             cur = {}
         clear = "dclear" if key == "dsent" else "clear"  # job 1497: the low-disk episode has its own clear count
-        own = path.name == "claude-missing.json" and board.is_num(cur.get("since")) if isinstance(cur, dict) else False
+        own = (path.name == "signin-alert.json" or path.name == "claude-missing.json" and board.is_num(cur.get("since"))) if isinstance(cur, dict) else False
         if isinstance(cur, dict) and (key == "isent" or own or board.is_num(cur.get(clear)) and cur[clear] < STUCK_ALERT_CLEAR):
             stuck_write(path, {**cur, key: now}, cur)
 
@@ -5526,6 +5526,75 @@ def claude_missing_tick(now: float, probe=None, send=None, background=None) -> s
         return None
     text = f"The claude CLI is missing on this Mac, so no scrum session can start. Reinstall it with {CLAUDE_REINSTALL}"
     return alert_dispatch(claude_missing_path(), now, "claude CLI missing", text, "sent", send, background)
+
+
+SIGNIN_ALERT_DAYS = 5  # signin_alert_tick: text once the earliest end date is this many days away or less
+SIGNIN_RE = re.compile(r"Warning: this sign-in ends between (\d{4}-\d\d-\d\d) and (\d{4}-\d\d-\d\d)")
+
+
+def signin_ends() -> dict:
+    """{account name: (earliest, latest) end date} from the `Warning: this sign-in ends between <date> and <date>` line
+    in the first 4 KB of each account's newest non-empty run log (by mtime) across every registered board's jobs (a job's
+    `account` and `runlog` are set together at spawn). Reads run logs only, never a credential file. An account whose
+    newest log has no such line is left out; an unreadable board or log is skipped."""
+    newest = {}
+    for repo in board.projects().values():
+        root = repo / "scrum"
+        try:
+            jobs = board.read_board(root)["jobs"]
+        except (Exception, SystemExit):
+            continue
+        for j in jobs:
+            if j.get("account") and j.get("runlog"):
+                log = root / j["runlog"]
+                try:
+                    st = log.stat()
+                except OSError:
+                    continue
+                t = st.st_mtime if st.st_size else 0  # a running `claude -p` log stays empty until it exits
+                if t > newest.get(j["account"], (0, None))[0]:
+                    newest[j["account"]] = (t, log)
+    out = {}
+    for name, (_, log) in newest.items():
+        try:
+            with log.open("rb") as f:
+                m = SIGNIN_RE.search(f.read(4096).decode("utf-8", "replace"))
+        except OSError:
+            continue
+        if m:
+            out[name] = m.groups()
+    return out
+
+
+def signin_alert_tick(now: float, send=None, background=None) -> str | None:
+    """Text Trevor once per account and end date when a Claude sign-in's earliest end date (signin_ends) is
+    SIGNIN_ALERT_DAYS days away or less, naming the account and its `claude auth login` (CLAUDE_CONFIG_DIR for an
+    account after the first, which board.spawn runs with it set). Sent texts are keyed `<account> <earliest date>` in
+    signin-alert.json beside pulse.log (stuck_mark), so a new sign-in's dates text again. Returns the text sent inline,
+    else None (one text a pulse)."""
+    path = board.pulse_path().with_name("signin-alert.json")
+    try:
+        sent = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        sent = {}
+    today = datetime.fromtimestamp(now).date()
+    accs, found = board.accounts(), signin_ends()
+    for acc in accs:
+        ends = found.get(acc.name)
+        if not ends or f"{acc.name} {ends[0]}" in sent:
+            continue
+        try:
+            if (datetime.strptime(ends[0], "%Y-%m-%d").date() - today).days > SIGNIN_ALERT_DAYS:
+                continue
+        except ValueError:
+            continue
+        home = str(Path.home())
+        where = str(acc.dir).replace(home, "~", 1) if str(acc.dir).startswith(home) else str(acc.dir)
+        login = "claude auth login" if acc == accs[0] else f"CLAUDE_CONFIG_DIR={where} claude auth login"
+        text = (f"The {acc.name} Claude sign-in ends between {ends[0]} and {ends[1]}, and every scrum job on it stops then."
+                f" Run {login} before {ends[0]}")
+        return alert_dispatch(path, now, f"{acc.name} sign-in ends {ends[0]}", text, f"{acc.name} {ends[0]}", send, background)
+    return None
 
 
 # --- live_check_tick: the `## Live checks` commands board.py live-record stored at Mark done (jobs/<id>/live-checks.json)
