@@ -8911,10 +8911,12 @@ def digest_auto(root, digest_id):
         else:
             out["applied"].append({"id": p["id"], "target": p["target"], "why": p["why"]})
             updates[p["id"]] = ("applied", None)
+    jobs = {}  # proposal id -> the job of its own repo's apply (job ids are local to each repo's board)
     for props in by_repo.values():
         applied, not_applied, job_id = digest_apply(root, digest_id, props)
         out["applied"] += applied
         out["job"] = out["job"] or job_id
+        jobs.update({q["id"]: job_id for q in not_applied if job_id and q["reason"].startswith("push failed")})
         by_id = {p["id"]: p for p in props}
         for q in not_applied:
             if q["reason"].startswith("old text found"):
@@ -8925,8 +8927,8 @@ def digest_auto(root, digest_id):
                 queue(by_id[q["id"]], q["reason"])
     with DIGEST_LOCK:
         digest_set_statuses(root, digest_id, updates)
-        if job_id := out["job"]:
-            digest_note(root, digest_id, {q["id"] for q in out["queued"] if q["reason"].startswith("push failed")}, job=job_id)
+        for pid, job_id in jobs.items():
+            digest_note(root, digest_id, {pid}, job=job_id)
     return out
 
 

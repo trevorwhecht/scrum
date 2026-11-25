@@ -6748,6 +6748,21 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(self.statuses(), ["applied"])
         self.assertEqual([j["stage"] for j in self.jobs()], ["aborted", "done"])
 
+    def test_push_failed_job_is_stamped_per_repo(self):
+        """Two repos in one digest, only the second push fails: its proposal carries the second repo's job id, and the
+        first repo's job id is never stamped on it (job ids are local to each repo's board)."""
+        a, b = Path(self.tmp.name) / "repo-a", Path(self.tmp.name) / "repo-b"
+        reply = {str(a): ([{"id": "p1", "target": "x", "why": "w"}], [], "J-A"),
+                 str(b): ([], [{"id": "p2", "reason": "push failed: boom"}], "J-B")}
+        self.digest([self.prop("p1", a / "f.md"), self.prop("p2", b / "f.md")])
+        with mock.patch.object(self.serve, "repo_of", side_effect=lambda t: (Path(t).parent, "f.md")), \
+                mock.patch.object(self.serve, "digest_apply", side_effect=lambda root, d, props, **kw: reply[str(Path(props[0]["target"]).parent)]), \
+                mock.patch.object(self.serve, "digest_queue_repo_edit"):
+            self.serve.digest_auto(self.scrum, "001")
+        ps = json.loads((self.scrum / "digests" / "001" / "proposals.json").read_text())["proposals"]
+        self.assertEqual([(p["id"], p.get("status"), p.get("job")) for p in ps],
+                         [("p1", None, None), ("p2", "queued", "J-B")])  # digest_apply is mocked, so p1 is never marked
+
     def test_retry_tick_applies_hold_from_another_root(self):
         """A digest in another project's scrum/ holding an edit to reg is retried against reg, not the tick's own repo."""
         self.held_dirty()
