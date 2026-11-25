@@ -4432,6 +4432,74 @@ class BoardTest(unittest.TestCase):
             board.cmd_abort(self.root, job_id, requeue=True, reason=reason)
             self.assertEqual(board.backlog_items(self.root)[-1]["after"], [])
 
+    # --- job 1538: a shop job requeued for the main Mac comes back Runs on main; a requeue keeps the claimed markers ---
+    MAIN_MAC = "requeue: the 680 checks live in the main Mac project folders; run it on the main Mac"
+
+    def requeued(self, feature, reason="requeue: spec writer produced nothing", shop=None, claimed=None):
+        """Abort a new job with a requeue and return (its id, the backlog lines). feature is its feature.md text (None:
+        no file), shop its board `shop` pid (None: not a shop job), claimed a backlog line written first, JOB standing
+        for the job's id (None: the backlog is left as it is)."""
+        job_id = board.cmd_new(self.root, "Sort checks")
+        if feature is not None:
+            (self.root / "jobs" / job_id / "feature.md").write_text(feature)
+        if shop is not None:
+            self.edit_jobs(**{job_id: {"stage": "cloud", "shop": shop, "worker": "shopmac"}})
+        if claimed is not None:
+            (self.root / "backlog.md").write_text("# Backlog\n" + claimed.replace("JOB", job_id) + "\n")
+        board.cmd_abort(self.root, job_id, requeue=True, reason=reason)
+        return job_id, (self.root / "backlog.md").read_text().splitlines()
+
+    def test_requeue_shop_job_naming_the_main_mac_ends_runs_on_main(self):
+        """Jobs 1507 and 1513: aborted on shopmac with a reason naming the main Mac, the line went back to the shop."""
+        for reason in (self.MAIN_MAC, "requeue: sort them on the MAIN MAC", "requeue: needs the Main Mac's folders"):
+            with self.subTest(reason=reason):
+                _, lines = self.requeued("Sort checks\nLane: standard.\n", reason, shop=36943)
+                self.assertEqual(lines[-1], "- [ ] Sort checks Lane: standard. Runs on: main.")
+                text = board.backlog_items(self.root)[-1]["text"]  # serve.py shop_tick's fits skips this line
+                self.assertEqual(board.header_in(board.feature_text(text), "Runs on", board.RUNS_ON), "main")
+
+    def test_requeue_adds_runs_on_main_only_for_a_shop_job_naming_the_main_mac(self):
+        cases = {"shop job, other reason": ("requeue: shop session ended without a PR", 36943),
+                 "shop job, main in a longer word": ("requeue: the domain Mac mini and mainland Mac are down", 36943),
+                 "local job naming the main Mac": (self.MAIN_MAC, None)}
+        for name, (reason, shop) in cases.items():
+            with self.subTest(name):
+                _, lines = self.requeued("Sort checks\n", reason, shop)
+                self.assertEqual(lines[-1], "- [ ] Sort checks")
+
+    def test_requeue_for_the_main_mac_never_repeats_runs_on_main(self):
+        _, lines = self.requeued("Sort checks Runs on: main. Lane: fast.\n", self.MAIN_MAC, 36943)
+        self.assertEqual(lines[-1], "- [ ] Sort checks Runs on: main. Lane: fast.")
+        _, lines = self.requeued("Sort checks Runs on: shop.\nLane: fast.\n", self.MAIN_MAC, 36943)  # the last clause wins
+        self.assertEqual(lines[-1], "- [ ] Sort checks Runs on: shop. Lane: fast. Runs on: main.")
+
+    def test_requeue_keeps_each_claimed_marker_never_the_id(self):
+        """Job 1986 (onewitharts) came back with neither {p:4} nor {by:t} from its claimed line."""
+        cases = {"priority": ("{p:4}", "{p:4}"), "by t": ("{by:t}", "{by:t}"), "by back": ("{by:back}", "{by:back}"),
+                 "needs": ("{needs #ab12 #cd34}", "{needs #ab12 #cd34}"),
+                 "setup": ("{setup: make a key; paste it}", "{setup: make a key; paste it}"),
+                 "all four": ("{p:4} {needs #ab12} {setup: make a key} {by:t}", "{p:4} {needs #ab12} {setup: make a key} {by:t}")}
+        for name, (marks, kept) in cases.items():
+            with self.subTest(name):
+                claimed = f"- [x] [5] Add rora basics {{#rora}} {marks} → JOB <!-- one page -->"
+                job_id, lines = self.requeued("Add rora basics\n", claimed=claimed)
+                self.assertEqual(lines, ["# Backlog", claimed.replace("JOB", job_id), f"- [ ] Add rora basics {kept}"])
+        key = hashlib.sha1("Add rora basics #ab12".encode()).hexdigest()[:12]  # the loop guard's key counts the copied needs
+        self.assertEqual(self.by_id()[job_id]["requeued"], key)
+
+    def test_requeue_with_no_claimed_line_adds_no_marker(self):
+        _, lines = self.requeued("Add rora basics\n", claimed="- [x] Other item {#othr} {p:4} {by:t} → 999-other")
+        self.assertEqual(lines, ["# Backlog", "- [x] Other item {#othr} {p:4} {by:t} → 999-other", "- [ ] Add rora basics"])
+        (self.root / "backlog.md").unlink()
+        _, lines = self.requeued("Add rora basics\n")
+        self.assertEqual(lines, ["# Backlog", "- [ ] Add rora basics"])
+
+    def test_requeue_for_the_main_mac_keeps_claimed_markers_too(self):
+        claimed = "- [x] Sort checks Lane: standard. {p:3} {by:t} → JOB"
+        job_id, lines = self.requeued("Sort checks Lane: standard.\n", self.MAIN_MAC, 36943, claimed)
+        self.assertEqual(lines, ["# Backlog", claimed.replace("JOB", job_id),
+                                 "- [ ] Sort checks Lane: standard. Runs on: main. {p:3} {by:t}"])
+
     def test_abort_refuses_done_or_already_aborted_jobs(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["stage=done"])
@@ -4532,7 +4600,7 @@ class BoardTest(unittest.TestCase):
                           bb_b: {"parent": bb, "stage": "waiting", "depends_on": [bb_a]}})
         self.assertEqual(board.cmd_abort(self.root, schema, False, cascade=True), [schema, api])
         lines = (self.root / "backlog.md").read_text().splitlines()
-        self.assertEqual(lines[-1], "- [ ] Add API")  # abort_job's requeue: the feature text, as --requeue writes it
+        self.assertEqual(lines[-1], "- [ ] Add API {needs #sch2}")  # abort_job's requeue: the feature text and the claimed markers
         self.assertNotIn("- [ ] Add schema", lines)  # the root follows its own (absent) --requeue
         before = (self.root / "backlog.md").read_text()
         self.assertEqual(board.cmd_abort(self.root, bb_a, False, cascade=True), [bb_a, bb_b])
