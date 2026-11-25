@@ -7902,11 +7902,15 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
                          "rework.md, merge origin/<default> per Conflicts sub-steps 1-4, go to the Check gate (no `B ask`)")
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
-        if job["stage"] in WATCHED and _load_ask(question, title):  # the machine, not the bug: wait, no unblocker
+        # job 1536: a CHECKS_FAILING ask whose last local Test or E2E run had load5 over cores is load too
+        loaded = title == "CHECKS_FAILING" and job["stage"] in WATCHED and job["stage"] not in ("merging", "deploying") \
+            and checks_load(job)
+        if job["stage"] in WATCHED and (_load_ask(question, title) or loaded):  # the machine, not the bug: wait, no unblocker
             waits = job.get("loadWaits", 0)
             solo = waits >= LOAD_WAITS_MAX and not job.get("loadSolo")
             if waits < LOAD_WAITS_MAX or solo:
-                reason = f"{STALL}{LOAD_SOLO_WAIT if solo else LOAD_BLOCK_WAIT}"
+                wait = LOAD_SOLO_WAIT if solo else f"{QUIET_CHECK_WAIT} {loaded}" if loaded else LOAD_BLOCK_WAIT
+                reason = f"{STALL}{wait}"
                 for k in ("question", "options", "recommend", "stopTitle", "outcome"):
                     job.pop(k, None)
                 job.update(stalled=True, reason=reason, updatedAt=now(), **({"loadSolo": 1} if solo else {"loadWaits": waits + 1}))
@@ -8806,6 +8810,30 @@ def _load_ask(question, title) -> bool:
     LOAD_ASK_TITLES stop whose text matches LOAD_BLOCK_RE."""
     q = question.lower()
     return q.startswith(QUIET_PREFIX) or bool(LOAD_BLOCK_RE.search(question) and (q.startswith("debug: blocked") or title in LOAD_ASK_TITLES))
+
+
+QUIET_CHECK_WAIT = f"{QUIET_PREFIX}: the checks ran at load5"  # serve.py auto_resume re-runs them at cpu_load_pct <= 100
+HEAVY_CHECK_STEMS = ("check", "e2e")  # heavy-steps.log stems of a Test or Typecheck (check.lock) and an E2E (e2e.lock) run
+
+
+def checks_load(job) -> str | None:
+    """`<load5> on <cores> cores` when the last heavy-steps.log line (buildlock.log_step; SCRUM_HEAVY_STEPS_LOG
+    overrides the path) of a HEAVY_CHECK_STEMS run in the job's worktree shows load5 over cores, else None (job 1536).
+    A job with no worktree, an unreadable log or no such line gives None."""
+    if not job.get("worktree"):
+        return None
+    name = Path(job["worktree"]).name
+    log = Path(os.environ.get("SCRUM_HEAVY_STEPS_LOG") or Path.home() / ".claude" / "trevskills-scrum" / "heavy-steps.log")
+    try:
+        lines = log.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] in HEAVY_CHECK_STEMS and parts[2] == name:
+            m = re.search(r"\bload5=(\d+(?:\.\d+)?) cores=(\d+)\b", line)
+            return f"{m[1]} on {m[2]} cores" if m and int(m[2]) and float(m[1]) > int(m[2]) else None
+    return None
 CI_BILLING_WAIT = "waiting on GitHub billing to run CI"  # serve.py auto_resume retries it after 60 s, then when the banner clears
 # Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
 RESUMABLE = (STALLED, STALL, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")

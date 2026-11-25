@@ -18,6 +18,7 @@ os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly nil unless a test says so;
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ["SCRUM_SWAP_LOG"] = os.path.join(tempfile.mkdtemp(), "swap.json")  # never the real swap log
 os.environ["SCRUM_IDLE_HOLD"] = os.path.join(tempfile.mkdtemp(), "idle-hold.json")  # never the real idle-hold file
+os.environ["SCRUM_HEAVY_STEPS_LOG"] = os.path.join(tempfile.mkdtemp(), "heavy-steps.log")  # cmd_ask never reads the real one (job 1536)
 os.environ.setdefault("SCRUM_PS", os.devnull)  # no live sessions unless a test says so, whatever this machine runs
 os.environ.setdefault("SCRUM_USAGE", os.path.join(os.devnull, "no-usage.json"))  # never Trevor's real usage.json
 os.environ.pop("SCRUM_PW_CHANNEL", None)  # E2E commands carry no --config unless a test sets it
@@ -990,6 +991,76 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(job["stage"], "needs-human")
         self.assertTrue(job["question"].startswith("Failed under machine load 3 times on a quiet machine:"))
         self.assertNotIn("unblocks", job)
+
+    PLAIN_Q = "Build check failed: 2 E2E specs timed out in checkout.spec.ts"
+
+    def heavy_job(self, lines, stage="check"):
+        """Job 1536: a job in `stage` with worktree /wt/scrum-<id>, and a temp heavy-steps.log holding `lines`, each a
+        (stem, cwd basename or None for the job's own, load5, cores) row. Returns (job id, env patch)."""
+        job_id = self.staged(stage)
+        board.cmd_set(self.root, job_id, [f"worktree=/wt/scrum-{job_id}"])
+        log = self.root / "heavy-steps.log"
+        log.write_text("".join(f"2026-11-21T10:0{i}:00Z {stem} {cwd or 'scrum-' + job_id} wait=0.1s run=60.0s "
+                               f"load5={load5} cores={cores}\n" for i, (stem, cwd, load5, cores) in enumerate(lines)))
+        return job_id, mock.patch.dict(os.environ, SCRUM_HEAVY_STEPS_LOG=str(log))
+
+    def test_ask_checks_failing_on_loaded_mac_stalls_quietly(self):
+        job_id, env = self.heavy_job([("check", None, "2.10", 8), ("e2e", None, "23.78", 8)])
+        before = len(self.log_lines())
+        with env, mock.patch.object(board, "play") as play:
+            out = self.check_ask(job_id, self.PLAIN_Q, title="CHECKS_FAILING")
+        self.assertEqual(out, {"stalled": True})
+        play.assert_not_called()
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual((job["stage"], job["stalled"], job["reason"], job["loadWaits"]),
+                         ("check", True, "stalled: waiting on a quiet machine: the checks ran at load5 23.78 on 8 cores", 1))
+        for k in ("question", "options", "recommend", "stopTitle"):
+            self.assertNotIn(k, job)
+        self.assertEqual([(l["kind"], l.get("auto")) for l in self.log_lines()[before:]], [("stall", True)])
+
+    def test_ask_checks_failing_quiet_last_line_parks(self):
+        job_id, env = self.heavy_job([("e2e", None, "23.78", 8), ("check", None, "7.90", 8), ("build", None, "30.00", 8)])
+        with env, mock.patch.object(board, "play") as play:
+            self.check_ask(job_id, self.PLAIN_Q, title="CHECKS_FAILING")
+        play.assert_called_once()
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual((job["stage"], job["question"]), ("needs-human", self.PLAIN_Q))
+        self.assertNotIn("loadWaits", job)
+
+    def test_ask_checks_failing_other_jobs_loaded_line_parks(self):
+        job_id, env = self.heavy_job([("check", None, "3.00", 8), ("check", "scrum-999-other", "40.00", 8)])
+        with env, mock.patch.object(board, "play") as play:
+            self.check_ask(job_id, self.PLAIN_Q, title="CHECKS_FAILING")
+        play.assert_called_once()
+        self.assertEqual(next(j for j in self.jobs() if j["id"] == job_id)["stage"], "needs-human")
+
+    def test_ask_other_title_on_loaded_mac_parks(self):
+        job_id, env = self.heavy_job([("check", None, "23.78", 8)])
+        with env, mock.patch.object(board, "play") as play:
+            self.check_ask(job_id, "blocked: the spec names a file that does not exist", title="BUILDER_BLOCKED")
+        play.assert_called_once()
+        self.assertEqual(next(j for j in self.jobs() if j["id"] == job_id)["stage"], "needs-human")
+
+    def test_ask_checks_failing_loaded_mac_shares_load_wait_cap(self):
+        job_id, env = self.heavy_job([("check", None, "23.78", 8)])
+        with env, mock.patch.object(board, "play") as play:
+            for _ in range(4):
+                self.assertEqual(self.check_ask(job_id, self.PLAIN_Q, title="CHECKS_FAILING"), {"stalled": True})
+            job = next(j for j in self.jobs() if j["id"] == job_id)
+            self.assertEqual((job["reason"], job["loadSolo"]),
+                             ("stalled: waiting for a solo run: failed under machine load 3 times", 1))
+            self.check_ask(job_id, self.PLAIN_Q, title="CHECKS_FAILING")
+        play.assert_called_once()
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual((job["stage"], job["question"]),
+                         ("needs-human", "Failed under machine load 3 times on a quiet machine: " + self.PLAIN_Q))
+
+    def test_ask_checks_failing_in_merging_ignores_local_load(self):
+        job_id, env = self.heavy_job([("e2e", None, "23.78", 8)], stage="merging")
+        with env, mock.patch.object(board, "play") as play:
+            self.check_ask(job_id, "CI failed: 2 tests fail in test_orders", title="CHECKS_FAILING")
+        play.assert_called_once()
+        self.assertEqual(next(j for j in self.jobs() if j["id"] == job_id)["stage"], "needs-human")
 
     def test_ask_check_non_load_checks_failing_parks(self):
         job_id = self.staged("check")
