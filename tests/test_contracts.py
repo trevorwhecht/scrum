@@ -4371,6 +4371,19 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertEqual(text.index("\n## ", text.index("\n## Digest\n") + 1), text.index("\n## Edit lane\n"))
         self.assertEqual(text.index("\n## ", text.index("\n## Edit lane\n") + 1), text.index("\n## Final report\n"))
 
+    def test_edit_embroidery_ships_pdf_worksheet(self):
+        """Job 1525: the embroidery lane builds, reviews and delivers the PDF worksheet."""
+        text = self.lane("edit-embroidery")
+        s3 = text[text.index("\n3. **Build.**"):text.index("\n4. **Review.**")]
+        s4 = text[text.index("\n4. **Review.**"):text.index("\n5. **Version round.**")]
+        s6 = text[text.index("\n6. **One current version.**"):]
+        for phrase in ("scripts/worksheet.py", "--title", "--garment", "after every rebuild"):
+            self.assertIn(phrase, s3, phrase)
+        for phrase in ("PDF", "RECUT", "older than the DST"):
+            self.assertIn(phrase, s4, phrase)
+        for phrase in ("DST, SVG and PDF", "`cmp`"):
+            self.assertIn(phrase, s6, phrase)
+
     def test_edit_agents(self):
         """Job 1362: the edit project's agents share nothing with scrum-*; the reviewer judges only the files."""
         read = lambda name: (ROOT / "agents" / f"{name}.md").read_text()
