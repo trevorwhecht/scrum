@@ -15726,11 +15726,20 @@ class StuckAlertTest(unittest.TestCase):
         self.assertEqual(self.alert(2400), self.LEFTOVER)
         self.assertEqual(len(self.sent), 2)
 
-    def test_running_session_ends_the_episode(self):
+    def test_one_session_pulse_keeps_the_episode(self):
+        """Job 1539: a session pulse between holds (cloud-home jobs 1964, 1966) never re-texts within the repeat window."""
         self.alert(0), self.alert(150)
         self.assertIsNone(self.alert(300, sessions=1))
         self.assertIsNone(self.alert(450))
-        self.assertEqual(self.alert(600), self.LEFTOVER)
+        self.assertIsNone(self.alert(600))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_six_session_pulses_end_the_episode(self):
+        self.alert(0), self.alert(150)
+        for i in range(6):
+            self.alert(300 + i * 150, sessions=1)
+        self.assertIsNone(self.alert(1200))
+        self.assertEqual(self.alert(1350), self.LEFTOVER)
         self.assertEqual(len(self.sent), 2)
 
     def test_still_held_three_hours_after_the_last_text(self):
@@ -15953,15 +15962,16 @@ class StuckAlertTest(unittest.TestCase):
 
         def broken(argv):
             raise OSError("imsg-send.sh: exec format error")
-        self.alert(300, sessions=1)
-        self.serve.stuck_alert(self.NOW + 450, self.MEM, 0, send=broken)
+        for i in range(6):
+            self.alert(300 + i * 150, sessions=1)
+        self.serve.stuck_alert(self.NOW + 1200, self.MEM, 0, send=broken)
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertIsNone(self.serve.stuck_alert(self.NOW + 600, self.MEM, 0, send=broken))
+            self.assertIsNone(self.serve.stuck_alert(self.NOW + 1350, self.MEM, 0, send=broken))
         self.assertEqual(err.getvalue(), "watchdog: stuck alert: imsg-send.sh: exec format error\n")
         self.assertEqual(self.logged()[1:], [{"process": "Stuck alert", "result": "failed", "reason": self.MEM,
                                               "error": "imsg-send.sh: exec format error"}])
-        self.assertEqual(self.alert(750), self.LEFTOVER, "job 1458: a failed send is tried again on the next held pulse")
-        self.assertIsNone(self.alert(900), "a send that exited 0 ends the episode's text")
+        self.assertEqual(self.alert(1500), self.LEFTOVER, "job 1458: a failed send is tried again on the next held pulse")
+        self.assertIsNone(self.alert(1650), "a send that exited 0 ends the episode's text")
 
     def test_sent_is_written_only_after_a_send_exits_zero(self):
         """Job 1458: a timeout or nonzero exit leaves `sent` unset, so the next held pulse sends again."""
