@@ -555,10 +555,13 @@ CLAIM_HOLD_TEXT: dict[Path, tuple[str, float]] = {}  # resolved scrum/ root -> (
 def claim_hold_text(root, now=None):
     """The why text of root's project's newest claim hold (board.finish_first's full text or a machine_ok refusal) that
     note_hold recorded within PULSE_HOLD_TTL_S, else None: the dashboard's `New work held:` header line. An older one is dropped."""
-    key, now = Path(root).resolve(), time.time() if now is None else now
+    key = Path(root).resolve()
     with PULSE_LOCK:
         text, at = CLAIM_HOLD_TEXT.get(key, (None, 0))
-        if text is not None and now - at > PULSE_HOLD_TTL_S:
+        if text is None:
+            return None
+        now = time.time() if now is None else now
+        if now - at > PULSE_HOLD_TTL_S:
             del CLAIM_HOLD_TEXT[key]
             return None
     return text
