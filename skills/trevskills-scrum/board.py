@@ -1828,7 +1828,7 @@ PROCESSES = (
                     "project_notes_tick"), ()),
     ("Usage windows", ("window_tick", "hard_stop_tick"), ("windows",)),
     ("Pulse", ("pulse_tick", "publish_busy", "record_cpu_sample", "cooldown_chime"), ()),
-    ("Stuck alert", ("stuck_alert", "stuck_process", "disk_alert_tick", "claude_missing_tick"), ()),
+    ("Stuck alert", ("stuck_alert", "stuck_process", "disk_alert_tick", "claude_missing_tick", "signin_alert_tick"), ()),
     ("Live checks", ("live_check_tick",), ("jobs/*/live-checks.json",)),
     ("Run all and triage", ("cmd_runall_start", "cmd_triage_start", "cmd_triage_apply"), ("triage/*",)),
     ("Roadmap and BigBoy", ("cmd_roadmap_next",), ("roadmap.md", "jobs/*/track-*.md", "jobs/*/bigboy-review.md")),

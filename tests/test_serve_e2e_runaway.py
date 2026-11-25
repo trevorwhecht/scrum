@@ -1,6 +1,7 @@
 """Job 1497: e2e_runaway_tick stops a job E2E lock holder's group on a runaway footprint or low disk, disk_alert_tick
 texts low disk, claude_missing_tick texts a missing claude CLI. Real `sleep`-like processes stand in for holders."""
 import json, os, signal, subprocess, sys, tempfile, threading, time, unittest
+from datetime import datetime
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest import mock
@@ -316,6 +317,76 @@ class ClaudeMissingTest(AlertBase):
         probe = mock.Mock(return_value=False)
         self.assertIsNone(serve.claude_missing_tick(9999.0, probe=probe, send=self.send))
         probe.assert_not_called()
+
+
+class SigninAlertTest(AlertBase):
+    """Job 1527: signin_alert_tick texts once per account and end date, read from each account's newest run log."""
+    NOW = datetime(2026, 11, 23, 12).timestamp()
+
+    def setUp(self):
+        super().setUp()
+        owa = self.tmp / "home" / ".claude-owa"
+        owa.mkdir()
+        accs = json.dumps([["main", str(self.tmp / "home" / ".claude"), None], ["owa", str(owa), None]])
+        q = mock.patch.dict(os.environ, {"SCRUM_ACCOUNTS": accs})
+        q.start()
+        self.addCleanup(q.stop)
+        (self.repo / "scrum" / "runs").mkdir()
+        self.jobs = []
+
+    def runlog(self, job, account, text, age):
+        name = f"runs/{job}.log"
+        path = self.repo / "scrum" / name
+        path.write_text(text + "\nrest of the run\n")
+        os.utime(path, (self.NOW - age, self.NOW - age))
+        self.jobs.append({"id": job, "stage": "done", "account": account, "runlog": name})
+        (self.repo / "scrum" / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+
+    def warn(self, a, b):
+        return f"Warning: this sign-in ends between {a} and {b} (in 4 days at the earliest). Renewing it does not move those dates."
+
+    def tick(self, days=0):
+        return serve.signin_alert_tick(self.NOW + days * 86400, send=self.send)
+
+    def test_main_text_once_per_end_date(self):
+        self.runlog("1-old", "main", self.warn("2026-12-20", "2026-12-23"), 600)
+        self.runlog("2-new", "main", self.warn("2026-11-27", "2026-11-30"), 60)
+        self.runlog("2b-running", "main", "", 0)
+        (self.repo / "scrum" / "runs" / "2b-running.log").write_text("")  # a running session's log is still empty
+        text = self.tick()
+        self.assertIn("The main Claude sign-in ends between 2026-11-27 and 2026-11-30", text)
+        self.assertIn("Run claude auth login before 2026-11-27", text)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", text)
+        self.assertNotRegex(text, r"^\w+:")
+        self.assertIsNone(self.tick(1))
+        self.assertEqual(len(self.sent), 1)
+        self.runlog("3-renewed", "main", self.warn("2027-01-05", "2027-01-08"), 0)
+        self.assertIsNone(self.tick(1))  # 43 days out: no text
+        self.assertIsNone(self.tick(37))
+        self.assertIsNotNone(self.tick(38))  # the new end date texts once more
+        self.assertEqual(len(self.sent), 2)
+
+    def test_owa_names_config_dir(self):
+        self.runlog("1-main", "main", "no warning here", 0)
+        self.runlog("2-owa", "owa", self.warn("2026-11-28", "2026-12-01"), 0)
+        text = self.tick()
+        self.assertIn("The owa Claude sign-in", text)
+        self.assertIn("Run CLAUDE_CONFIG_DIR=~/.claude-owa claude auth login before 2026-11-28", text)
+
+    def test_far_or_missing_end_no_text(self):
+        self.runlog("1-main", "main", self.warn("2026-11-29", "2026-12-02"), 0)  # 6 days away
+        self.assertIsNone(self.tick())
+        self.assertEqual(self.sent, [])
+        self.assertIsNotNone(self.tick(1))
+
+    def test_failed_send_retried(self):
+        self.runlog("1-main", "main", self.warn("2026-11-27", "2026-11-30"), 0)
+        self.ok = False
+        self.assertIsNone(self.tick())
+        self.ok = True
+        self.assertIsNotNone(self.tick())
+        self.assertIsNone(self.tick())
+        self.assertEqual(len(self.sent), 2)
 
 
 if __name__ == "__main__":
