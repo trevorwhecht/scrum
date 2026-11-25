@@ -11375,7 +11375,7 @@ class LilguyFitTest(unittest.TestCase):
         self.assertLess(len(res.stdout), whole * 2 / 3)
 
     def test_lilguy_fit_false_prints_no_read(self):
-        for setup in (lambda: self.points(2), lambda: (self.points(1), (self.jd / "feature.md").write_text("Lane: fast\n"))):
+        for setup in (lambda: self.points(3), lambda: (self.points(1), (self.jd / "feature.md").write_text("Lane: fast\n"))):
             setup()
             out = io.StringIO()
             with redirect_stdout(out):
@@ -11450,9 +11450,17 @@ class LilguyFitTest(unittest.TestCase):
         (self.jd / "feature.md").write_text("Reword SKILL.md, agents/scrum-builder.md and lanes/lilguy.md\n")
         self.assertIs(self.fit()["fit"], True)
 
-    def test_lilguy_fit_points_2_fails(self):
+    def test_lilguy_fit_points_2_within_estimate_passes(self):
         self.points(2)
-        self.assertIs(self.fit()["fit"], False)
+        self.assertEqual(self.fit(), {"fit": True, "why": "backlog item is 2 points, estimate within lilguy limits"})
+        self.touch("board.py", "serve.py", "dashboard.html", "lanes/lilguy.md")
+        (self.jd / "feature.md").write_text("Edit board.py, serve.py, dashboard.html and lanes/lilguy.md\n")
+        got = self.fit()
+        self.assertIs(got["fit"], False)
+        self.assertIn("about 40 added lines in 4 files", got["why"])
+        (self.jd / "feature.md").write_text("Tweak the dashboard label text\n")
+        self.points(3)
+        self.assertEqual(self.fit(), {"fit": False, "why": "not tiny: 3 points, no Jev model answer"})
 
     def test_lilguy_fit_jev_confident_low_score_passes(self):
         self.jev('{"type":"score","score":2.8,"confidence":0.9}', '{"type":"score","score":1.2,"confidence":0.79}')

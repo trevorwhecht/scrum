@@ -5272,6 +5272,8 @@ def _lilguy_verdict(root, job_id: str) -> dict:
         return {"fit": True, "why": f"Jev score {score} at confidence {conf}"}
     if files:
         return {"fit": True, "why": f"names {files} file(s), estimate about {lines} added lines"}
+    if item and item["points"] == 2:  # the estimate is within the limits here: an over-limit one was refused above
+        return {"fit": True, "why": "backlog item is 2 points, estimate within lilguy limits"}
     pts = f"{item['points']} points" if item and item["points"] else "no points"
     jev = f"Jev score {score} at confidence {conf}" if raw else "no Jev model answer"
     return {"fit": False, "why": f"not tiny: {pts}, {jev}"}
