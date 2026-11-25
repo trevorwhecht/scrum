@@ -1067,11 +1067,16 @@ def names_job(named, job_id):
     return job_id in named or (m is not None and int(m[1]) in named)
 
 
+MAIN_MAC_RE = re.compile(r"\bmain\s+mac\b", re.I)  # a requeue reason that wants this Mac, not the shop (jobs 1507, 1513)
+
+
 def requeue_job(root, job, folder, feature):
     """Put an aborted job's item back on the backlog: its claimed line reopened in place when there is no feature.md,
     else a new line with feature.md's text (the title with neither). Caller holds the lock. job["requeued"] records the
     item_key of the line put back, as the next read parses it, for requeue_loop. A `requeue: depends on jobs ...`
-    reason adds an {after <repo>:<job>} marker for each named job on this board that is not done (requeue_after)."""
+    reason adds an {after <repo>:<job>} marker for each named job on this board that is not done (requeue_after).
+    A shop job (a `shop` field) whose reason names the main Mac (MAIN_MAC_RE, any case) gets a new line ending
+    ` Runs on: main.`, which serve.py shop_tick's fits skips, unless its text already reads Runs on main there."""
     lines, items = read_backlog(root)
     after = requeue_after(root, job)
     claimed = next((i for i in items if i["job"] == job["id"]), None)
@@ -1084,6 +1089,9 @@ def requeue_job(root, job, folder, feature):
             os.replace(folder / "spec.md", spec_path(root, claimed["text"]))
     else:
         text = clean(feature.read_text() if feature.exists() else job["title"], ITEM_MAX) or job["title"]
+        if job.get("shop") and MAIN_MAC_RE.search(str(job.get("reason") or "")) \
+                and header_in(feature_text(text), "Runs on", RUNS_ON) != "main":
+            text += " Runs on: main."  # after the cut, so ITEM_MAX never drops it
         lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None, "after": after}))
         at = len(lines) - 1
     write_backlog(root, lines)
