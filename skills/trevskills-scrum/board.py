@@ -3475,7 +3475,8 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
     gate prints its held minutes, longest first, ties in file order (job 1558): its head's "held" seconds in
     current-gates.json (note_current_gate), 0m with none, e.g. `vm_pressure 6h10m, cpu_queue 0m`; a depends_on:<id>
     gate's are the Queue pieces before that blocker's updatedAt when by_id has it at stage done, else its held
-    seconds, else the whole Queue.
+    seconds, else the whole Queue. With a Queue over 0, each head's minutes are clipped to it and the Queue the longest
+    head leaves prints last as `unnamed <m>` when it rounds to 1m or more (job 1568).
     by_id (write_timing's {id: board job}): when every depends_on blocker is on it at stage done (_deps_done_at), the
     Queue cell is `<total> (<after> after depends_on)`, <after> being the part of each Queue piece (feature.md to the
     claim, each dep-waits.txt span, spec.md to round 1's start) after the latest blocker's updatedAt."""
@@ -3591,7 +3592,12 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
             end = _epoch(dep.get("updatedAt")) if isinstance(dep, dict) and dep.get("stage") == "done" else None
             held[g] = ((held.get(g) or queue or 0) if end is None
                        else min(sum(max(min(b, end) - a, 0) for a, b in pieces), queue or 0))
-    gate_cell = ", ".join(f"{g} {_mins(held[g])}" for g in sorted(gates, key=lambda g: -held[g])) or "-"
+    if queue:  # job 1568: a head never holds more than the job's own Queue; the rest the longest leaves is unnamed
+        held = {g: min(h, queue) for g, h in held.items()}
+    cells_g = [f"{g} {_mins(held[g])}" for g in sorted(gates, key=lambda g: -held[g])]
+    if queue and _mins(rest := queue - max(held.values(), default=0)) != "0m":  # heads overlap (swap and vm_pressure in one tick): never summed
+        cells_g.append(f"unnamed {_mins(rest)}")
+    gate_cell = ", ".join(cells_g) or "-"
     queue_cell = _mins(queue)
     if queue is not None and (blocked := _deps_done_at(job, by_id)) is not None:  # the part after the planned wait
         after = min(sum(max(b - max(a, blocked), 0) for a, b in pieces), queue)

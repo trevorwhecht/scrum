@@ -2943,6 +2943,16 @@ def hold_start(root, job_id):
     board.queue_start(root, job_id)
 
 
+def passed_over(root, pool, gates):
+    """note_queue_gate each of `gates` on every shop_tick pool job not tagged Runs on main (board.stored_runs_on; no
+    Jev call): a job never sent to the shop has no shop wait. timing.md's Queue gate names the wait (jobs 1558, 1568)."""
+    for job in pool:
+        if board.stored_runs_on(root, job) == "main":
+            continue
+        for gate in gates:
+            note_queue_gate(root, job["id"], gate)
+
+
 def shop_tick(project, repo, root) -> bool:
     """Whenever a worker has a free slot, send the project's next held job (fast first, then lowest id), whether or not
     this Mac's machine guard (machine_ok, cpu_hot) is holding it; this Mac keeps launching its own work, and the claim
@@ -2977,8 +2987,10 @@ def shop_tick(project, repo, root) -> bool:
     the new job the same queued launch (held work). The job is then
     marked stage cloud with shop=<pid>, account= and worker=<alias>; a refused mark, or a local run started meanwhile,
     kills the session on that worker. No worker, a down one or nothing to send: no output, no board change; with no
-    worker free, each pool job not tagged main (board.stored_runs_on) gets a `shop_full:<alias>` gate (note_queue_gate)
-    for every shop_full() worker, so timing.md's Queue gate names that wait with its held minutes (job 1558). True when it
+    worker free, each pool job not tagged main (board.stored_runs_on) gets a `shop_full:<alias>` gate (passed_over)
+    for every shop_full() worker, so timing.md's Queue gate names that wait with its held minutes (job 1558), or, when
+    shop_full() names none, a `shop_unready:<alias>` gate for every shop.workers() worker; after a dispatch every other
+    pool job not tagged main gets `shop_behind:<sent id>` (job 1568). True when it
     dispatched. A dispatching pass over SHOP_SLOW_TICK seconds also prints one stderr line
     `shop: <project>: <id>: steps md_sync=<s> setup=<s> clone=<s> env_copy=<s> profile_copy=<s> start=<s>` (steps reached).
     """
@@ -3006,13 +3018,10 @@ def shop_tick(project, repo, root) -> bool:
         if not pool:
             return False
     w, account = next(shop_worker(), (None, None))  # the first with room, ready and an account
-    if w is None:
+    if w is None:  # job 1558: each job passed over names every full worker; job 1568: else every unready one
         maxed = shop_full() if pool else []
-        for job in pool:  # job 1558: each job passed over names every full worker, for timing.md's Queue gate
-            if board.stored_runs_on(root, job) == "main":  # never sent to the shop: no shop wait (no Jev call here)
-                continue
-            for alias in maxed:
-                note_queue_gate(root, job["id"], f"shop_full:{alias}")
+        passed_over(root, pool, [f"shop_full:{a}" for a in maxed]
+                    or [f"shop_unready:{x.alias}" for x in shop.workers()])
         return False
     alias, mains = w.alias, 0
     full = board.shop_heavy_by_worker()[alias] >= board.SHOP_HEAVY_PER_WORKER  # this worker already runs its heavy job
@@ -3157,6 +3166,7 @@ def shop_tick(project, repo, root) -> bool:
     if not stashed:
         SHOP_NOTES.pop(alias, None)
     print(f"shop: {project}: {job_id}: started on {alias} (pid {pid}, account {account})", flush=True)
+    passed_over(root, [j for j in pool if j["id"] != job_id], [f"shop_behind:{job_id}"])  # job 1568
     steps_line()
     return True
 

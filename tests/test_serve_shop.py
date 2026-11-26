@@ -448,12 +448,49 @@ class ShopTickTest(unittest.TestCase):
             root = self.project("mm", self.runall({"id": "043-a"}))
             self.project("aa", [])
             self.assertEqual(self.tick(), (False, "", ""))
-            self.assertIsNone(gates("043-a"))
+            self.assertEqual(gates("043-a"), "shop_unready:shopmac\n")  # job 1568: no full worker, so the unready one is named
         with self.subTest("a worker with a free slot takes the job: no gate"):
             self.sh.ready.return_value = READY
             root = self.project("mm", self.runall({"id": "043-a"}))
             self.assertIs(self.tick()[0], True)
             self.assertIsNone(gates("043-a"))
+
+    def test_unready_workers_stamp_shop_unready_gate(self):
+        """Job 1568: no worker free and none at its max (down, backed off): each pool job shop_tick passes over gets
+        `shop_unready:<alias>` for every worker, in queue-gates.txt and current-gates.json; a job tagged Runs on main and
+        a paused job get none."""
+        self.workers("shopmac 2 owa,main\nnewmac 1 main\n")
+        self.sh.ready.side_effect = lambda alias: dict(READY, ready=False)
+        self.serve.SHOP_RETRY_AT["newmac"] = time.time() + 600
+        root = self.project("mm", self.runall({"id": "043-a"}, {"id": "044-m", "runs_on": "main"},
+                                              {"id": "045-p", "paused": True}) + [self.queued("050-q")])
+        path = lambda j: root / "jobs" / j / "queue-gates.txt"
+        gates = lambda j: path(j).read_text() if path(j).exists() else None
+        self.assertEqual(self.tick(), (False, "", ""))
+        for job_id in ("043-a", "050-q"):
+            self.assertEqual(gates(job_id), "shop_unready:shopmac\nshop_unready:newmac\n", job_id)
+        self.assertEqual(sorted(json.loads((root / "jobs" / "050-q" / "current-gates.json").read_text())),
+                         ["shop_unready:newmac", "shop_unready:shopmac"])
+        self.assertEqual((gates("044-m"), gates("045-p")), (None, None))
+        self.assertEqual((self.job(root, "043-a")["stage"], self.job(root, "050-q")["stage"]), ("waiting", "spec"))
+
+    def test_dispatch_stamps_shop_behind_gate(self):
+        """Job 1568: when a worker takes one pool job, every other pool job shop_tick passed over gets
+        `shop_behind:<sent id>`; the sent job, a job tagged Runs on main and a failed dispatch get none."""
+        root = self.project("mm", self.runall({"id": "043-a"}, {"id": "044-b"}, {"id": "046-m", "runs_on": "main"})
+                            + [self.queued("050-q")])
+        path = lambda j: root / "jobs" / j / "queue-gates.txt"
+        gates = lambda j: path(j).read_text() if path(j).exists() else None
+        self.sh.clone.return_value = (False, "boom")
+        self.assertIs(self.tick()[0], False)
+        self.assertEqual([gates(j) for j in ("043-a", "044-b", "046-m", "050-q")], [None] * 4, "nothing was sent")
+        self.serve.SHOP_RETRY_AT.clear()
+        self.sh.clone.return_value = (True, "")
+        self.assertIs(self.tick()[0], True)
+        self.assertEqual(self.job(root, "043-a")["shop"], "4242")
+        self.assertEqual([gates(j) for j in ("043-a", "044-b", "046-m", "050-q")],
+                         [None, "shop_behind:043-a\n", None, "shop_behind:043-a\n"])
+        self.assertIn("shop_behind:043-a", json.loads((root / "jobs" / "044-b" / "current-gates.json").read_text()))
 
     def test_unready_worker_skipped_for_next(self):
         self.workers("shopmac 2 owa,main\nnewmac 2 owa,main\nthird 2 owa,main\n")
