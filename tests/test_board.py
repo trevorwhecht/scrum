@@ -11644,46 +11644,74 @@ class LilguyFitTest(unittest.TestCase):
         self.assertNotIn("read", got)
 
     def test_pipeline_read_prints_pipeline_parts(self):
-        read = board.pipeline_read()
-        self.assertEqual(read.count("sed -n "), 3)
-        res = subprocess.run(read, shell=True, capture_output=True, text=True)
+        """Job 1553: `start` reads newjob.md and review.md at the job's start; merge.md waits for the `merge` part."""
+        start = board.pipeline_read("start")
+        self.assertEqual(start.count("sed -n "), 2)
+        res = subprocess.run(start, shell=True, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0)
-        for want in ("2. **Base:**", "## Fast lane", "## Check gate", "## Approve", "## Visual diff (Check gate)",
-                     "3. **PR.**", "## Resuming the builder"):
+        for want in ("2. **Base:**", "## Fast lane", "## Check gate", "## Approve", "## Visual diff (Check gate)"):
             self.assertIn(want, res.stdout)
-        self.assertNotIn("1c. **Askme**", res.stdout)
+        for bad in ("1c. **Askme**", "3. **PR.**", "7. **Clean up:**", "## Resuming the builder"):
+            self.assertNotIn(bad, res.stdout)
+        merge = board.pipeline_read("merge")
+        self.assertEqual(merge.count("sed -n "), 1)
+        res = subprocess.run(merge, shell=True, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0)
+        for want in ("3. **PR.**", "7. **Clean up:**", "## Migrate", "## Resuming the builder"):
+            self.assertIn(want, res.stdout)
+        for bad in ("# Merge\n", "2. **Base:**", "## Fast lane", "## Approve"):
+            self.assertNotIn(bad, res.stdout)
 
     def test_pipeline_read_ranges_start_at_headings(self):
-        want = [("newjob.md", r"2\. \*\*Base:\*\*"), ("review.md", r"# Review"), ("merge.md", r"3\. \*\*PR\.\*\*")]
-        parts = self._parts(board.pipeline_read())
-        self.assertEqual(len(parts), 3)
-        for (name, a, b), (wname, ws) in zip(parts, want):
-            lines = (board.LANE_DIR / name).read_text().splitlines()
-            self.assertEqual(name, wname)
-            self.assertRegex(lines[a - 1], "^" + ws)
-            self.assertEqual(b, len(lines))
+        want = {"start": [("newjob.md", r"2\. \*\*Base:\*\*"), ("review.md", r"# Review")],
+                "merge": [("merge.md", r"3\. \*\*PR\.\*\*")]}
+        for part, wants in want.items():
+            parts = self._parts(board.pipeline_read(part))
+            self.assertEqual(len(parts), len(wants), part)
+            for (name, a, b), (wname, ws) in zip(parts, wants):
+                lines = (board.LANE_DIR / name).read_text().splitlines()
+                self.assertEqual(name, wname)
+                self.assertRegex(lines[a - 1], "^" + ws)
+                self.assertEqual(b, len(lines))
 
     def test_pipeline_read_missing_heading_prints_none(self):
         tmp = Path(self.tmp.name) / "lanes2"
         tmp.mkdir()
-        self.assertIsNone(board.pipeline_read(tmp))
+        for part in ("start", "merge"):
+            self.assertIsNone(board.pipeline_read(part, tmp), part)
         for n in ("newjob.md", "review.md", "merge.md"):
             shutil.copy(board.LANE_DIR / n, tmp / n)
-        self.assertIsNotNone(board.pipeline_read(tmp))
+        for part in ("start", "merge"):
+            self.assertIsNotNone(board.pipeline_read(part, tmp), part)
         text = (tmp / "merge.md").read_text()
         (tmp / "merge.md").write_text(text.replace("3. **PR.**", "3. **Pull request.**"))
-        self.assertIsNone(board.pipeline_read(tmp))
-        out = io.StringIO()
-        with mock.patch.object(board, "LANE_DIR", tmp), redirect_stdout(out):
-            board.main(["--dir", str(self.root), "lane-read"])
-        self.assertEqual(out.getvalue(), "read: none\n")
+        self.assertIsNone(board.pipeline_read("merge", tmp))
+        self.assertIsNotNone(board.pipeline_read("start", tmp))  # a merge.md anchor never blocks the start read
+        text = (tmp / "review.md").read_text()
+        (tmp / "review.md").write_text(text.replace("# Review (WAIT FOR ALL)", "# Peer review (WAIT FOR ALL)"))
+        self.assertIsNone(board.pipeline_read("start", tmp))
+        for part in ("start", "merge"):
+            out = io.StringIO()
+            with mock.patch.object(board, "LANE_DIR", tmp), redirect_stdout(out):
+                board.main(["--dir", str(self.root), "lane-read", part])
+            self.assertEqual(out.getvalue(), "read: none\n", part)
 
     def test_lane_read_prints_read_line(self):
-        out = io.StringIO()
-        with redirect_stdout(out):
-            code = board.main(["--dir", str(self.root), "lane-read"])
-        self.assertIn(code, (0, None))
-        self.assertEqual(out.getvalue(), "read: " + board.pipeline_read() + "\n")
+        shape = {"start": r"^read: sed -n \S+ \S+/lanes/newjob\.md; sed -n \S+ \S+/lanes/review\.md\n$",
+                 "merge": r"^read: sed -n \S+ \S+/lanes/merge\.md\n$"}
+        for part, pattern in shape.items():
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = board.main(["--dir", str(self.root), "lane-read", part])
+            self.assertIn(code, (0, None))
+            self.assertRegex(out.getvalue(), pattern)
+            self.assertEqual(out.getvalue(), "read: " + board.pipeline_read(part) + "\n")
+
+    def test_lane_read_needs_a_known_part(self):
+        for argv in (["lane-read"], ["lane-read", "all"]):
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+                board.main(["--dir", str(self.root), *argv])
+            self.assertEqual(cm.exception.code, 2, argv)
 
     def test_lilguy_fit_points_1_naming_skill_md_passes(self):
         self.points(1)

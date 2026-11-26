@@ -5158,8 +5158,15 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_start_reads_pipeline_lane_parts(self):
         lanes = SKILL_DIR / "lanes"
         start = next(l for l in (lanes / "commands.md").read_text().splitlines() if l.startswith("- **`/trevskills-scrum start <id>`**"))
-        for phrase in ("run `B lane-read`", "the command after `read:`", "with `read: none`, read the whole files"):
+        for phrase in ("run `B lane-read start`", "the command after `read:`", "with `read: none`, read the whole files"):
             self.assertIn(phrase, start)
+        # job 1553: merge.md waits for Merge, so its 30 KB no longer rides every turn from the start
+        for phrase in ("Leave `lanes/merge.md` unread until the session first reaches **Merge**",
+                       "run `B lane-read merge`", "with `read: none`, read the whole file)"):
+            self.assertIn(phrase, start)
+        self.assertLess(start.index("`B lane-read start`"), start.index("`B lane-read merge`"))
+        for phrase in ("`B lane-read`", "`lanes/review.md` and `lanes/merge.md` whole"):
+            self.assertNotIn(phrase, start)
 
 
 if __name__ == "__main__":
