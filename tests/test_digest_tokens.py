@@ -434,6 +434,28 @@ class WriteTokensTest(unittest.TestCase):
                       "scrum-review-ui 60% of job cost\n", text)  # main's 40% is not over agent_share
         self.assertIn("  - peak context: 600,000 tokens\n", text)
 
+    def test_lane_median_leaves_out_shop_worker_and_cloud_jobs(self):
+        """Digest 012: a fast job flagged 2.9x a median of shop runs whose agents ran on the shopmac worker."""
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "1-a", "stage": "done", "lane": "fast"}, {"id": "6-f", "stage": "done", "lane": "fast"},
+            {"id": "2-b", "stage": "done", "lane": "fast", "shop": True},
+            {"id": "3-c", "stage": "done", "lane": "fast", "worker": "shopmac"},
+            {"id": "4-d", "stage": "done", "lane": "fast", "cloud": {"session": "x"}},
+            {"id": "5-e", "stage": "done", "lane": "lilguy", "shop": True},
+            {"id": "7-g", "stage": "done", "lane": "lilguy", "worker": "shopmac"},
+            {"id": "8-h", "stage": "done", "lane": "lilguy", "shop": True}]}))
+        self.jobs_txt("1-a", "6-f", "2-b", "3-c", "4-d", "5-e", "7-g", "8-h")
+        for sid, job, usd in (("s1", "1-a", 0.90), ("s6", "6-f", 0.40), ("s2", "2-b", 0.10), ("s3", "3-c", 0.10),
+                              ("s4", "4-d", 0.10), ("s5", "5-e", 0.10), ("s7", "7-g", 0.90), ("s8", "8-h", 0.10)):
+            self.main(sid, job, self.replies([usd]))
+        text = self.tokens()
+        jobs = text[text.index("## Jobs\n"):text.index("## Flagged\n")]
+        for job in ("2-b", "3-c", "4-d", "5-e", "7-g", "8-h"):  # left out of the median, still listed
+            self.assertIn(f"- {job} · lane ", jobs)
+        # fast median is $0.65 from 1-a and 6-f only (with the shop runs it was $0.10, flagging 1-a at 9.0x);
+        # lilguy has no local job, so 7-g gets no median reason (with the shop runs: 9.0x of $0.10)
+        self.assertEqual(text[text.index("## Flagged\n"):], "## Flagged\nNone\n")
+
     def test_agent_share_skips_jobs_under_min_usd(self):
         self.assertEqual(board.TOKENS_FLAG["agent_share_min_usd"], 1.00)
         m = "claude-opus-4-5"
