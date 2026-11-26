@@ -483,7 +483,7 @@ class ContractTest(unittest.TestCase):
         cloud = (SKILL_DIR / "lanes" / "cloud.md").read_text()
         bullet = next(l for l in cloud.splitlines() if l.lstrip().startswith("- PR `OPEN` with label `scrum:needs-human`"))
         self.assertIn("B manual-add 'Closed unwatched, check:", bullet)
-        self.assertLess(bullet.index("Closed unwatched, check:"), bullet.index("becomes `B abort $ID --reason`"))
+        self.assertLess(bullet.index("Closed unwatched, check:"), bullet.index("becomes `B abort $ID --reason"))
 
     def test_approver_has_manual_checks_heading(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
