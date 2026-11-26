@@ -16541,7 +16541,15 @@ class HeavyCapReadyTest(HeavyCapBase):
         self.runall({"id": "011-h"}, {"id": "012-f", "lane": "fast"})
         out = board.cmd_ready(self.root, "010-p")
         self.assertEqual(out["ready"], ["012-f"])
+        self.assertEqual(out["heavy"], ["011-h"])
+        self.assertNotIn("left", out)
         self.assertEqual(board.find(board.read_board(self.root), "011-h")["stage"], "waiting")
+
+    def test_ready_shop_tagged_child_is_left_not_heavy(self):
+        self.runall({"id": "011-h", "runs_on": "shop"})
+        out = board.cmd_ready(self.root, "010-p")
+        self.assertEqual(out["left"], ["011-h"])
+        self.assertNotIn("heavy", out)
 
     def test_ready_with_shop_claims_heavy_child(self):
         self.runall({"id": "011-h"})

@@ -7735,6 +7735,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
         ready = []
         heavy_n = None  # heavy_count read once the first heavy waiting child is met (job 1314)
         left = []  # children left in waiting for a shop Mac: the parent keeps running
+        heavy_left = []  # children held at this Mac's heavy cap (job 1623: noted heavy_cap, never runs_on_shop)
         critical = lambda j: str(j.get("title") or "").startswith("Critical")
         built = {}  # holder id -> not unbuilt(), so each holder's branch is read once per call
         held_by = lambda pool: [o for o in pool  # a Critical kid skips holders that produced nothing (job 855)
@@ -7753,7 +7754,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
                 if heavy_n is None:
                     heavy_n = heavy_count(root)
                 if heavy_n >= HEAVY_PER_MAC:
-                    left.append(k["id"])  # at this Mac's heavy cap: waits for the shop Mac
+                    heavy_left.append(k["id"])  # at this Mac's heavy cap: waits for the shop Mac
                     continue
             light = (k.get("lane") or header_value(jobs_dir / k["id"] / "spec.md", "Lane", LANES)
                      or header_value(jobs_dir / k["id"] / "feature.md", "Lane", LANES)) in LIGHT_LANES
@@ -7873,7 +7874,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
                 parent["stopTitle"] = "BIGBOY_BLOCKED"
         out = {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
                "all_merged": finished == len(kids), "held": machine or ("ram_room" if ram_full else None),
-               **({"left": shop_left} if shop_left else {})}  # `left`: waiting children kept for the shop (serve.py start_ready notes it)
+               **({"left": shop_left} if shop_left else {}), **({"heavy": heavy_left} if heavy_left else {})}  # `left`: waiting children kept for the shop (serve.py start_ready notes it; `heavy`: those held at the heavy cap)
     if was != "needs-human" and parent["stage"] == "needs-human":
         play(sound("needs-human"))
     return out

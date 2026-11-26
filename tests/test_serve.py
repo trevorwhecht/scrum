@@ -16304,6 +16304,19 @@ class PulseTest(unittest.TestCase):
             s.auto_continue_tick({"app": True})
         self.assertIn("run_all_running", s.PULSE_HOLDS[root])
 
+    def test_start_ready_notes_heavy_cap_not_runs_on_shop(self):
+        """Job 1623: children cmd_ready returns under `heavy` are noted heavy_cap with the cap text, never runs_on_shop."""
+        s = self.serve
+        root = (self.base / "app" / "scrum").resolve()
+        self.addCleanup(s.PULSE_HOLDS.clear)
+        why = "heavy_cap(2/2): 2 heavy jobs on this Mac (001-a, 002-b)"
+        with mock.patch.object(s.board, "cmd_ready", return_value={"ready": [], "heavy": ["007-wait"], "held": None}), \
+                mock.patch.object(s.board, "heavy_cap_reason", return_value=why), \
+                mock.patch.object(s, "cpu_hot", return_value=False), mock.patch.object(s, "ready_waiting", return_value=[]), \
+                mock.patch.object(s, "note_held") as nh:
+            s.start_ready("app", root, "p")
+        nh.assert_called_once_with(root, "heavy_cap", ["007-wait"], why)
+
     def test_pulse_records_serve_starts(self):
         """Job 906: a launched non-manual start of a board job is logged with its gate's CPU reading as the next tick's
         `started`; manual, non-start and queued launches are not."""

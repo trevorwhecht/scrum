@@ -618,6 +618,8 @@ def start_ready(project, root, parent_id, manual=False):
         note_held(root, "usage_allowance" if tok == "other" else tok, ready_waiting(root, parent_id), held)
     elif out.get("left") and not out["ready"]:  # `any` children kept for the shop Mac (cmd_ready's shop-first wait)
         note_held(root, "runs_on_shop", out["left"])
+    if out.get("heavy") and not out["ready"] and not out.get("held"):  # job 1623: held at this Mac's heavy cap, not the shop-first wait
+        note_held(root, "heavy_cap", out["heavy"], board.heavy_cap_reason(root))
     for child in out["ready"]:
         spawn(project, root, child, "start", f"/trevskills-scrum start {child}", manual=manual)
     return out
