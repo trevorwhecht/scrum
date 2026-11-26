@@ -12447,7 +12447,10 @@ class DigestTrevorTest(unittest.TestCase):
         (self.transcripts / "proj").mkdir(parents=True)
         self.jev = base / "jev-rank.py"
         self.jev.write_text(JEV_STUB)
-        env = mock.patch.dict(os.environ, {"SCRUM_TRANSCRIPTS": str(self.transcripts), "SCRUM_JEV_RANK": str(self.jev)})
+        self.registry = base / "projects.json"
+        self.registry.write_text("[]")
+        env = mock.patch.dict(os.environ, {"SCRUM_TRANSCRIPTS": str(self.transcripts), "SCRUM_JEV_RANK": str(self.jev),
+                                           "SCRUM_REGISTRY": str(self.registry)})
         env.start()
         self.addCleanup(env.stop)
         self.day = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=1)
@@ -12481,6 +12484,62 @@ class DigestTrevorTest(unittest.TestCase):
 
     def transcript(self, name, *entries):
         (self.transcripts / "proj" / name).write_text("".join(json.dumps(e) + "\n" for e in entries))
+
+    def job(self, root, job_id, stage, feature):
+        """jobs/<job_id>/feature.md under root, and a board.json entry at stage (None: off the board)."""
+        (root / "jobs" / job_id).mkdir(parents=True)
+        (root / "jobs" / job_id / "feature.md").write_text(feature)
+        path = root / "board.json"
+        jobs = json.loads(path.read_text())["jobs"] if path.is_file() else []
+        path.write_text(json.dumps({"jobs": jobs + ([{"id": job_id, "stage": stage}] if stage else [])}))
+
+    def test_chat_matched_verbatim_quote(self):
+        """Job 1551: under a ## Chat entry, one `  matched:` line per job whose feature.md holds 6 words of the quote in
+        a row, case and punctuation folded; the line comes after the context line and is not counted as a quote."""
+        self.digest("001")
+        ask = "For digitizing why not have some kind of lilguy set up so we dont need a reviewer at the end"
+        self.job(self.root, "101-a", "done",
+                 'Trevor 2026-11-25: "for Digitizing, WHY not have some kind of lilguy set-up"\n')
+        self.job(self.root, "102-b", "done", "Trevor says so we don't need a reviewer at all.\n")
+        self.job(self.root, "103-c", "done", "A lilguy set up for small edits.\n")
+        self.transcript("a.jsonl", self.user("scrum ask"), {"type": "assistant", "message": {"content": "ok"}},
+                        self.user(ask))
+        got, text = self.run_trevor("001")
+        stamp = self.day.isoformat(timespec="seconds")
+        self.assertEqual(self.section(text, "## Chat"), [f'- {stamp} 0.9: "scrum ask"', f'- {stamp} 0.9: "{ask}"',
+                                                         "  context: ok", "  matched: repo/101-a (done)",
+                                                         "  matched: repo/102-b (done)"])
+        self.assertEqual(got["chat"], 2)
+
+    def test_chat_matched_needs_six_words_in_a_row(self):
+        """Job 1551: a feature.md that rewords the quote and shares at most 5 words in a row is not listed; 6 is."""
+        self.digest("001")
+        ask = "use one agent that does it and checks it at the end please"
+        self.job(self.root, "103-c", "done", "Trevor wants one agent that does it all, then checks it at the end.\n")
+        self.job(self.root, "104-d", "done", "One agent that does it and nothing more.\n")
+        self.transcript("a.jsonl", self.user(ask))
+        _, text = self.run_trevor("001")
+        stamp = self.day.isoformat(timespec="seconds")
+        self.assertEqual(self.section(text, "## Chat"), [f'- {stamp} 0.9: "{ask}"', "  matched: repo/104-d (done)"])
+
+    def test_chat_matched_any_registered_project_with_stage(self):
+        """Job 1551: matches come from this project and every registered one, each job with its board stage (an
+        aborted job included, `?` off the board); an unregistered repo is never read."""
+        self.digest("001")
+        ask = "now we can update our outsource button to drop the digitize part"
+        base = self.repo.parent
+        other, stray = base / "other" / "scrum", base / "stray" / "scrum"
+        self.registry.write_text(json.dumps([str(self.repo), str(other.parent), str(base / "gone")]))
+        self.job(self.root, "101-a", "build", f"Trevor: {ask}\n")
+        self.job(other, "201-a", "aborted", f"Moved here. Trevor: {ask.upper()}.\n")
+        self.job(other, "202-b", None, f"{ask}\n")
+        self.job(stray, "301-a", "done", f"{ask}\n")
+        self.transcript("a.jsonl", self.user(ask))
+        _, text = self.run_trevor("001")
+        stamp = self.day.isoformat(timespec="seconds")
+        self.assertEqual(self.section(text, "## Chat"), [f'- {stamp} 0.9: "{ask}"', "  matched: repo/101-a (build)",
+                                                         "  matched: other/201-a (aborted)",
+                                                         "  matched: other/202-b (?)"])
 
     def test_sections_and_since(self):
         first = self.digest("001")

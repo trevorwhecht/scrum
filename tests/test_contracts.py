@@ -2054,6 +2054,12 @@ class ContractTest(unittest.TestCase):
         for phrase in ("DIGEST_DIR/trevor.md", "    ## Trevor asked\n", "asked again after fix: yes|no", "`kind: note`",
                        "`  context: <text>` line", "which mistake a bare"):
             self.assertIn(phrase, reader, phrase)
+        read = reader[reader.index("- `DIGEST_DIR/trevor.md`"):reader.index("- `DIGEST_DIR/questions.md`")]
+        self.assertIn("one indented `  matched: <repo>/<job id> (<stage>)` line per job in any registered project",
+                      read)
+        asked = reader[reader.index("For `## Trevor asked`, use `DIGEST_DIR/trevor.md`."):]
+        asked = asked[:asked.index("\n\n")]
+        self.assertIn("A `done` job on an entry's `matched:` line is that entry's `fixed by:`", asked)
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()
         rule = digester[digester.index("**Trevor asked.**"):]
         rule = rule[:rule.index("\n\n")]
