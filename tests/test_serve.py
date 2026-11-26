@@ -2261,15 +2261,15 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("GET", "/api/machine")
             self.assertEqual(code, 200)
             self.assertEqual(out["usage"], {"accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400,
-                                                          "max_pct": 98}],
-                                            "allowance": 0, "fable": "paused", "hold_until": now + 3600})  # 93 % 5h: held
+                                                          "as_of": now, "stale": False, "max_pct": 98}],
+                                            "allowance": 0, "fable": "paused", "hold_until": now + 3600, "fable_account": "main"})  # 93 % 5h: held
             self.assertNotIn("five_hour_pct", json.dumps(out["usage"]), "the header has no 5h reading")
             self.assertEqual(out["verdict"], None, "the existing keys are unchanged")
-            fresh["written_at"] = time.time() - 301  # stale: the weekly reading stays, the allowance and holds go
+            fresh["written_at"] = stale_at = time.time() - 301  # stale: the weekly reading stays, the allowance and holds go
             usage.write_text(json.dumps(fresh))
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], {
-                "accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400, "max_pct": 98}],
-                "allowance": None, "fable": "unknown", "hold_until": None})
+                "accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400, "as_of": stale_at, "stale": True, "max_pct": 98}],
+                "allowance": None, "fable": "unknown", "hold_until": None, "fable_account": "main"})
             fresh["rate_limits"]["seven_day"]["resets_at"] = now - 60  # a past reset reads null, as claude_usage
             usage.write_text(json.dumps(fresh))
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown", "no account has a weekly reading")
@@ -2292,9 +2292,15 @@ class ServeTest(unittest.TestCase):
         accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [80, 90]]])
         with mock.patch.dict(os.environ, SCRUM_ACCOUNTS=accounts, SCRUM_USAGE=str(base / "main" / "usage.json")):
             self.assertEqual(self.serve.machine_usage(now), {
-                "accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": now + 86400, "max_pct": 98},
-                             {"name": "owa", "seven_day_pct": 90, "resets_at": now + 2 * 86400, "max_pct": 90}],
-                "allowance": None, "fable": "unknown", "hold_until": None})
+                "accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": now + 86400, "as_of": now - 86400, "stale": True, "max_pct": 98},
+                             {"name": "owa", "seven_day_pct": 90, "resets_at": now + 2 * 86400, "as_of": now, "stale": False, "max_pct": 90}],
+                "allowance": None, "fable": "unknown", "hold_until": None, "fable_account": "main"})
+            (base / "owa" / "usage.json").write_text(json.dumps({"written_at": now - 5 * 3600, "rate_limits": {
+                "seven_day": {"used_percentage": 4, "resets_at": now + 2 * 86400}}}))  # job 1589: a 5-hour-old reading
+            self.assertEqual({k: self.serve.machine_usage(now)["accounts"][1][k] for k in ("seven_day_pct", "as_of", "stale")},
+                             {"seven_day_pct": 4, "as_of": now - 5 * 3600, "stale": True})
+            (base / "owa" / "usage.json").write_text(json.dumps({"written_at": now, "rate_limits": {
+                "seven_day": {"used_percentage": 90, "resets_at": now + 2 * 86400}}}))
             accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [70, 85]]])
             with mock.patch.dict(os.environ, SCRUM_ACCOUNTS=accounts):
                 self.assertEqual(self.serve.machine_usage(now)["accounts"][1]["max_pct"], 85, "the 7d reserve, not the 5h one")
@@ -2303,9 +2309,24 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(self.serve.machine_usage(now)["accounts"][1]["max_pct"], 97)
             (base / "owa" / "usage.json").unlink()
             self.assertEqual(self.serve.machine_usage(now)["accounts"][1],
-                             {"name": "owa", "seven_day_pct": None, "resets_at": None, "max_pct": 90})
+                             {"name": "owa", "seven_day_pct": None, "resets_at": None, "as_of": None, "stale": False, "max_pct": 90})
             (base / "main" / "usage.json").unlink()
             self.assertEqual(self.serve.machine_usage(now), "unknown")
+
+    def test_machine_usage_fable_account(self):
+        """Job 1589: fable_account is the account whose dir holds usage_path(); "main" when none does."""
+        base = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        for n in ("main", "owa", "other"):
+            (base / n).mkdir()
+        now = time.time()
+        for n in ("main", "owa"):
+            (base / n / "usage.json").write_text(json.dumps({"written_at": now, "rate_limits": {
+                "seven_day": {"used_percentage": 10, "resets_at": now + 86400}}}))
+        accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), None]])
+        env = {k: v for k, v in os.environ.items() if k != "SCRUM_USAGE"}
+        for cfg, want in ((base / "owa", "owa"), (base / "other", "main")):
+            with mock.patch.dict(os.environ, {**env, "SCRUM_ACCOUNTS": accounts, "CLAUDE_CONFIG_DIR": str(cfg)}, clear=True):
+                self.assertEqual(self.serve.machine_usage(now)["fable_account"], want)
 
     def test_machine_usage_hold_until_later_reset(self):
         usage = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "usage.json"

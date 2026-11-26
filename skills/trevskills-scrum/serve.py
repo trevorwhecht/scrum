@@ -6630,12 +6630,14 @@ def machine_status():
 
 def machine_usage(now):
     """The meter's usage segment: one weekly reading per board.accounts() account, {"name", "seven_day_pct",
-    "resets_at", "max_pct"} (claude_usage's weekly %, whatever its age; max_pct, where its red starts, is its 7d
+    "resets_at", "as_of", "stale", "max_pct"} (claude_usage's weekly %, whatever its age; as_of its written_at, stale when
+    older than USAGE_STALE_SECS; fable_account is the account whose dir holds usage_path(), else "main"; max_pct, where its red starts, is its 7d
     board.account_reserve, else board.USAGE_HOLD_PCT), then board.pick_account's claims cap, board.fable_state and the later reset
     of a held window, which need usage.json under USAGE_STALE_SECS old (else null, "unknown", null). "unknown" when no
     account has a weekly reading."""
     accounts = [{"name": a.name, "seven_day_pct": (u := claude_usage(now, a.name))["weekly"],
-                 "resets_at": u["weekly_resets_at"],
+                 "resets_at": u["weekly_resets_at"], "as_of": u["as_of"],
+                 "stale": board.is_num(u["as_of"]) and now - u["as_of"] > board.USAGE_STALE_SECS,
                  "max_pct": dict(zip((k for k, _ in board.WINDOWS), board.account_reserve(a, now) or ())).get("seven_day", board.USAGE_HOLD_PCT)}
                 for a in board.accounts()]
     if all(a["seven_day_pct"] is None for a in accounts):
@@ -6644,7 +6646,8 @@ def machine_usage(now):
     allow = board.pick_account(now)[1]  # job 1184: the real claims cap, None while the primary has room; stale holds stay hidden
     held = [w["resets_at"] for _, _, w in board.held_windows(usage, now)] if allow is not None else []
     return {"accounts": accounts, "allowance": None if allow is None else int(allow),
-            "fable": board.fable_state(usage, now), "hold_until": max(held) if held else None}
+            "fable": board.fable_state(usage, now), "hold_until": max(held) if held else None,
+            "fable_account": next((a.name for a in board.accounts() if a.dir / "usage.json" == board.usage_path()), "main")}
 
 
 def claude_usage(now, account=None):
