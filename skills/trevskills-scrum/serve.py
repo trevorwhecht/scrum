@@ -2949,10 +2949,6 @@ SHOP_SLOW_TICK = 5  # seconds: a dispatching shop_tick pass longer than this pri
 SHOP_WHY = {}
 SHOP_ENDED = "requeue: shop session ended without a PR"
 SHOP_UNREADY_S = 3600  # shop_unready_tick: a worker not ready this long texts once (job 1618)
-# worker alias -> [time.time() it was first seen not ready, True once its text was dispatched]; memory only
-SHOP_UNREADY = {}
-
-
 def shop_unready_part(r: dict) -> str:
     """The first failed part of a shop.ready() result, as text: down, gh not logged in, node missing, claude missing,
     no account answering."""
@@ -2963,20 +2959,50 @@ def shop_unready_part(r: dict) -> str:
     return "no account answering"
 
 
+def shop_unready_load(path: Path) -> dict:
+    """shop-unready.json as {alias: {"since": num, "part": str, "sent": num}}; a missing or corrupt file, a non-dict
+    entry or a non-number time reads as empty (that key or the whole file). Never raises."""
+    try:
+        cur = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for alias, rec in (cur.items() if isinstance(cur, dict) else ()):
+        if isinstance(rec, dict):
+            out[alias] = {k: v for k, v in rec.items()
+                          if (k in ("since", "sent") and board.is_num(v)) or (k == "part" and isinstance(v, str))}
+    return out
+
+
 def shop_unready_tick(alias: str, part: str | None, now: float, send=None, background=None) -> str | None:
-    """Job 1618: track how long worker `alias` has stayed not ready (part = shop_unready_part, None = ready). Ready
-    drops its record, so the next outage is a new episode. Not ready for over SHOP_UNREADY_S and not yet texted: one
-    text through alert_dispatch naming the worker and part, never `<word>:` first. Returns the text sent inline, else None."""
-    if part is None:
-        SHOP_UNREADY.pop(alias, None)
-        return None
-    rec = SHOP_UNREADY.setdefault(alias, [now, False])
-    if now - rec[0] <= SHOP_UNREADY_S or rec[1]:
-        return None
-    rec[1] = True
+    """Jobs 1618, 1629: track how long worker `alias` has stayed not ready (part = shop_unready_part, None = ready) in
+    shop-unready.json, so a serve.py restart keeps the hour. Ready drops `since` and keeps `sent` (an entry whose `sent` is
+    older than STUCK_ALERT_REPEAT_S goes). Not ready for over SHOP_UNREADY_S: one text through alert_dispatch naming
+    the worker and part, never `<word>:` first, unless the last text for this worker and part is under
+    STUCK_ALERT_REPEAT_S old. `sent` is written by stuck_mark only once the text went out. Returns the text sent inline, else None."""
+    path = board.pulse_path().with_name("shop-unready.json")
+    with STUCK_LOCK:
+        old = shop_unready_load(path)
+        state = {k: dict(v) for k, v in old.items()}
+        rec = state.get(alias, {})
+        if part is None:
+            rec.pop("since", None)
+            if board.is_num(rec.get("sent")) and now - rec["sent"] < STUCK_ALERT_REPEAT_S:
+                state[alias] = rec
+            else:
+                state.pop(alias, None)
+            stuck_write_to(path, state, old)
+            return None
+        if rec.get("part") != part:
+            rec.pop("sent", None)  # a different part is a different problem
+        rec["part"] = part
+        rec.setdefault("since", now)
+        state[alias] = rec
+        stuck_write_to(path, state, old)
+        if now - rec["since"] <= SHOP_UNREADY_S or (board.is_num(rec.get("sent")) and now - rec["sent"] < STUCK_ALERT_REPEAT_S):
+            return None
     text = f"Shop worker {alias} has not been ready for over an hour: {part}. Shop jobs are waiting on it."
-    return alert_dispatch(board.pulse_path().with_name("shop-unready.json"), now, f"shop {alias} {part}", text,
-                          "sent", send, background)
+    return alert_dispatch(path, now, f"shop {alias} {part}", text, alias, send, background)
 
 
 def shop_worker():
@@ -5716,6 +5742,15 @@ STUCK_LOCK = threading.Lock()  # stuck_alert: guards stuck-alert.json's read-mod
 STUCK_SEND: threading.Thread | None = None  # the one send in flight, else None or a finished thread
 
 
+def stuck_write_to(path: Path, state: dict, old: dict) -> None:
+    """stuck_write for any file name: tmp + os.replace beside path, only when state differs from old. The caller holds STUCK_LOCK."""
+    if state != old:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(state))
+        os.replace(tmp, path)
+
+
 def stuck_write(path: Path, state: dict, old: dict) -> None:
     """Write stuck-alert.json (tmp + os.replace) only when state differs from old. The caller holds STUCK_LOCK."""
     if state != old:
@@ -5728,6 +5763,11 @@ def stuck_write(path: Path, state: dict, old: dict) -> None:
 def stuck_mark(path: Path, now: float, key: str = "sent") -> None:
     """Write `sent` = now to stuck-alert.json, when its episode is still live (fewer than STUCK_ALERT_CLEAR clear pulses; a send that outlived it marks nothing). key="isent" (the idle text) is written without that check: its episode is the quiet stretch."""
     with STUCK_LOCK:
+        if path.name == "shop-unready.json":  # job 1629: key is the worker alias; its entry gets sent = now
+            cur = shop_unready_load(path)
+            if key in cur:
+                stuck_write_to(path, {**cur, key: {**cur[key], "sent": now}}, cur)
+            return
         try:
             cur = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):

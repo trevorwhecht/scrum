@@ -512,7 +512,7 @@ class ShopTickTest(unittest.TestCase):
     def test_unready_over_an_hour_texts_once_until_ready(self):
         """Job 1618: one text naming worker and part after an hour not ready; again only after a ready in between."""
         s, sent = self.serve, []
-        s.SHOP_UNREADY.clear()
+        self.state_file().unlink(missing_ok=True)
         send = lambda argv: sent.append(argv[-1])
         with mock.patch.object(s, "alert_missing", return_value=None), \
                 mock.patch.object(s, "alert_argv", side_effect=lambda t: ["x", t]):
@@ -527,7 +527,85 @@ class ShopTickTest(unittest.TestCase):
             self.assertIsNone(s.shop_unready_tick("shopmac", "down", 9200.0, send, False))
             self.assertIsNotNone(s.shop_unready_tick("shopmac", "down", 12801.0, send, False))
             self.assertEqual(len(sent), 2)
-        s.SHOP_UNREADY.clear()
+
+    def state_file(self):
+        return self.board.pulse_path().with_name("shop-unready.json")
+
+    def tick_unready(self, part, now, sent, ok=True, bg=False):
+        def send(argv):
+            sent.append(argv[-1])
+            return subprocess.CompletedProcess(argv, 0 if ok else 1, "", "")
+        with mock.patch.object(self.serve, "alert_missing", return_value=None), \
+                mock.patch.object(self.serve, "alert_argv", side_effect=lambda t: ["x", t]):
+            return self.serve.shop_unready_tick("shopmac", part, now, send, bg)
+
+    def test_unready_restart_mid_outage_keeps_first_seen_and_last_text(self):
+        """Job 1629: the file, not memory, holds since and sent, so a restart neither restarts the hour nor re-texts."""
+        f, sent = self.state_file(), []
+        f.write_text(json.dumps({"shopmac": {"since": 1000, "part": "down"}}))
+        self.assertIsNotNone(self.tick_unready("down", 4601.0, sent))
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(json.loads(f.read_text())["shopmac"]["sent"], 4601.0)
+        f.write_text(json.dumps({"shopmac": {"since": 1000, "part": "down", "sent": 4000}}))
+        self.assertIsNone(self.tick_unready("down", 5000.0, sent))
+        self.assertEqual(len(sent), 1)
+
+    def test_unready_busy_send_thread_not_marked_sent(self):
+        """Job 1629: alert_dispatch sends nothing while a STUCK_SEND thread lives; sent stays unwritten, next tick texts."""
+        s, f, sent = self.serve, self.state_file(), []
+        f.write_text(json.dumps({"shopmac": {"since": 1000, "part": "down"}}))
+        busy = mock.Mock()
+        busy.is_alive.return_value = True
+        with mock.patch.object(s, "STUCK_SEND", busy):
+            self.assertIsNone(self.tick_unready("down", 5000.0, sent, bg=True))
+        self.assertEqual(sent, [])
+        self.assertNotIn("sent", json.loads(f.read_text())["shopmac"])
+        self.assertIsNotNone(self.tick_unready("down", 5060.0, sent))
+        self.assertEqual(len(sent), 1)
+
+    def test_unready_marks_sent_only_after_text_goes_out(self):
+        """Job 1629: a non-zero exit leaves sent unwritten (retry); an exit 0 writes sent for that worker only."""
+        f, sent = self.state_file(), []
+        f.write_text(json.dumps({"shopmac": {"since": 1000, "part": "down"}, "other": {"since": 1, "part": "down"}}))
+        self.tick_unready("down", 5000.0, sent, ok=False)
+        self.assertNotIn("sent", json.loads(f.read_text())["shopmac"])
+        self.tick_unready("down", 5060.0, sent)
+        self.assertEqual(len(sent), 2)
+        cur = json.loads(f.read_text())
+        self.assertEqual(cur["shopmac"]["sent"], 5060.0)
+        self.assertNotIn("sent", cur["other"])
+
+    def test_unready_flap_within_repeat_window_texts_once(self):
+        """Job 1629: ready keeps sent; a new outage inside STUCK_ALERT_REPEAT_S stays quiet, after it texts, a new part texts."""
+        f, sent = self.state_file(), []
+        f.unlink(missing_ok=True)
+        self.tick_unready("down", 0.0, sent)
+        self.assertIsNotNone(self.tick_unready("down", 3601.0, sent))
+        self.tick_unready(None, 3700.0, sent)
+        self.assertEqual(json.loads(f.read_text())["shopmac"], {"part": "down", "sent": 3601.0})
+        self.tick_unready("down", 3800.0, sent)
+        self.assertIsNone(self.tick_unready("down", 7500.0, sent))
+        self.assertEqual(len(sent), 1)
+        self.tick_unready(None, 7600.0, sent)
+        self.tick_unready("down", 14000.0, sent)
+        self.assertIsNotNone(self.tick_unready("down", 17601.0, sent))
+        self.assertEqual(len(sent), 2)
+        self.tick_unready(None, 17700.0, sent)
+        self.tick_unready("gh not logged in", 17800.0, sent)
+        self.assertIsNotNone(self.tick_unready("gh not logged in", 21401.0, sent))
+        self.assertEqual(len(sent), 3)
+
+    def test_unready_state_file_corrupt_is_empty(self):
+        """Job 1629: unreadable JSON, a non-dict, a non-dict entry and a non-number time read as empty, never raise."""
+        f, sent = self.state_file(), []
+        for body in ("{nope", "[1]", '{"shopmac": 5}', '{"shopmac": {"since": "x", "sent": "y", "part": "down"}}'):
+            with self.subTest(body):
+                f.write_text(body)
+                self.assertIsNone(self.tick_unready("down", 5000.0, sent))
+                self.assertEqual(sent, [])
+                self.assertEqual(json.loads(f.read_text())["shopmac"], {"part": "down", "since": 5000.0})
+        f.unlink()
+        self.assertIsNone(self.tick_unready(None, 1.0, sent))
 
     def test_dispatch_stamps_shop_behind_gate(self):
         """Job 1568: when a worker takes one pool job, every other pool job shop_tick passed over gets
