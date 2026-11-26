@@ -4252,6 +4252,118 @@ def docker_tick(idle: dict[str, Path], listening: list[tuple[int, int, str]], no
     return True
 
 
+SHOP_CLEANUP_EVERY = 600  # seconds between two shop_cleanup calls to one worker
+SHOP_CLEANUP_AT = {}  # worker alias -> time.time() of its last shop_cleanup call; memory only, like SHOP_RETRY_AT
+SHOP_FILE_AGE = 86400  # seconds a finished job's /private/tmp entry must be untouched before the worker script removes it
+# Runs on a worker through `python3 -` on stdin; shop_cleanup puts NUMS and IDS (finished job numbers and ids) above it.
+# main() takes its process list, cwds, folder, clock and kill as arguments so a test runs it against fakes.
+SHOP_CLEANUP_SCRIPT = r'''
+import os, re, shutil, subprocess, sys, time
+
+
+def main(nums, ids, procs=None, cwds=None, tmp="/private/tmp", now=None, kill=os.kill):
+    """(processes stopped, files removed) for the finished jobs in nums / ids."""
+    if not nums:
+        return 0, 0
+    now = time.time() if now is None else now
+    if procs is None:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True).stdout
+        procs = []
+        for line in out.splitlines():
+            f = line.split(None, 2)
+            if len(f) >= 2 and f[0].isdigit() and f[1].isdigit():
+                procs.append((int(f[0]), int(f[1]), f[2] if len(f) > 2 else ""))
+    if cwds is None:
+        cwds, pid = {}, None
+        out = subprocess.run(["lsof", "-d", "cwd", "-Fpn"], capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            if line[:1] == "p" and line[1:].isdigit():
+                pid = int(line[1:])
+            elif line[:1] == "n" and pid is not None:
+                cwds[pid] = line[1:]
+    tmp_re = re.compile(r"(?<![\w.-])(?:/private)?/tmp/scrum(?:%s)-" % "|".join(re.escape(n) for n in nums))
+    wt_re = re.compile(r"/\.claude/worktrees/scrum-(?:%s)(?![\w.-])" % "|".join(re.escape(i) for i in ids)) if ids else None
+    hit = lambda text: bool(text) and (tmp_re.search(text) or (wt_re and wt_re.search(text)))
+    parent = {p: pp for p, pp, _ in procs}
+    safe, pid = set(), os.getpid()
+    while pid and pid not in safe:  # this script and every ancestor (its shell, sshd)
+        safe.add(pid)
+        pid = parent.get(pid, 0)
+    stopped = 0
+    for p, _, cmd in procs:
+        if p not in safe and (hit(cmd) or hit(cwds.get(p, ""))):
+            try:
+                kill(p, 15)
+                stopped += 1
+            except OSError:
+                pass
+    removed = 0
+    try:
+        names = os.listdir(tmp)
+    except OSError:
+        names = []
+    for name in names:
+        if not any(name.startswith(n + "-") or name.startswith("scrum" + n + "-") for n in nums):
+            continue
+        path = os.path.join(tmp, name)
+        try:
+            if os.lstat(path).st_mtime >= now - __AGE__:
+                continue
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+            removed += 1
+        except OSError:
+            pass
+    return stopped, removed
+
+
+if __name__ == "__main__":
+    print("%d %d" % main(NUMS, IDS))
+'''.replace("__AGE__", str(SHOP_FILE_AGE))
+
+
+def shop_cleanup(jobs_by_project: dict[str, list[dict]]) -> dict[str, tuple[int, int]]:
+    """Stop stray processes and remove old /private/tmp files of finished jobs on each shop worker. Finished = the number
+    (leading digits of the id) of every done or aborted job in jobs_by_project, minus any number a job in another stage
+    also has. One shop.run call per worker out of backoff (not board.cooling_down(alias)) and not called within
+    SHOP_CLEANUP_EVERY (SHOP_CLEANUP_AT), sending SHOP_CLEANUP_SCRIPT on stdin. Returns {alias: (stopped, removed)} for
+    the workers that answered. A failed worker prints one `watchdog:` line and never stops the next; no finished job
+    sends nothing."""
+    done, live, ids = set(), set(), {}
+    for jobs in jobs_by_project.values():
+        for j in jobs if isinstance(jobs, list) else []:
+            m = re.match(r"\d+", str(j.get("id") or "")) if isinstance(j, dict) else None
+            if not m:
+                continue
+            if j.get("stage") in ("done", "aborted"):
+                done.add(m[0])
+                ids[str(j["id"])] = m[0]
+            else:
+                live.add(m[0])
+    nums = sorted(done - live)
+    keep = sorted(i for i, n in ids.items() if n in nums and re.fullmatch(r"[\w.-]+", i))
+    result = {}
+    if not nums:
+        return result
+    script = f"NUMS = {nums!r}\nIDS = {keep!r}\n" + SHOP_CLEANUP_SCRIPT
+    for w in shop.workers():
+        now = time.time()
+        if now < SHOP_CLEANUP_AT.get(w.alias, 0) + SHOP_CLEANUP_EVERY or board.cooling_down(w.alias):
+            continue
+        SHOP_CLEANUP_AT[w.alias] = now
+        try:
+            r = shop.run("python3 -", 60, input=script, alias=w.alias)
+            if r.returncode != 0:
+                raise OSError(f"exit {r.returncode}: {(r.stderr or '').strip()[:200]}")
+            procs, files = (int(x) for x in r.stdout.split()[-2:])
+            result[w.alias] = (procs, files)
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            print(f"watchdog: shop cleanup {w.alias}: {e}", file=sys.stderr, flush=True)
+    return result
+
+
 def idle_cleanup(busy: dict[str, bool]) -> None:
     """Idle projects: in busy as False (a project missing from busy is never idle) with no live dashboard session.
     Stop their leaked dev servers (stop_dev_servers) and the orphans of their done or aborted jobs (stop_orphans), then
@@ -4271,8 +4383,22 @@ def idle_cleanup(busy: dict[str, bool]) -> None:
                 jobs[name] = []
         orphans = stop_orphans(idle, jobs, processes())
     docker = docker_tick(idle, [entry for entry in listening if entry[0] not in killed])
-    if killed or orphans or docker:
-        board.log_process("Idle cleanup", "cleaned", dev_servers=len(killed), orphans=len(orphans), docker=bool(docker))
+    boards = {}
+    for name, repo in board.projects().items():
+        try:
+            boards[name] = board.read_board(repo / "scrum").get("jobs") or []
+        except (OSError, SystemExit, AttributeError):  # an unreadable board adds no finished job
+            boards[name] = []
+    try:
+        shop_done = shop_cleanup(boards)
+    except Exception as e:  # never stops the rest of the watchdog pass
+        print(f"watchdog: shop cleanup: {e}", file=sys.stderr, flush=True)
+        shop_done = {}
+    shop_procs, shop_files = sum(a for a, _ in shop_done.values()), sum(b for _, b in shop_done.values())
+    extra = {"shop_procs": shop_procs, "shop_files": shop_files} if shop_procs or shop_files else {}
+    if killed or orphans or docker or extra:
+        board.log_process("Idle cleanup", "cleaned", dev_servers=len(killed), orphans=len(orphans), docker=bool(docker),
+                          **extra)
 
 
 LEFTOVER_GRACE_MIN = 10  # minutes a finished job's session may keep running before stop_leftovers stops it

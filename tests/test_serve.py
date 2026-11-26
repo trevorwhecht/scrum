@@ -13512,6 +13512,7 @@ class IdleCleanupTest(unittest.TestCase):
                     mock.patch.object(s, "processes", return_value=[]), \
                     mock.patch.object(s, "stop_dev_servers", return_value=dev), \
                     mock.patch.object(s, "stop_orphans", return_value=orphans), \
+                    mock.patch.object(s.shop, "workers", return_value=[]), \
                     mock.patch.object(s, "docker_tick", return_value=docker):
                 return processes_logged(lambda: s.idle_cleanup({"a": False}))[1]
         self.assertEqual(clean([7], [8, 9], True), [{"process": "Idle cleanup", "result": "cleaned", "dev_servers": 1,
@@ -13638,6 +13639,7 @@ class IdleCleanupTest(unittest.TestCase):
                 mock.patch.object(s, "listeners", return_value=listening) as ls, \
                 mock.patch.object(s, "stop_dev_servers", return_value=[7]) as stop, \
                 mock.patch.object(s, "processes", return_value=[]), mock.patch.object(s, "stop_orphans"), \
+                mock.patch.object(s.shop, "workers", return_value=[]), \
                 mock.patch.object(s, "docker_tick") as dock:
             s.idle_cleanup({"a": False, "b": True, "d": False})
         self.assertEqual(ls.call_count, 1)
@@ -13714,6 +13716,7 @@ class IdleCleanupTest(unittest.TestCase):
                     mock.patch.object(s, "live_ids", return_value=set()), \
                     mock.patch.object(s, "listeners", return_value=[]), \
                     mock.patch.object(s, "processes", return_value=procs), \
+                    mock.patch.object(s.shop, "workers", return_value=[]), \
                     mock.patch.object(s, "stop_orphans") as orphans, mock.patch.object(s, "docker_tick"):
                 s.idle_cleanup({"a": False, "b": True})
             return [c.args for c in orphans.call_args_list]
