@@ -4431,7 +4431,7 @@ def worktree_job(root, job_id) -> dict:
 
 def _e2e_passed_head(root, job_id, job):
     """The earlier round's head.txt commit when round N >= 2 and the latest earlier round-<k>/check.md is `CHECK: PASS`
-    with an `E2E:` line that has no `not run`, and that commit is an ancestor of the worktree's HEAD; else None."""
+    with an `E2E:` line that has no `not run` or `skipped`, and that commit is an ancestor of the worktree's HEAD; else None."""
     try:
         n = int(job.get("round") or 0)
     except (TypeError, ValueError):
@@ -4451,7 +4451,7 @@ def _e2e_passed_head(root, job_id, job):
         if not head or head.startswith("-") or not lines or lines[0].strip() != "CHECK: PASS":
             return None
         e2e = [l for l in lines if l.strip().startswith("E2E:")]
-        if not e2e or any("not run" in l.lower() for l in e2e):
+        if not e2e or any("not run" in l.lower() or "skipped" in l.lower() for l in e2e):
             return None
         subprocess.run(["git", "-C", str(job["worktree"]), "merge-base", "--is-ancestor", head, "HEAD"],
                        check=True, capture_output=True, timeout=30)

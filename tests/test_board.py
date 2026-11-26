@@ -10513,6 +10513,10 @@ class E2eSpecsTest(unittest.TestCase):
         out = self.delta_specs("CHECK: PASS\nE2E: over budget, 3 passed, 2 not run\n")
         self.assertEqual(out["specs"], ["e2e/order.spec.ts", "e2e/pricing.spec.ts"])
 
+    def test_prior_skipped_e2e_maps_whole_diff(self):
+        out = self.delta_specs("CHECK: PASS\nE2E: skipped, no spec covers the diff\n")
+        self.assertEqual(out["specs"], ["e2e/order.spec.ts", "e2e/pricing.spec.ts"])
+
     def test_non_ancestor_head_maps_whole_diff(self):
         out = self.delta_specs("CHECK: PASS\nE2E: 3 passed\n", head="0" * 40)
         self.assertEqual(out["specs"], ["e2e/order.spec.ts", "e2e/pricing.spec.ts"])
