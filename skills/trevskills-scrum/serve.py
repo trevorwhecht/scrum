@@ -9075,7 +9075,7 @@ def digest_auto(root, digest_id):
             if q["reason"].startswith("old text found"):
                 skip(by_id[q["id"]], q["reason"])
             else:
-                if q["reason"] != "uncommitted changes":  # held without a backlog item: digest_retry_tick re-applies it
+                if q["reason"] != "uncommitted changes" and not q["reason"].startswith("push failed"):  # these holds get no backlog item: digest_retry_tick re-applies them
                     digest_queue_repo_edit(digest_id, by_id[q["id"]], where[q["id"]], q["reason"])
                 queue(by_id[q["id"]], q["reason"])
     with DIGEST_LOCK:
@@ -9161,6 +9161,9 @@ def digest_retry_tick(project, repo, root):
                 digest_queue_repo_edit(digest_id, by_id[q["id"]], reason=q["reason"])
                 updates[q["id"]] = ("queued", q["reason"])
             elif job_id or q["reason"].startswith(("commit failed", "push failed", "board job failed")):
+                if q["reason"].startswith("push failed") and q["id"] in mine \
+                        and pushed[(digest_id, q["id"])].get("retries", 0) + 1 >= DIGEST_PUSH_RETRIES:
+                    digest_queue_repo_edit(digest_id, by_id[q["id"]], reason=q["reason"])  # the last try failed: the one backlog item
                 updates[q["id"]] = ("queued", q["reason"])  # its DIGEST question is the one place to act: no new job per tick
         if updates:
             with DIGEST_LOCK:

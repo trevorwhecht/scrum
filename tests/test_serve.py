@@ -6816,6 +6816,33 @@ class DigestTest(unittest.TestCase):
         """Job 1572: Remove this job (abort --cascade) stops the retries too, over more than one tick."""
         self.assert_card_stops_retries(cascade=True, ticks=2)
 
+    def test_push_failure_adds_no_backlog_item_until_last_retry(self):
+        """Job 1574: a first push failure and a failed non-last retry add no backlog item; the last failed retry adds one;
+        a retry that lands adds none."""
+        self.push_failed_card()
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+        with mock.patch.object(self.serve, "DIGEST_PUSH_RETRY_GAP", 0):
+            self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+            self.assertEqual(self.board.backlog_items(self.scrum), [])
+            self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+            self.assertEqual(self.board.backlog_items(self.scrum), [])
+            self.serve.digest_retry_tick("reg", self.reg, self.scrum)  # the last try
+            self.assertEqual(len(self.board.backlog_items(self.scrum)), 1)
+            self.serve.digest_retry_tick("reg", self.reg, self.scrum)  # retries spent
+            self.assertEqual(len(self.board.backlog_items(self.scrum)), 1)
+
+    def test_landed_push_retry_adds_no_backlog_item(self):
+        """Job 1574: the origin recovers, the retry lands, and no backlog item was ever added."""
+        self.git_repo()
+        self.flaky_origin(2)
+        self.contract_tests()
+        self.digest([self.prop("p1", self.reg / "agents" / "scrum-x.md")])
+        self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+        with mock.patch.object(self.serve, "DIGEST_PUSH_RETRY_GAP", 0):
+            self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+        self.assertEqual((self.statuses(), self.board.backlog_items(self.scrum)), (["applied"], []))
+
     def push_hold(self, root, **extra):
         """root/digests/001 holding p1 (an edit to reg) as a `push failed` hold due a retry."""
         d = root / "digests" / "001"
@@ -7064,9 +7091,7 @@ class DigestTest(unittest.TestCase):
         self.assertEqual([(o["label"], o["command"]) for o in job["options"]],
                          [("Abort", f"abort {job['id']}"), ("Remove this job", f"abort {job['id']} --cascade")])
         self.assertEqual(self.statuses(), ["queued", "queued"])
-        self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
-                         ["Apply digest 001 p1 to agents/scrum-x.md: Seen in 001-a and 002-b (p1).",
-                          "Apply digest 001 p2 to agents/scrum-y.md: Seen in 001-a and 002-b (p2)."])
+        self.assertEqual(self.board.backlog_items(self.scrum), [])  # job 1574: digest_retry_tick re-applies the holds
 
     def test_digest_apply_refuses_when_ahead_or_no_origin(self):
         agent = self.reg / "agents" / "scrum-x.md"
