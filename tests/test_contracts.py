@@ -479,6 +479,12 @@ class ContractTest(unittest.TestCase):
                        "Never bundle a p5 item with p1-p2 items", "highest p of its parts"):
             self.assertIn(phrase, text, phrase)
 
+    def test_cloud_sync_closed_unwatched_manual_add(self):
+        cloud = (SKILL_DIR / "lanes" / "cloud.md").read_text()
+        bullet = next(l for l in cloud.splitlines() if l.lstrip().startswith("- PR `OPEN` with label `scrum:needs-human`"))
+        self.assertIn("B manual-add 'Closed unwatched, check:", bullet)
+        self.assertLess(bullet.index("Closed unwatched, check:"), bullet.index("becomes `B abort $ID --reason"))
+
     def test_approver_has_manual_checks_heading(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
         template = text[text.index("    APPROVE\n"):text.index("**ESCALATE only")]

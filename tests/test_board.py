@@ -9106,6 +9106,48 @@ class CloudSyncTest(unittest.TestCase):
         self.assertEqual(self.get()["stage"], "aborted")
         self.assertIn(f"cloud-sync: {self.job}: manual-add failed: board locked", err.getvalue())
 
+    def feature(self, text):
+        (self.root / "jobs" / self.job / "feature.md").write_text(text)
+
+    def test_cloud_sync_obsolete_adds_closed_unwatched_check(self):
+        self.feature("Summarise the video\n")
+        self.self_abort("obsolete: video could not be summarised")
+        self.assertEqual(self.get()["stage"], "aborted")
+        self.assertEqual(self.open_manual(),
+                         [f"Closed unwatched, check: video could not be summarised (from {self.job})"])
+
+    def test_cloud_sync_obsolete_filed_followup_no_unwatched_check(self):
+        self.feature("Do a thing (from 1234-x)\n")
+        self.self_abort("obsolete: gone")
+        self.assertEqual(self.get()["stage"], "aborted")
+        self.assertEqual(self.open_manual(), [])
+        self.setUp()  # no feature.md at all
+        self.self_abort("obsolete: gone")
+        self.assertEqual(self.get()["stage"], "aborted")
+        self.assertEqual(self.open_manual(), [])
+
+    def test_cloud_sync_obsolete_needs_trevor_trevor_words_adds_both(self):
+        self.feature("Trevor's words\n")
+        self.self_abort("obsolete: needs Trevor \u2014 x")
+        self.assertEqual(self.open_manual(), [f"needs Trevor \u2014 x (from {self.job})",
+                                              f"Closed unwatched, check: needs Trevor \u2014 x (from {self.job})"])
+
+    def test_cloud_sync_unwatched_check_no_duplicate_and_failure_aborts(self):
+        self.feature("Trevor's words\n")
+        self.self_abort("obsolete: gone")
+        with board.locked_board(self.root) as data:
+            next(j for j in data["jobs"] if j["id"] == self.job)["stage"] = "cloud"
+        self.self_abort("obsolete: gone")
+        self.assertEqual(self.open_manual(), [f"Closed unwatched, check: gone (from {self.job})"])
+        for exc, msg in ((OSError("disk full"), "disk full"), (SystemExit("board locked"), "board locked")):
+            self.setUp()
+            self.feature("Trevor's words\n")
+            err = io.StringIO()
+            with mock.patch.object(board, "cmd_manual_add", side_effect=exc), mock.patch("sys.stderr", err):
+                self.self_abort("obsolete: gone")
+            self.assertEqual(self.get()["stage"], "aborted")
+            self.assertIn(f"cloud-sync: {self.job}: manual-add failed: {msg}", err.getvalue())
+
     def test_pr_close_failure_still_aborts(self):
         labelled = self.pr(labels=[{"name": "scrum:needs-human"}])
         comments = [{"user": self.TREV, "body": "obsolete: gone\n<!-- scrum needs-human -->"}]
