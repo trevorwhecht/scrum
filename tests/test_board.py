@@ -13609,6 +13609,18 @@ class PipelineFitTest(unittest.TestCase):
         board.cmd_set(self.root, self.fit()["jobs"][0]["id"], ["worktree="])  # unreadable diff
         self.assertEqual(self.fit()["jobs"][0]["fit"], "fast")
 
+    def test_pipeline_fit_promoted_on_purpose_stays_fast(self):
+        for line, fit in (("Promoted to fast: measured run", "fast"), ("Promoted to fast: new E2E test", "fast"),
+                          ("Promoted to fast: binary file", "lilguy")):
+            with self.subTest(line=line):
+                self.git("checkout", "-q", "main")
+                self.git("checkout", "-q", "-B", "work")
+                job = self.small_standard(lines=10, files=1)
+                board.cmd_set(self.root, job, ["lane=fast"])
+                self.put(job, "promoted.md", line + "\n")
+                self.digest(job)
+                self.assertEqual(self.fit()["jobs"][0]["fit"], fit)
+
     def test_pipeline_fit_fast_ui_job_stays_fast(self):
         self.root.mkdir()
         (self.root / "project.md").write_text("- UI globs: src/f0.py\n")

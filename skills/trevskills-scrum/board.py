@@ -2570,6 +2570,17 @@ def _fit_excluded(folder, lane: str, paths) -> bool:
                 or LILGUY_HARD_STOP_RE.search(_request_text(feature)) or lane == "debug" and (folder / "assessment.md").is_file())
 
 
+def _promoted_on_purpose(folder) -> bool:
+    """True when promoted.md has a `Promoted to fast: measured run` or `Promoted to fast: new E2E test` line: the
+    lilguy lane sends those to fast whatever their diff size, so the job is not cheaper-lane."""
+    try:
+        text = (folder / "promoted.md").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    return any(l.strip() in ("Promoted to fast: measured run", "Promoted to fast: new E2E test")
+               for l in text.splitlines())
+
+
 def _fit_job(root, job_id: str, job: dict, globs) -> dict:
     """One pipeline-fit row for job_id (its board entry `job`, {} when gone): lane, agents spawned, diff size,
     verdicts per round, fix rounds, over_routed and the cheapest lane that would have done; `excluded`
@@ -2595,6 +2606,7 @@ def _fit_job(root, job_id: str, job: dict, globs) -> dict:
             and not (globs and any(glob_match(n, globs) for n in paths[1])))
     fit = ("lilguy" if size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES else "fast") if over else lane
     if (lane == "fast" and not sensitive and not excluded and len(rounds) <= 1  # one clean round, lilguy-sized
+            and not _promoted_on_purpose(folder)
             and "CHANGES" not in verdicts.get("1", {}).values()
             and size is not None and size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES
             and paths is not None and _promote_trigger(*paths) is None
