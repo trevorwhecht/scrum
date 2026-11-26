@@ -1237,6 +1237,13 @@ def stall_mark(key, stage):
 # usage_limit_reached code. A bare "usage limit" in an agent's Summary prose must not match.
 LIMIT_RE = re.compile(r"^\W*(?:(?:you've|you have) )?hit your (?:[\w-]+ )?limit|^\W*API Error\b.*(?:rate.?limit|usage.?limit|limit reached)"
                       r"|^\W*rate_limit\b|usage_limit_reached", re.I | re.M)
+# Job 1541: Claude Code's account-wide refusal, "Claude Code can't use your Claude subscription, usually because a payment
+# is past due · Pay or renew at https://claude.ai/settings/billing". No reset time: it ends when Trevor pays.
+BILLING_RE = re.compile(r"^\W*Claude Code can['’]t use your Claude subscription", re.I | re.M)
+BILLING_RETRY_EVERY = 10 * 60  # a billing-held job's hold, and the gap between two probe resumes
+BILLING_PROBE_OK = 120  # a probe run alive this long with no refusal line has got past the refusal
+BILLING: dict = {}  # the account-wide billing hold, empty when none: since, probe_at, alerted, probe (project, root, id, at)
+# ponytail: in memory, like AUTO_RESUME; after a serve.py restart the next refused run sets it again (a second text)
 NET_RE = re.compile(r"ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|Can't reach the API server", re.I)
 NET_RETRY_EVERY = 5 * 60  # a network outage ends on its own: retry soon, sharing AUTO_RESUME_MAX (~1 h of outage)
 RESET_RE = re.compile(r"resets?(?: at)?(?:\s+([A-Z][a-z]{2}) (\d{1,2})(?: at)?)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)", re.I)
@@ -1272,6 +1279,12 @@ def net_error(root, job):
     """True when the run log's last non-empty line is a network error (the session died on an outage)."""
     lines = [l for l in run_log_tail(root, job)[0].splitlines() if l.strip()]
     return bool(lines and NET_RE.search(lines[-1]))
+
+
+def billing_in(tail: str) -> bool:
+    """True when a session log's tail holds Claude Code's subscription refusal (BILLING_RE) at the start of a line; an
+    agent's prose quoting it mid-sentence is no refusal."""
+    return bool(BILLING_RE.search(tail))
 
 
 def limit_reset(root, job):
@@ -2439,7 +2452,9 @@ def auto_resume(project, root, jobs):
     refuses it; board.mark_solo_run reserves the Mac for it first (board.solo_hold), and no other job resumes after it
     in this call (noted solo_run), nor, inside a tick, in any later project (RESUME_ROOM = 0). A check that failed at
     load5 over cores (board.QUIET_CHECK_WAIT, job 1536) re-runs, spending no try, only once board.cpu_load_pct() is at
-    most 100 and nothing refuses it; until then it is noted quiet_wait."""
+    most 100 and nothing refuses it; until then it is noted quiet_wait. Job 1541: first billing_release ends the billing
+    hold when its probe passed; a stall in a WATCHED stage whose log tail holds the subscription refusal (billing_in) is
+    held by billing_hold, and a BILLING_RELEASED stall resumes, both spending no try and never parked as spent."""
     global E2E_RESUMED, RESUME_ROOM
     now, busy, e2e_resumed, check_resumed, build_resumed = time.time(), False, bool(E2E_RESUMED), False, False
     solo_run = False  # a solo job resumed in this call: nothing else resumes after it (job 1361)
@@ -2466,6 +2481,12 @@ def auto_resume(project, root, jobs):
         note_stall_hold(root, job["id"], "resume_room")
         return False
 
+    released = billing_release(now).get(project, {}) if BILLING else {}  # job 1541: a passed probe ends every billing hold
+    for j in jobs:  # so this call's snapshot sees the release too
+        if j.get("id") in released:
+            j.pop("limitResetAt", None)
+            j.pop("billingHold", None)
+            j.update(released[j["id"]])
     checking = any(check_job(j) for j in jobs)
     if not checking and any(not j.get("paused") and str(j.get("reason") or "").startswith(board.STALL + E2E_WAIT)
                             for j in jobs):
@@ -2560,6 +2581,16 @@ def auto_resume(project, root, jobs):
             else:
                 busy = True  # no new claims while it waits for a quiet Mac
                 note_stall_hold(root, job["id"], "solo_wait")
+            continue
+        if str(job.get("reason") or "").startswith(board.STALL + BILLING_RELEASED.split(":")[0]):  # job 1541: no try spent
+            if refused(job) is None and room(job):
+                busy = True
+                resume_job(project, root, job, jobs)
+            continue
+        stage = board.stall_stage(job)
+        if stage in board.WATCHED and billing_in(run_log_tail(root, job)[0]):  # job 1541: held, no try spent
+            busy = True  # moved into its billing hold this tick
+            billing_hold(project, root, job, stage)
             continue
         tries, due = AUTO_RESUME.get(key, [0, 0.0])
         if tries >= AUTO_RESUME_MAX:
@@ -2710,11 +2741,21 @@ def resume_held(project, root, job, jobs, now):
     """auto_resume for a limit-held job: wait for reset + 120 s and a free slot, then resume it in its stage; at AUTO_RESUME_MAX
     tries it is parked for Trevor (park_spent). Before the reset it resumes at once when board.pick_account offers an
     account other than the one the job ran on (board.spawn records the new one). True when it resumed the job
-    or waits for a slot; waiting for the reset is not busy (job 1219)."""
+    or waits for a slot; waiting for the reset is not busy (job 1219). A billingHold job while BILLING holds (job 1541)
+    is the probe instead: one job resumes once BILLING's probe_at and its own reset pass and no probe is out, spending no
+    try, and the next probe is due BILLING_RETRY_EVERY later; with no BILLING (a serve.py restart) it is an ordinary hold."""
     key = f"{project}/{job['id']}"
     tries = AUTO_RESUME.get(key, [0, 0.0])[0]
     if running(project, job["id"]):
         return False
+    if job.get("billingHold") and BILLING:  # job 1541: one probe per BILLING_RETRY_EVERY, no try spent
+        if now < max(BILLING["probe_at"], job["limitResetAt"]) or BILLING.get("probe"):
+            return False  # waits for the probe: holds no claim
+        if resume_refusal(project, root, job) or not take_room():
+            return True
+        if resume_job(project, root, job, jobs):  # a queued launch is no probe
+            BILLING.update(probe=(project, root, job["id"], now), probe_at=now + BILLING_RETRY_EVERY)
+        return True
     if now < job["limitResetAt"] + 120:
         other = board.pick_account(now)[0]  # job 1184: no prefer, so a backup job resumes early on the primary
         if other in (None, job.get("account") or board.accounts()[0].name):
@@ -3245,6 +3286,7 @@ def hold_limited(root, job, reset, stage=None, fixed=False):
                 raise board._Gone
             live.update(limitResetAt=reset, updatedAt=board.now(), stage=stage or live["stage"])
             live.pop("stalled", None)  # a new-shape stall is now a limit hold in the same stage
+            live.pop("billingHold", None)  # a usage-limit hold replaces a billing hold (billing_hold)
             acc = live.get("account") or board.accounts()[0].name
             board.note_limit(acc, reset)
     except board._Gone:
@@ -3257,11 +3299,92 @@ def hold_limited(root, job, reset, stage=None, fixed=False):
     return True
 
 
+BILLING_TEXT = ("Claude Code can't use the Claude subscription (a payment may be past due), so every scrum session stops "
+                "at start. Jobs wait in their stages and retry every 10 minutes. Pay or renew at "
+                "https://claude.ai/settings/billing")
+BILLING_RELEASED = "Claude subscription works again: resume in {stage}."  # a released billing hold's stall (auto_resume)
+
+
+def billing_hold(project, root, job, stage=None):
+    """Under the board lock, keep a job whose session died on Claude Code's subscription refusal (billing_in) in its stage
+    (or move it back to `stage`) with limitResetAt = now + BILLING_RETRY_EVERY and billingHold true: no board.note_limit
+    marker, no AUTO_RESUME try, no STALL_RESUMED mark. Then the account-wide hold (BILLING): set when new, with one text
+    to Trevor per episode (alert_dispatch); when the job was the probe, the next probe is due BILLING_RETRY_EVERY on.
+    False when the job is gone, paused or its stage moved on meanwhile."""
+    now = time.time()
+    try:
+        with board.locked_board(root) as b:
+            live = next((j for j in b["jobs"] if j["id"] == job["id"]), None)
+            if not live or live.get("paused") or live.get("stage") != job["stage"] \
+                    and not (stage and live.get("stage") == stage and board.stalled(live)):
+                raise board._Gone
+            live.update(limitResetAt=int(now) + BILLING_RETRY_EVERY, billingHold=True, updatedAt=board.now(),
+                        stage=stage or live["stage"])
+            live.pop("stalled", None)
+    except board._Gone:
+        return False
+    if not BILLING:
+        BILLING.update(since=now, probe_at=now + BILLING_RETRY_EVERY, alerted=False, probe=None)
+    probe = BILLING.get("probe")
+    if probe and (probe[0], probe[2]) == (project, job["id"]):  # the probe met the refusal again: re-arm
+        BILLING.update(probe=None, probe_at=now + BILLING_RETRY_EVERY)
+    if not BILLING["alerted"]:
+        BILLING["alerted"] = True  # before the send: one text per episode, sent or not
+        alert_dispatch(board.pulse_path().with_name("billing-alert.json"), now, "Claude subscription refused",
+                       BILLING_TEXT, "sent")
+    return True
+
+
+def billing_release(now):
+    """While BILLING holds and its probe run is alive BILLING_PROBE_OK seconds after it started (or has exited) with no
+    refusal line in its log tail, end the episode: on every registered board (and the probe's own), under that board's
+    lock, each billingHold job loses billingHold and limitResetAt, and one in a WATCHED stage that is not paused, not
+    the probe and not running is flagged stalled with BILLING_RELEASED, which auto_resume resumes at once with no try.
+    BILLING is cleared, so a later refusal texts again. Returns {project: {job id: live job}} of the released jobs."""
+    probe = BILLING.get("probe")
+    if not probe:
+        return {}
+    project, root, jid, at = probe
+    with RUNS_LOCK:
+        run = RUNS.get(f"{project}/{jid}")
+    if not run or run.get("started", 0) < at:
+        if now >= BILLING["probe_at"]:
+            BILLING["probe"] = None  # its run was never tracked: the next probe may go
+        return {}
+    exited = run["proc"].poll() is not None
+    if not exited and now - run["started"] < BILLING_PROBE_OK or billing_in(run_log_tail(root, {"runlog": run.get("log")})[0]):
+        return {}  # too young, or refused again (respawn_exited re-arms it)
+    roots = {p: r / "scrum" for p, r in board.projects().items()}
+    roots.setdefault(project, Path(root))
+    out = {}
+    for name, r in roots.items():
+        try:
+            if not any(j.get("billingHold") for j in json.loads((r / "board.json").read_text()).get("jobs", [])):
+                continue
+            with board.locked_board(r) as b:
+                for j in b["jobs"]:
+                    if not j.get("billingHold"):
+                        continue
+                    j.pop("billingHold", None)
+                    j.pop("limitResetAt", None)
+                    if j.get("stage") in board.WATCHED and not j.get("paused") and (name, j["id"]) != (project, jid) \
+                            and not running(name, j["id"]):
+                        j.update(stalled=True, reason=board.STALL + BILLING_RELEASED.format(stage=j["stage"]),
+                                 updatedAt=board.now())
+                    out.setdefault(name, {})[j["id"]] = dict(j)
+        except (OSError, ValueError, AttributeError) as e:
+            print(f"watchdog: billing release: {name}: {e}", file=sys.stderr, flush=True)
+    BILLING.clear()
+    print(f"watchdog: billing hold released: {sum(len(v) for v in out.values())} jobs", file=sys.stderr, flush=True)
+    return out
+
+
 def respawn_exited(project, root):
     """A dashboard-started `claude -p` start/resume run that exited while its job is still in a WATCHED stage (it
     ended its turn mid-job): flag the job stalled, then respawn `resume` once. A run that was itself that respawn,
     or a job resume_refusal blocks, is only flagged and left for Resume/auto_resume. A run killed by the usage limit
-    is held in its stage instead (hold_limited): no flag, no sound, no respawn. Returns the flagged ids."""
+    is held in its stage instead (hold_limited): no flag, no sound, no respawn; one killed by Claude Code's subscription
+    refusal (billing_in) is held the same way by billing_hold, with no limit marker. Returns the flagged ids."""
     with RUNS_LOCK:
         runs = [(k, r) for k, r in RUNS.items() if k.startswith(f"{project}/") and r.get("action") in ("start", "resume")
                 and not r.get("handled") and r["proc"].poll() is not None]
@@ -3280,7 +3403,11 @@ def respawn_exited(project, root):
         if alive(job):
             continue  # another session (e.g. a Terminal) has the job; look again next tick
         run["handled"] = run["limit_noted"] = True  # hold_limited below notes the limit, not note_run_limits
-        hit, reset, fixed = limit_reset(root, job)
+        tail, written = run_log_tail(root, job)
+        if billing_in(tail):  # job 1541: the subscription refusal holds it with no try spent and no limit marker
+            billing_hold(project, root, job)
+            continue
+        hit, reset, fixed = limit_in(tail, written)
         if hit:  # a reset already past (or none named) waits AUTO_RESUME_EVERY, so a resume never loops every tick
             now = time.time()
             hold_limited(root, job, int(reset) if reset and reset + 120 > now else int(now) + AUTO_RESUME_EVERY,
