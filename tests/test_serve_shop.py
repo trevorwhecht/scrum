@@ -1741,7 +1741,7 @@ class ShopTickTest(unittest.TestCase):
         self.assertEqual(self.tick(), (True, "shop: mm: 043-a: started on shopmac (pid 4242, account owa)\n", ""))
         job = self.job(root, "043-a")
         self.assertEqual((job["stage"], job["runs_on"], job["worker"]), ("cloud", "any", "shopmac"))
-        self.assertNotIn("shop_first_since", job)
+        self.assertIn("shop_first_since", job)
 
     def test_queued_start_of_shop_job_stays_queued_locally(self):
         os.environ["SCRUM_FREE_RAM"] = "100"  # this Mac has room (setUp's env patch restores it)
