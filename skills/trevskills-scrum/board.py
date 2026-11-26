@@ -5099,9 +5099,12 @@ def header_in(text: str, key: str, words: tuple[str, ...]) -> str | None:
 
 def feature_text(text: str) -> str:
     """text as a feature.md body: an inline `Lane:` / `Complex:` / `Runs on:` clause (a backlog item is one line) is also
-    written on its own header line after the first line, where header_value reads it. The last valid clause of each key wins."""
+    written on its own header line after the first line, where header_value reads it. The last valid clause of each key wins.
+    A key inside a backtick span is a quote, not a clause (job 1570's `Lane: fast (feature.md)`), and pins nothing."""
     hdr = {}
     for m in re.finditer(r"\b(Lane|Complex|Runs on):\s*(\w+\b.*?)(?=\s+(?:Lane|Complex|Runs on):|\Z)", text, re.S):
+        if text.count("`", 0, m.start()) % 2:  # inside a backtick span
+            continue
         key, rest = m[1], " ".join(m[2].split())
         words = {"Lane": LANES, "Complex": ("yes", "no")}.get(key, RUNS_ON)
         if re.match(r"\w+", rest)[0].lower() in words and not re.match(rf"\w+\W*\s+or\s+(?:{'|'.join(words)})\b", rest, re.I):  # "debug," / "no." count; `<lane> or <lane>` pins none

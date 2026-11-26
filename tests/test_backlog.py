@@ -173,6 +173,12 @@ class BacklogTest(unittest.TestCase):
         (d2 / "feature.md").write_text(board.feature_text("Fix it. Lane: debug, re-report of job 583"))
         self.assertEqual(board.header_value(d2 / "feature.md", "Lane", board.LANES), "debug")
 
+    def test_backticked_clause_key_pins_nothing(self):
+        quoted = ("Builder runs on Opus: 1x, job 1570 (fit lilguy; lilguy-fit said `feature.md Lane: fast` against its "
+                  "estimate). It matched the backticked `Lane: fast (feature.md)` and `Complex: no` and `Runs on: main` here.")
+        self.assertEqual(board.feature_text(quoted), quoted + "\n")
+        self.assertEqual(board.feature_text(quoted + " Lane: fast.").splitlines()[1], "Lane: fast.")
+
     def test_runall_start_child_feature_has_header_lines(self):
         (self.root / "backlog.md").write_text("# Backlog\n- [ ] Fix it. Lane: debug \u2014 cause unknown.\n")
         kid = board.cmd_runall_start(self.root)["children"][0]
