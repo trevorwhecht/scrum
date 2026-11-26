@@ -960,7 +960,7 @@ class BacklogTest(unittest.TestCase):
         self.assertEqual((self.root / "jobs" / "001-add-csv-export" / "spec.md").read_text(), "# CSV\n")
         self.assertFalse(spec.exists())
         out = board.cmd_next(self.root)  # no spec file for this one: unchanged behaviour
-        self.assertEqual(out, {"id": "002-dark-mode", "feature": "Dark mode"})
+        self.assertEqual(out, {"id": "002-dark-mode", "feature": "Dark mode", "points": None})
         self.assertEqual(list((self.root / "jobs" / "002-dark-mode").iterdir()), [])
         self.assertIn("- [x] Dark mode → 002-dark-mode\n", self.text())
 
