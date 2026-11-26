@@ -187,6 +187,7 @@ class CDP:
 
     def __init__(self, ws: WebSocket):
         self.ws, self.n, self.events = ws, 0, deque()
+        self.fetch_n = 1_000_000  # ids for Fetch replies, apart from call()'s so a reply never matches a waiting call
 
     def _paused(self, msg: dict) -> bool:
         """Answer a Fetch.requestPaused for a Cloudinary image from the disk cache; True when msg was one."""
@@ -194,7 +195,7 @@ class CDP:
             return False
         p = msg.get("params", {})
         got = cached_image(p.get("request", {}).get("url", "")) if p.get("request", {}).get("method") == "GET" else None
-        self.n += 1  # fire and forget: the reply has an id no call() waits for
+        self.fetch_n += 1  # fire and forget: the reply has an id no call() waits for
         if got:
             body, ctype = got
             cmd = ("Fetch.fulfillRequest", {"requestId": p["requestId"], "responseCode": 200,
@@ -202,7 +203,7 @@ class CDP:
                                             "body": base64.b64encode(body).decode()})
         else:
             cmd = ("Fetch.continueRequest", {"requestId": p["requestId"]})
-        self.ws.send(json.dumps({"id": self.n, "method": cmd[0], "params": cmd[1]}))
+        self.ws.send(json.dumps({"id": self.fetch_n, "method": cmd[0], "params": cmd[1]}))
         return True
 
     def call(self, method: str, params: dict | None = None, timeout: float = 30):

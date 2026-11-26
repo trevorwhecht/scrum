@@ -149,6 +149,7 @@ class RenderCloudinaryCacheTest(unittest.TestCase):
         sent = json.loads(cdp.ws.send.call_args[0][0])
         self.assertEqual(sent["method"], "Fetch.fulfillRequest")
         self.assertEqual(sent["params"]["responseCode"], 200)
+        self.assertEqual(cdp.n, 0)  # a Fetch reply never takes a call() id
         self.assertFalse(cdp._paused({"method": "Page.loadEventFired"}))
 
 
