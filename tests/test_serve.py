@@ -9641,6 +9641,21 @@ class CloudPollTest(unittest.TestCase):
         self.assertIn("watchdog: cpu sample: top broke", e.getvalue())
         self.assertTrue(gate.called, "the tick goes on")
 
+    def test_watchdog_tick_refreshes_shop_stats_without_a_dashboard(self):
+        s = self.serve
+        with mock.patch.object(s.board, "projects", return_value=self.window_projects()), \
+                mock.patch.object(s.board, "record_cpu_sample"), mock.patch.object(s.board, "machine_ok", return_value=None), \
+                mock.patch.object(s, "shop_stats") as stats:
+            s.watchdog_tick()
+        stats.assert_called_once_with()
+        with mock.patch.object(s.board, "projects", return_value=self.window_projects()), \
+                mock.patch.object(s.board, "record_cpu_sample"), mock.patch.object(s.board, "machine_ok", return_value=None) as gate, \
+                mock.patch.object(s, "shop_stats", side_effect=OSError("ssh broke")), \
+                mock.patch("sys.stderr", new=__import__("io").StringIO()) as e:
+            s.watchdog_tick()
+        self.assertIn("watchdog: shop stats: ssh broke", e.getvalue())
+        self.assertTrue(gate.called, "the tick goes on")
+
     def test_watchdog_tick_polls_cloud_and_survives_a_failing_project(self):
         s = self.serve
         base = Path(tempfile.mkdtemp())
