@@ -6198,6 +6198,21 @@ class BoardTest(unittest.TestCase):
         self.assertGreater(got["j"][0][1], t0 + 2400)  # the discuss note ends nothing: runs to now
         self.assertEqual(list(got["c"]), [])
 
+    def test_timing_subtracts_limit_hold_to_next_run(self):
+        """Job 1561: each limit-holds.txt line (serve.py hold_limited) runs to the next run log, is subtracted from its
+        round like a machine wait, and shows as `limit <min>` in Stalls; one stop held twice counts once."""
+        t0 = 1_700_000_000
+        self.timing_two_hour(t0)
+        (self.root / "runs").mkdir()
+        stamp = datetime.fromtimestamp(t0 + 5400, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        (self.root / "runs" / f"{stamp}-resume-j.log").write_text("x")
+        self.write("j/limit-holds.txt", f"{t0 + 1800} main\n{t0 + 1860} main\ngarbage\n")
+        cells = board._timing_row(self.root, "j", {}, {})[0]
+        self.assertEqual((cells[6], cells[7], cells[10]), ("1h00m", "0m", "limit 1h00m"))
+        self.write("j/limit-holds.txt", f"{t0 + 6000} main\n")  # no run log after it: open, held to the round's end
+        cells = board._timing_row(self.root, "j", {}, {})[0]
+        self.assertEqual((cells[6], cells[10]), ("1h40m", "limit open"))
+
     def test_timing_human_wait_overlap(self):
         t0 = 1_700_000_000
         self.timing_two_hour(t0)

@@ -3466,7 +3466,9 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
     Each dep-waits.txt line (cmd_wait_on: `<epoch> <blocker>`) runs to the job's next run log (_run_starts), else
     spec.md's mtime; clipped to the Spec window, it moves from Spec to Queue. `stalls` maps a job id to its stall
     epochs (None: no date); the Stalls cell gives each one's minutes to the next run log, `open` when none, `?` for None,
-    then ` (held: <tokens>)` from stall-holds.txt (serve.py note_stall_hold: what auto_resume passed it over for).
+    then `limit <min>` (`limit open`) for each limit-holds.txt line (serve.py hold_limited: `<epoch> <account>`, job 1561)
+    to the next run log, lines before the same run log counted once from the earliest, its span subtracted from the
+    round like `waits`, then ` (held: <tokens>)` from stall-holds.txt (serve.py note_stall_hold: what auto_resume passed it over for).
     Each `queued` epoch (a questions.log queue-wait line) runs to the job's next run log, else the round's end, is
     subtracted like `waits` and adds one to E2E lock waits. An autoPlayed job's Round times start `paused `, and a job
     whose board entry lists depends_on gets `depends_on:<id>` as its Queue gate when queue-gates.txt gives none. Every
@@ -3514,6 +3516,15 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
     runs = _run_starts(root, job_id)
     after = lambda t: next((r for r in runs if r > t), None)
     qspans = [(w, after(w) or float("inf")) for w in queued]
+    try:  # serve.py hold_limited: a usage-limit pause (a hard stop) runs to the next run log, else the round's end
+        holds = [float(l.split()[0]) for l in (folder / "limit-holds.txt").read_text(encoding="utf-8").splitlines()
+                 if re.fullmatch(r"\d+(\.\d+)? \S+", l.strip())]
+    except OSError:
+        holds = []
+    limits = {}  # next run log (None: open) -> earliest hold before it, so one stop held twice counts once
+    for w in sorted(holds):
+        limits.setdefault(after(w), w)
+    qspans += [(w, nxt or float("inf")) for nxt, w in limits.items()]
     for n in rounds:
         rd = folder / f"round-{n}"
         end = max((t for q in rd.iterdir() if (t := _mtime(q))), default=None)
@@ -3566,6 +3577,7 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
         nxt = None if at is None else after(at)
         stall_cell.append("?" if at is None else "open" if nxt is None else _mins(nxt - at))
         resume += nxt - at if nxt else 0
+    stall_cell += [f"limit {_mins(nxt - w) if nxt else 'open'}" for nxt, w in sorted(limits.items(), key=lambda x: x[1])]
     paused = "paused " if job.get("autoPlayed") and times else ""  # sat paused until serve.py auto_play played it
     if pre_human:  # the stop-to-rework span lies before round 1: it is the first round's Human wait
         hwaits = [(hwaits[0] if hwaits else 0) + pre_human, *hwaits[1:]]

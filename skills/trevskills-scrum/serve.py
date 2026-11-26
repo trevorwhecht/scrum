@@ -1784,7 +1784,8 @@ def hard_stop_tick() -> list[str]:
     is a live claude process naming the job is held first (hold_limited, fixed at that 7d window's reset, which also writes the limit
     marker so pick_account skips the account), so auto_resume picks it up where it stopped after the reset, or sooner on
     another account with room; its RUNS entry is marked handled so respawn_exited never resumes it. A tracked run with
-    no board job (run-all, digest) is only stopped. Returns the `<project>/<id>` names stopped."""
+    no board job (run-all, digest) is only stopped. Each processes.log stop line names its `job` (job 1561): the board
+    job's id, else the tracked run's RUNS key. Returns the `<project>/<id>` names stopped."""
     now = time.time()
     resets = {a.name: int(board.seven_day_window(a.name)["resets_at"]) - board.FINAL_HOUR_SECS for a in board.accounts()
               if board.hard_stop(a.name, now)}  # held until the final hour, when the line lifts
@@ -1816,14 +1817,15 @@ def hard_stop_tick() -> list[str]:
             if job.get("stage") in board.WATCHED:
                 hold_limited(root, job, resets[acc], fixed=True)
             if stop_group(pid):
-                board.log_process("Usage windows", "stopped", repo=str(repo), reason=board.hard_stop(acc, now))
+                board.log_process("Usage windows", "stopped", repo=str(repo), reason=board.hard_stop(acc, now),
+                                  job=job["id"])
                 stopped.append(f"{project}/{job['id']}")
     with RUNS_LOCK:
         runs = [(k, r) for k, r in RUNS.items() if r.get("account") in resets and r["proc"].poll() is None]
     for key, run in runs:
         run["handled"] = run["limit_noted"] = True
         if stop_group(run["proc"].pid) and key not in stopped:
-            board.log_process("Usage windows", "stopped", reason=board.hard_stop(run["account"], now))
+            board.log_process("Usage windows", "stopped", reason=board.hard_stop(run["account"], now), job=key)
             stopped.append(key)
     return stopped
 
@@ -3220,7 +3222,8 @@ def hold_limited(root, job, reset, stage=None, fixed=False):
     """Under the board lock, keep a usage-limit-killed job in its stage (or move it back to `stage`) with
     limitResetAt = reset (epoch seconds), at most now + SESSION_WINDOW unless the reset is fixed (an epoch or a date);
     auto_resume restarts it after the reset. The job's account (none: the first) gets a board.note_limit marker with
-    the same reset. False when the job is gone or its stage moved on meanwhile."""
+    the same reset, and jobs/<id>/limit-holds.txt gets one `<epoch> <account>` line (job 1561: board._timing_row takes
+    the pause out of its round). False when the job is gone or its stage moved on meanwhile."""
     if not fixed:
         reset = min(reset, int(time.time()) + SESSION_WINDOW)
     try:
@@ -3232,9 +3235,15 @@ def hold_limited(root, job, reset, stage=None, fixed=False):
                 raise board._Gone
             live.update(limitResetAt=reset, updatedAt=board.now(), stage=stage or live["stage"])
             live.pop("stalled", None)  # a new-shape stall is now a limit hold in the same stage
-            board.note_limit(live.get("account") or board.accounts()[0].name, reset)
+            acc = live.get("account") or board.accounts()[0].name
+            board.note_limit(acc, reset)
     except board._Gone:
         return False
+    try:
+        with (Path(root) / "jobs" / job["id"] / "limit-holds.txt").open("a", encoding="utf-8") as f:
+            f.write(f"{int(time.time())} {acc}\n")
+    except OSError:
+        pass  # timing.md only: a hold never fails on its note
     return True
 
 
