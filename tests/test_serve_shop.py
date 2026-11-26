@@ -234,6 +234,27 @@ class ShopTickTest(unittest.TestCase):
             with mock.patch.object(self.board, "live_sessions", return_value=3):
                 self.assertEqual([w.alias for w, _ in self.serve.shop_worker()], ["shopmac"])
 
+    def shop_disk(self, readings):
+        """SHOP_STATS' cached entries: alias -> free_disk_gb (None: a null reading), at 1000.0."""
+        saved = dict(self.serve.SHOP_STATS)
+        self.addCleanup(lambda: (self.serve.SHOP_STATS.clear(), self.serve.SHOP_STATS.update(saved)))
+        self.serve.SHOP_STATS["value"] = [{"name": a, "free_ram_pct": 50.0, "cpu_load_pct": 10.0, "cpu_cores": 4,
+                                           "free_disk_gb": gb, "at": 1000.0} for a, gb in readings.items()]
+
+    def test_shop_worker_skips_low_disk_worker(self):
+        """Job 1550: a worker whose cached free_disk_gb is under board.MIN_FREE_DISK_GB gets no new work (and so is not in
+        shop-room.json); a null reading or no entry is not skipped. The gate reads only the cache: no ssh."""
+        self.workers("shopmac 2 owa,main\nnewmac 1 main\nthird 1 main\n")
+        self.shop_disk({"shopmac": 4.0, "newmac": 50.0, "third": None})
+        with mock.patch.object(self.serve.shop, "run", side_effect=AssertionError("no ssh for the disk gate")):
+            self.assertEqual([w.alias for w, _ in self.serve.shop_worker()], ["newmac", "third"])
+            self.serve.write_shop_room()
+        self.assertEqual(self.room_file()["workers"], ["newmac", "third"])
+        self.assertNotIn(mock.call(alias="shopmac"), self.sh.ready.call_args_list, "a full disk is not probed")
+        self.shop_disk({"newmac": 50.0})
+        self.assertEqual([w.alias for w, _ in self.serve.shop_worker()], ["shopmac", "newmac", "third"],
+                         "no entry: not skipped")
+
     def test_cooldown_api_per_worker(self):
         """Job 1185: set_cooldown(on, worker=<alias>) sets only that worker's flag, explicitly on or off; a worker that is
         not a current shop.workers() alias is a 400 that touches nothing; no worker is this Mac's flag, as before.

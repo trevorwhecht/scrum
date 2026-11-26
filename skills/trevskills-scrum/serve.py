@@ -2880,7 +2880,8 @@ SHOP_ENDED = "requeue: shop session ended without a PR"
 
 def shop_worker():
     """Yield (worker, account) for each shop.workers() worker, in file order, that is out of backoff (SHOP_RETRY_AT),
-    not cooled (board.cooling_down(alias): its own Cool down button; its started jobs finish), runs fewer than its max
+    not cooled (board.cooling_down(alias): its own Cool down button; its started jobs finish), whose last cached
+    SHOP_STATS free_disk_gb is not under board.MIN_FREE_DISK_GB (no entry or null passes; never ssh; job 1550), runs fewer than its max
     stage-cloud `shop` jobs on every board (no `worker` field: shopmac), is shop.ready(alias)
     and has an account: pick_account's own order (soonest seven-day reset), then prefer= each of the worker's accounts
     in its listed order, until one is on the worker's line and ready there. Lazy, so shop_tick, which takes the first,
@@ -2889,7 +2890,11 @@ def shop_worker():
     now = time.time()
     if board.soft_cap_reason():
         return
-    workers = [w for w in shop.workers() if now >= SHOP_RETRY_AT.get(w.alias, 0) and not board.cooling_down(w.alias)]
+    with SHOP_STATS_LOCK:
+        low = {e["name"] for e in SHOP_STATS["value"]
+               if e.get("free_disk_gb") is not None and e["free_disk_gb"] < board.MIN_FREE_DISK_GB}
+    workers = [w for w in shop.workers() if now >= SHOP_RETRY_AT.get(w.alias, 0) and not board.cooling_down(w.alias)
+               and w.alias not in low]
     if not workers:
         return
     on = board.shop_jobs_by_worker()  # each worker's shop jobs, every board
