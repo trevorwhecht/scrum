@@ -6310,6 +6310,33 @@ class BoardTest(unittest.TestCase):
         current.write_text("not json")
         self.assertEqual(cell(), "cpu_load(95%) 0m, swap 0m, ram_room(free=10%) 0m, vm_pressure 0m, runs_on_shop 0m")
 
+    def test_timing_row_unnamed_subtracts_union_of_spans(self):
+        """Job 1593: heads held at different times add up, overlaps count once, an old-shape head keeps the longest."""
+        self.claim_clock_job(1_700_000_000)  # Queue 3h05m
+        cell = lambda: board._timing_row(self.root, "j", {}, {})[0][3:5]
+        self.write("j/queue-gates.txt", "swap\nvm_pressure\n")
+        head = lambda spans: {"at": spans[-1][1], "text": "x", "held": sum(e - b for b, e in spans), "spans": spans}
+        put = lambda a, b: self.write("j/current-gates.json", json.dumps({"swap": a, "vm_pressure": b}))
+        put(head([[0, 3600]]), head([[7200, 10800]]))  # an hour each, apart: 2h held
+        self.assertEqual(cell(), ["3h05m", "swap 1h00m, vm_pressure 1h00m, unnamed 1h05m"])
+        put(head([[0, 3600]]), head([[1800, 5400]]))  # overlapping: union 1h30m
+        self.assertEqual(cell(), ["3h05m", "swap 1h00m, vm_pressure 1h00m, unnamed 1h35m"])
+        put({"at": 5000.0, "text": "x", "held": 1800}, {"at": 90000.0, "text": "x", "held": 900})  # old shape
+        self.assertEqual(cell(), ["3h05m", "swap 30m, vm_pressure 15m, unnamed 2h35m"])
+
+    def test_note_current_gate_spans(self):
+        """Job 1593: hits within GATE_HELD_GAP_SECS extend one span, a longer gap opens another, bad spans start over."""
+        (self.root / "jobs/j").mkdir(parents=True, exist_ok=True)
+        spans = lambda: json.loads((self.root / "jobs/j/current-gates.json").read_text())["swap"]["spans"]
+        for at in (1000.0, 1100.0, 1200.0 + board.GATE_HELD_GAP_SECS * 2):
+            with mock.patch("time.time", return_value=at):
+                board.note_current_gate(self.root, "j", "swap")
+        self.assertEqual(spans(), [[1000.0, 1100.0], [1800.0, 1800.0]])
+        self.write("j/current-gates.json", json.dumps({"swap": {"at": 1800.0, "spans": "bad", "held": 5}}))
+        with mock.patch("time.time", return_value=1850.0):
+            board.note_current_gate(self.root, "j", "swap")
+        self.assertEqual(spans(), [[1850.0, 1850.0]])
+
     def test_timing_row_every_gate_carries_held_minutes(self):
         """Job 1558: every head in the Queue gate cell prints its held minutes, 0m when current-gates.json has none
         (onewitharts digest 163 printed `overlap_skipped:<id>`, `cpu_queue` and `ram_room` bare), longest first, ties
