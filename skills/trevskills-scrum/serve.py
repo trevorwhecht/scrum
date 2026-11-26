@@ -6159,7 +6159,8 @@ def cached_machine_status():
 
 
 SHOP_STATS_TTL = 30  # seconds between background reads of the shop Macs' RAM and load; /api/machine never waits on ssh
-SHOP_STATS_CMD = "sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q"  # shop.PROBE_CMD's load lines, then free RAM
+# shop.PROBE_CMD's load lines, free RAM, then the shop home volume's free disk (df's last line, column 4: KiB available)
+SHOP_STATS_CMD = 'sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q; df -k "$HOME"'
 SHOP_STATS = {"at": None, "busy": False, "value": []}  # at: time.monotonic() the last refresh ended
 SHOP_STATS_LOCK = threading.Lock()
 
@@ -6175,10 +6176,11 @@ def shop_stats():
 
 
 def refresh_shop_stats():
-    """{"name", "free_ram_pct", "cpu_load_pct", "cpu_cores", "at"} per shop.workers() worker from one shop.run each:
-    memory_pressure's free RAM %, the 1-minute load as a % of all cores (board.cpu_load_pct's unit), the core count and
-    time.time() of the read. An unreadable value is null; a worker with neither reading is unreachable and is re-read
-    only after shop.DOWN_TTL, as shop.probe backs off a sleeping Mac."""
+    """{"name", "free_ram_pct", "cpu_load_pct", "cpu_cores", "free_disk_gb", "at"} per shop.workers() worker from one
+    shop.run each: memory_pressure's free RAM %, the 1-minute load as a % of all cores (board.cpu_load_pct's unit), the
+    core count, the shop home volume's free GB (the Available column of df -k's last line, after its Filesystem header,
+    x 1024 / 1e9, 1 place; job 1550) and time.time() of the read. An unreadable value is null; a worker with neither a
+    RAM nor a CPU reading is unreachable and is re-read only after shop.DOWN_TTL, as shop.probe backs off a sleeping Mac."""
     try:
         old, value = {e["name"]: e for e in SHOP_STATS["value"]}, []
         for w in shop.workers():
@@ -6193,9 +6195,14 @@ def refresh_shop_stats():
                 load, cores = float(lines[0].strip("{} ").split()[0]), int(lines[1])
             except (IndexError, ValueError):
                 load = cores = None
+            head = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith("Filesystem")), None)
+            try:
+                disk = round(int(lines[-1].split()[3]) * 1024 / 1e9, 1) if head is not None and head < len(lines) - 1 else None
+            except (IndexError, ValueError):
+                disk = None
             value.append({"name": w.alias, "free_ram_pct": float(ram.group(1)) if ram else None,
                           "cpu_load_pct": round(load / cores * 100, 1) if load is not None and cores else None,
-                          "cpu_cores": cores, "at": time.time()})
+                          "cpu_cores": cores, "free_disk_gb": disk, "at": time.time()})
         with SHOP_STATS_LOCK:
             SHOP_STATS["value"] = value
     finally:
