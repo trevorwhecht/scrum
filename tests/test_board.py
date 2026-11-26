@@ -6059,6 +6059,36 @@ class BoardTest(unittest.TestCase):
         cells = board._timing_row(self.root, "j", job, {})[0]  # no needs-human stop: Queue runs from the dispatch as before
         self.assertEqual((cells[3], cells[7]), ("1h30m", "0m"))
 
+    def test_take_spec_stamps_take_time_and_timing_prints_no_unnamed(self):
+        t0 = int(time.time()) - 5
+        (self.root / "backlog-specs").mkdir(parents=True, exist_ok=True)
+        src = board.spec_path(self.root, "Item")
+        src.write_text("spec\n")
+        os.utime(src, (t0 - 1260, t0 - 1260))  # the triager wrote it 21 min before the take
+        feature = self.write("j/feature.md", "x\n")
+        os.utime(feature, (t0, t0))
+        board.take_spec(self.root, "Item", "j")
+        spec = self.root / "jobs/j/spec.md"
+        self.assertGreaterEqual(spec.stat().st_mtime, time.time() - 120)
+        self.assertGreaterEqual(spec.stat().st_mtime, feature.stat().st_mtime)
+        runs = self.root / "runs"
+        runs.mkdir()
+        stamp = datetime.fromtimestamp(t0 + 20, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        (runs / f"{stamp}-start-j.log").write_text("x")
+        cells = board._timing_row(self.root, "j", {}, {})[0]
+        self.assertEqual(cells[3], "0m")  # from the take, not 21 min earlier
+        self.assertNotIn("unnamed", cells[4])
+
+    def test_timing_needs_human_after_last_round_is_human_wait(self):
+        t0 = 1_700_000_000
+        for at, rel in ((0, "feature.md"), (0, "spec.md"), (3600, "round-1/head.txt")):
+            p = self.write(f"j/{rel}", "x\n")
+            os.utime(p, (t0 + at, t0 + at))
+        job = {"updatedAt": datetime.fromtimestamp(t0 + 7200, timezone.utc).isoformat()}
+        cells = board._timing_row(self.root, "j", job, {}, (), [(t0 + 4200, t0 + 5400)])[0]
+        self.assertEqual(cells[7], "20m")
+        self.assertEqual(cells[6], "1h00m")
+
     def test_timing_queue_never_exceeds_wall(self):
         t0 = 1_700_000_000
         for rel in ("feature.md", "spec.md"):

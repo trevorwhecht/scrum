@@ -870,7 +870,9 @@ def take_spec(root, text, job_id):
     """Move the item's pre-written spec, if any, to the new job's spec.md. Caller holds the lock."""
     src = spec_path(root, text)
     if src.is_file():
-        os.replace(src, Path(root) / "jobs" / job_id / "spec.md")
+        dst = Path(root) / "jobs" / job_id / "spec.md"
+        os.replace(src, dst)
+        os.utime(dst)  # os.replace keeps the triager's mtime; _timing_row starts Queue at spec.md's, so stamp the take time
 
 
 E2E_FULL_MAIN = "E2E full suite on main"
@@ -3582,6 +3584,14 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
             heads.append((rd / "head.txt").read_text(encoding="utf-8", errors="replace").strip())
         except OSError:
             heads.append("")
+    if rounds and prev and hwaits:  # a needs-human span opening after the last round's last file shows in no round time: it is that round's Human wait
+        tail = sorted((max(a, prev), min(b, done) if done else b) for a, b in human)
+        upto = prev
+        for a, b in tail:  # overlaps count once
+            a = max(a, upto)
+            if b > a:
+                hwaits[-1] += b - a
+                upto = b
     same = [n for n, a, b in zip(rounds[1:], heads, heads[1:]) if a and a == b]
     waits = sum(len(E2E_LOCK_RE.findall(t)) for t in _round_text(folder, "check.md")) + len(queued)
     spec = spec_at - created if spec_at and created else None
