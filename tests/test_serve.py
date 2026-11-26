@@ -10071,7 +10071,8 @@ class SweepParentsHeldTest(unittest.TestCase):
     def test_parent_not_machine_waiting_notes_nothing(self):
         self.jobs[0]["reason"] = None
         (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
-        self.sweep(claim=False)
+        with mock.patch.object(self.serve, "start_ready"), mock.patch.object(self.serve, "respawn_orphans", return_value=False):
+            self.serve.sweep_parents("p", self.root, self.jobs, alive=lambda: (lambda j: True), claim=True)
         self.assertEqual(self.gates("002-kid"), {})
 
     def set_reason(self, reason):
@@ -10103,6 +10104,37 @@ class SweepParentsHeldTest(unittest.TestCase):
         self.sweep(claim=False)
         self.assertEqual(self.gates("002-kid")["swap"]["text"], self.REASON)
         self.assertEqual(self.gates("003-kid"), {}, "a child in build is not a ready waiting child")
+
+    def test_claim_off_tick_notes_claim_off_when_not_machine_waiting(self):
+        """Job 1604: a claim=False tick skips start_ready; the ready waiting child still reads a named gate."""
+        self.set_reason(None)
+        self.sweep(claim=False)
+        self.assertIn("claim_off", self.gates("002-kid"))
+        self.assertEqual(self.gates("003-kid"), {})
+
+    def test_claim_off_idle_parent_notes_claim_off(self):
+        self.set_reason(None)
+        self.jobs[2]["stage"] = "done"
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        with mock.patch.object(self.serve, "start_ready") as ready, \
+                mock.patch.object(self.serve, "respawn_orphans", return_value=False):
+            self.serve.sweep_parents("p", self.root, self.jobs, alive=lambda: (lambda j: False), claim=False)
+        ready.assert_not_called()
+        self.assertIn("claim_off", self.gates("002-kid"))
+
+    def test_chain_lock_tick_notes_chain_lock_when_not_machine_waiting(self):
+        self.set_reason(None)
+        (self.root / "jobs" / "001-par" / ".chain.lock").write_text("003-kid")
+        self.sweep(claim=True)
+        self.assertIn("chain_lock", self.gates("002-kid"))
+
+    def test_claiming_tick_notes_nothing_when_not_machine_waiting(self):
+        self.set_reason(None)
+        with mock.patch.object(self.serve, "start_ready") as ready, \
+                mock.patch.object(self.serve, "respawn_orphans", return_value=False):
+            self.serve.sweep_parents("p", self.root, self.jobs, alive=lambda: (lambda j: True), claim=True)
+        ready.assert_called_once()
+        self.assertEqual(self.gates("002-kid"), {})
 
 
 class ExitedRunSweepTest(unittest.TestCase):

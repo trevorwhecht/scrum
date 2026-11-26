@@ -3552,12 +3552,15 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
         why = p.get("reason") or ""
         if p["lane"] in ("runall", "bigboy") and why.startswith(board.MACHINE_WAIT):
             note_held(root, held_gate(why.removeprefix(board.MACHINE_WAIT)), ready_waiting(root, p["id"]), why)  # every tick, so held minutes keep running (jobs 1584, 1587)
+        machine_wait = why.startswith(board.MACHINE_WAIT)
         if not board.chain_lock_live(root, p["id"]) and respawn_orphans(project, root, p, kids, alive, by_id):
             continue  # a child was just respawned (a resumed one now reads stalled, i.e. idle): not idle this tick
         if not all(board.idle(k) for k in kids):
-            if p["lane"] == "runall" and any(k.get("stage") == "waiting" for k in kids) \
-                    and not board.chain_lock_live(root, p["id"]) and claim:
-                start_ready(project, root, p["id"])  # top up free slots: cmd_ready applies the caps and file clashes
+            if p["lane"] == "runall" and any(k.get("stage") == "waiting" for k in kids):
+                if not board.chain_lock_live(root, p["id"]) and claim:
+                    start_ready(project, root, p["id"])  # top up free slots: cmd_ready applies the caps and file clashes
+                elif not machine_wait:  # a skipped top-up still names the wait (job 1604)
+                    note_held(root, "chain_lock" if claim else "claim_off", ready_waiting(root, p["id"]))
             continue
         if finished_bigboy(p, by_id):
             # backstop for a missed chain-back: mark it MAIN_FF once it sits idle, so main_ff_tick resumes its final review
@@ -3581,6 +3584,9 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
             continue
         if not any(k.get("stage") == "waiting" for k in kids) or board.chain_lock_live(root, p["id"]) \
                 or any(running(project, k["id"]) for k in kids) or any(alive()(k) for k in kids) or not claim:
+            if any(k.get("stage") == "waiting" for k in kids) and not machine_wait \
+                    and (not claim or board.chain_lock_live(root, p["id"])):
+                note_held(root, "claim_off" if not claim else "chain_lock", ready_waiting(root, p["id"]))
             continue
         start_ready(project, root, p["id"])
 
