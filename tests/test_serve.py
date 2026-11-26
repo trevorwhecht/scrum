@@ -6779,6 +6779,83 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(self.statuses(), ["applied"])
         self.assertEqual([j["stage"] for j in self.jobs()], ["aborted", "done"])
 
+    def push_failed_card(self):
+        """digest_auto queues p1 as `push failed` and parks one needs-human card; returns that job and the raw proposal."""
+        self.git_repo()
+        self.flaky_origin(99)
+        self.contract_tests()
+        self.digest([self.prop("p1", self.reg / "agents" / "scrum-x.md")])
+        self.serve.digest_auto(self.scrum, "001")
+        [job] = self.jobs()
+        self.assertEqual(job["stage"], "needs-human")
+        return job, self.raw_props()[0]
+
+    def raw_props(self, root=None):
+        return json.loads(((root or self.scrum) / "digests" / "001" / "proposals.json").read_text())["proposals"]
+
+    def assert_card_stops_retries(self, cascade, ticks):
+        job, before = self.push_failed_card()
+        self.assertEqual(before.get("job"), job["id"])
+        self.board.cmd_abort(self.scrum, job["id"], False, cascade=cascade)
+        with mock.patch.object(self.serve, "DIGEST_PUSH_RETRY_GAP", 0), \
+                mock.patch.object(self.serve, "digest_apply", wraps=self.serve.digest_apply) as apply:
+            for _ in range(ticks):
+                self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+        apply.assert_not_called()
+        self.assertEqual([(j["id"], j["stage"]) for j in self.jobs()], [(job["id"], "aborted")])
+        [after] = self.raw_props()
+        self.assertEqual(after["status"], "queued")
+        self.assertEqual({k: after.get(k) for k in ("reason", "retries", "retry_at", "job")},
+                         {k: before.get(k) for k in ("reason", "retries", "retry_at", "job")})
+
+    def test_retry_tick_stops_after_card_aborted(self):
+        """Job 1572: Abort on the push-failed card stops the tick retrying that proposal."""
+        self.assert_card_stops_retries(cascade=False, ticks=1)
+
+    def test_retry_tick_stops_after_card_removed(self):
+        """Job 1572: Remove this job (abort --cascade) stops the retries too, over more than one tick."""
+        self.assert_card_stops_retries(cascade=True, ticks=2)
+
+    def push_hold(self, root, **extra):
+        """root/digests/001 holding p1 (an edit to reg) as a `push failed` hold due a retry."""
+        d = root / "digests" / "001"
+        d.mkdir(parents=True, exist_ok=True)
+        hold = self.prop("p1", self.reg / "agents" / "scrum-x.md", status="queued", reason="push failed: remote: no",
+                         retries=1, retry_at=0, **extra)
+        (d / "proposals.json").write_text(json.dumps({"proposals": [hold]}))
+
+    def test_retry_tick_reads_target_repo_board_for_aborted_job(self):
+        """Job 1572: the aborted check reads the target repo's board, not the board of the root holding the digest."""
+        job_id = self.board.cmd_new(self.scrum, "push failed card")
+        self.board.cmd_abort(self.scrum, job_id, False)
+        other = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, other, True)
+        self.push_hold(other / "scrum", job=job_id)
+        with mock.patch.object(self.serve, "DIGEST_PUSH_RETRY_GAP", 0), \
+                mock.patch.object(self.serve, "digest_apply_ready", return_value=None), \
+                mock.patch.object(self.serve, "digest_apply", return_value=([], [], None)) as apply:
+            self.serve.digest_retry_tick("other", other, other / "scrum")
+        apply.assert_not_called()
+        self.assertFalse((other / "scrum" / "board.json").exists())
+        self.assertEqual(self.raw_props(other / "scrum")[0]["retries"], 1)
+
+    def test_retry_tick_unknown_job_still_retries(self):
+        """Job 1572: a push-failed hold with no job, a non-string job, a job not on the target board, or an unreadable
+        target board is retried as before."""
+        cases = {"no job key": ({}, None), "job not a string": ({"job": 5}, None), "job not on board": ({"job": "999"}, None),
+                 "board unreadable": ({"job": "001"}, "{not json")}
+        for name, (extra, board_text) in cases.items():
+            with self.subTest(name):
+                self.scrum.mkdir(parents=True, exist_ok=True)
+                (self.scrum / "board.json").write_text(board_text or '{"jobs": []}')
+                self.push_hold(self.scrum, **extra)
+                with mock.patch.object(self.serve, "DIGEST_PUSH_RETRY_GAP", 0), \
+                        mock.patch.object(self.serve, "digest_apply_ready", return_value=None), \
+                        mock.patch.object(self.serve, "digest_apply", return_value=([], [], None)) as apply:
+                    self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+                self.assertEqual(apply.call_count, 1)
+                self.assertEqual(apply.call_args.kwargs["from_status"], "queued")
+
     def test_push_failed_job_is_stamped_per_repo(self):
         """Two repos in one digest, only the second push fails: its proposal carries the second repo's job id, and the
         first repo's job id is never stamped on it (job ids are local to each repo's board)."""
