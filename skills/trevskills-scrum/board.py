@@ -6359,7 +6359,9 @@ def save_limits(path, limits):
 
 def usage_from_stream(text):
     """rate_limits from `claude -p --output-format stream-json` output: per rate_limit_event, each unifiedWindows
-    five_hour/seven_day entry as {used_percentage: utilization*100, resets_at}; later events win; {} when none or malformed."""
+    five_hour/seven_day entry as {used_percentage: utilization*100, resets_at}; later events win; {} when none or malformed.
+    Verified live 2026-11-26 (owa and default accounts, haiku turn): unifiedWindows held only seven_day, never five_hour, so a
+    headless refresh cannot freshen the 5h window; its pace and hold read the old five_hour (kept while open) until a status line writes it."""
     out = {}
     for line in str(text).splitlines():
         try:
