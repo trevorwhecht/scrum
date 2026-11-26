@@ -155,7 +155,7 @@ For `## Waste`, use `DIGEST_DIR/waste.md`:
 For `## Token sinks`, use `DIGEST_DIR/tokens.md`:
 - Write one line per `## Flagged` job, costliest first. The median is its `<x.x>x lane median` reason, else `-`. `<per line>` is copied from the job's `## Jobs` line as written, never recomputed, `-` included.
 - `cause` says in one line where the money went, from its reasons and costliest-agent lines (an image-heavy reviewer, a round that cost as much as round 1, an agent off its pin).
-- Judge it `needed` when its `decision.md` or `round-*/review-*.md` show the extra rounds found a real bug, or when it ran one round and its only `## Flagged` reason is a `main <N>% of job cost` share (job 1552), and `not needed` when the cost came from the pipeline (an agent off its pinned model, a reviewer rebuilding its harness or worktree). `source` names the file you judged from.
+- Judge it `needed` when its `decision.md` or `round-*/review-*.md` show the extra rounds found a real bug, or when it ran one round and its `## Flagged` reasons are a `main <N>% of job cost` share alone or with `top 3 cost` (jobs 1552, 1574), and `not needed` when the cost came from the pipeline (an agent off its pinned model, a reviewer rebuilding its harness or worktree). `source` names the file you judged from.
 - Any `two sessions` or `two agents` flag is always written under `## Token sinks`, even for one job, as a scheduling bug (`not needed`), never as normal cost.
 - Write `None` when the file is missing or has no flagged job.
 - This section is exempt from the 2 or more different jobs rule.
