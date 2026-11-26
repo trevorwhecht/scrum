@@ -3055,7 +3055,9 @@ def shop_tick(project, repo, root) -> bool:
         return False
     if not all(map(is_child, pool)):  # a launch overlapping a running or cloud job waits; cmd_ready checks a child
         busy = busy_files(project, root, jobs)
-        pool = [j for j in pool if is_child(j) or clear_of_busy(board.child_files(jobs_dir, j["id"]), busy)]
+        kept = [j for j in pool if is_child(j) or clear_of_busy(board.child_files(jobs_dir, j["id"]), busy)]
+        passed_over(root, [j for j in pool if j not in kept], ["shop_busy_files"])  # job 1593: held on a running job's files
+        pool = kept
         if not pool:
             return False
     w, account = next(shop_worker(), (None, None))  # the first with room, ready and an account
@@ -3066,9 +3068,11 @@ def shop_tick(project, repo, root) -> bool:
         return False
     alias, mains = w.alias, 0
     full = board.shop_heavy_by_worker()[alias] >= board.SHOP_HEAVY_PER_WORKER  # this worker already runs its heavy job
+    heavy_held = []
     for job in pool:  # the first that claims; a main job (never sent) or a child held on an overlap tries the next
         if full and heavy[job["id"]]:  # job 1314: a second heavy job never goes to one worker
             mains += 1
+            heavy_held.append(job)
             continue
         if board.tag_runs_on(root, job["id"]) == "main":  # Jev, if asked, only now that a worker has room
             mains += 1
@@ -3077,6 +3081,7 @@ def shop_tick(project, repo, root) -> bool:
         if not child or job["id"] in board.cmd_ready(root, job["parent"], live_ids(project), shop=job["id"])["ready"]:
             break
     else:
+        passed_over(root, heavy_held, [f"shop_heavy:{alias}"])  # job 1593: a free worker, its heavy slot taken
         if not (new or mains == len(pool) and new_ok()):  # a pool of main jobs only holds no new work
             return False
         new, busy = True, None

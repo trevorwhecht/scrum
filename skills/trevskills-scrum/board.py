@@ -3461,6 +3461,34 @@ def _deps_done_at(job, by_id):
     return max(ends)
 
 
+def _head_spans(v):
+    """The (start, end) epoch spans a current-gates.json head entry holds (note_current_gate, job 1593); an entry with no
+    usable `spans` (old shape, bare epoch) is its "held" secs as one span from 0, else none: old heads all start together,
+    so their union is the longest, the result before spans existed."""
+    if not isinstance(v, dict):
+        return []
+    spans = v.get("spans")
+    if isinstance(spans, list):
+        good = [(a, b) for sp in spans if isinstance(sp, (list, tuple)) and len(sp) == 2
+                for a, b in [sp] if type(a) in (int, float) and type(b) in (int, float) and b >= a]
+        if good:
+            return good
+    held = v.get("held")
+    if type(held) in (int, float) and held > 0:
+        return [(0, held)]
+    return []
+
+
+def _union_secs(spans):
+    """Total seconds covered by `spans` (start, end pairs), overlaps counted once."""
+    total, upto = 0, None
+    for a, b in sorted(spans):
+        a = a if upto is None else max(a, upto)
+        if b > a:
+            total, upto = total + b - a, b
+    return total
+
+
 def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=None):
     """(row cells, wall secs, rounds, no-change rounds, E2E lock waits, stall secs to resume) for one claimed job. The no-change cell is the count and the later round of each
     equal pair, e.g. `2 (rounds 2,3)`. Created is feature.md's
@@ -3479,7 +3507,7 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
     current-gates.json (note_current_gate), 0m with none, e.g. `vm_pressure 6h10m, cpu_queue 0m`; a depends_on:<id>
     gate's are the Queue pieces before that blocker's updatedAt when by_id has it at stage done, else its held
     seconds, else the whole Queue. With a Queue over 0, each head's minutes are clipped to it and the Queue less the
-    longest depends_on head less the longest other head, floored at 0, prints last as `unnamed <m>` when it rounds to
+    longest depends_on head less the union of the other heads' held spans (job 1593), floored at 0, prints last as `unnamed <m>` when it rounds to
     1m or more (jobs 1568, 1587).
     by_id (write_timing's {id: board job}): when every depends_on blocker is on it at stage done (_deps_done_at), the
     Queue cell is `<total> (<after> after depends_on)`, <after> being the part of each Queue piece (feature.md to the
@@ -3600,7 +3628,7 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
         held = {g: min(h, queue) for g, h in held.items()}
     cells_g = [f"{g} {_mins(held[g])}" for g in sorted(gates, key=lambda g: -held[g])]
     dep_wait = max((h for g, h in held.items() if g.startswith("depends_on:")), default=0)  # blockers overlap: never summed
-    other = max((h for g, h in held.items() if not g.startswith("depends_on:")), default=0)  # heads overlap (swap and vm_pressure in one tick): never summed
+    other = _union_secs([sp for g in gates if not g.startswith("depends_on:") for sp in _head_spans(seen.get(g.split("(", 1)[0]))])  # job 1593: heads held at different times add up; overlaps count once
     if queue and _mins(rest := max(queue - dep_wait - other, 0)) != "0m":  # job 1587: a machine gate holds after the depends_on wait
         cells_g.append(f"unnamed {_mins(rest)}")
     gate_cell = ", ".join(cells_g) or "-"
@@ -7407,7 +7435,7 @@ def overlap_gate(holder, mine, theirs):
     return f"overlap:{holder}:{min(shared)}" if shared else f"overlap:{holder}"
 
 
-CURRENT_GATES = "current-gates.json"  # {gate head: {"at": epoch seconds last hit, "text": why, "held": secs held}} (a bare epoch number is the old shape); serve.py gate_heads reads it (job 1408)
+CURRENT_GATES = "current-gates.json"  # {gate head: {"at": epoch seconds last hit, "text": why, "held": secs held, "spans": [[start, end], ...]}} (a bare epoch number is the old shape); serve.py gate_heads reads it (job 1408)
 GATE_HELD_GAP_SECS = 300  # note_current_gate: a hit this soon after the head's last one adds the gap to its "held" secs (job 1485)
 
 
@@ -7436,9 +7464,17 @@ def note_current_gate(root, job_id: str, gate: str, reason: str | None = None) -
             last = prior.get("at") if isinstance(prior, dict) else prior
             held = prior.get("held", 0) if isinstance(prior, dict) else 0
             held = held if type(held) in (int, float) and held > 0 else 0
-            if type(last) in (int, float) and 0 <= now - last < GATE_HELD_GAP_SECS:
+            spans = prior.get("spans") if isinstance(prior, dict) else None  # job 1593: the spans the head was held; malformed starts over
+            spans = [[a, b] for sp in spans if isinstance(sp, (list, tuple)) and len(sp) == 2
+                     for a, b in [sp] if type(a) in (int, float) and type(b) in (int, float)] if isinstance(spans, list) else []
+            near = type(last) in (int, float) and 0 <= now - last < GATE_HELD_GAP_SECS
+            if near:
                 held += now - last
-            seen[head] = {"at": now, "text": reason or gate, **({"held": held} if held else {})}
+            if near and spans and spans[-1][1] == last:
+                spans[-1][1] = now
+            else:
+                spans.append([now, now])
+            seen[head] = {"at": now, "text": reason or gate, **({"held": held} if held else {}), "spans": spans}
             try:
                 tmp.write_text(json.dumps(seen), encoding="utf-8")
                 os.replace(tmp, path)

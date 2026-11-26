@@ -10676,15 +10676,15 @@ class WatchdogIdleParentTest(unittest.TestCase):
         with mock.patch("time.time", return_value=1000.0):
             self.serve.note_queue_gate(self.root, "002-second", "ram_room(free=10%)")
             self.board.note_queue_gate(self.root, "002-second", "depends_on:001-first")
-        self.assertEqual(self.current_gates("002-second"), {"ram_room": {"at": 1000.0, "text": "ram_room(free=10%)"},
-                                                            "depends_on:001-first": {"at": 1000.0, "text": "depends_on:001-first"}})
+        self.assertEqual(self.current_gates("002-second"), {"ram_room": {"at": 1000.0, "text": "ram_room(free=10%)", "spans": [[1000.0, 1000.0]]},
+                                                            "depends_on:001-first": {"at": 1000.0, "text": "depends_on:001-first", "spans": [[1000.0, 1000.0]]}})
         with mock.patch("time.time", return_value=2000.0):
             self.serve.note_queue_gate(self.root, "002-second", "ram_room(free=5%)", reason="ram_room(free=5%): low")
             self.board.note_queue_gate(self.root, "002-second", "depends_on:001-first", "waits for 001-first")
             self.board.note_queue_gate(self.root, "002-second", "heavy_cap", reason="heavy_cap(2/2): ids")
-        self.assertEqual(self.current_gates("002-second"), {"ram_room": {"at": 2000.0, "text": "ram_room(free=5%): low"},
-                                                            "depends_on:001-first": {"at": 2000.0, "text": "waits for 001-first"},
-                                                            "heavy_cap": {"at": 2000.0, "text": "heavy_cap(2/2): ids"}})
+        self.assertEqual(self.current_gates("002-second"), {"ram_room": {"at": 2000.0, "text": "ram_room(free=5%): low", "spans": [[1000.0, 1000.0], [2000.0, 2000.0]]},
+                                                            "depends_on:001-first": {"at": 2000.0, "text": "waits for 001-first", "spans": [[1000.0, 1000.0], [2000.0, 2000.0]]},
+                                                            "heavy_cap": {"at": 2000.0, "text": "heavy_cap(2/2): ids", "spans": [[2000.0, 2000.0]]}})
         self.assertEqual(self.gate_text("002-second"), "ram_room(free=10%)\ndepends_on:001-first\nheavy_cap\n")
         (self.root / "jobs" / "003-third").mkdir(parents=True)
         self.serve.note_stall_hold(self.root, "003-third", "ram_room(free=10%)")

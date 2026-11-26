@@ -1448,6 +1448,30 @@ class ShopTickTest(unittest.TestCase):
                     self.sh.start.assert_not_called()
                     self.assert_held(root)
 
+    def test_busy_files_and_heavy_skip_stamp_gates(self):
+        """Job 1593: a launch the busy-files filter drops gets `shop_busy_files`, a heavy job a full-heavy worker skips
+        gets `shop_heavy:<alias>`, each in queue-gates.txt and current-gates.json; a Runs-on-main job gets none, and
+        a job the pool never held gets none."""
+        gates = lambda root, j: (root / "jobs" / j / "queue-gates.txt").read_text() \
+            if (root / "jobs" / j / "queue-gates.txt").exists() else None
+        root = self.project("mm", [self.queued("050-q", likely=["src/a.py"]),
+                                   self.queued("051-m", likely=["src/a.py"], runs_on="main"), self.holder("cloud")])
+        self.assertEqual(self.tick(), (False, "", ""))
+        self.assertEqual((gates(root, "050-q"), gates(root, "051-m")), ("shop_busy_files\n", None))
+        self.assertEqual(sorted(json.loads((root / "jobs" / "050-q" / "current-gates.json").read_text())),
+                         ["shop_busy_files"])
+        with self.subTest("empty pool: nothing is stamped"):
+            root = self.project("mm", [self.holder("cloud")])
+            self.assertEqual(self.tick(), (False, "", ""))
+            self.assertFalse(list((root / "jobs").glob("*/queue-gates.txt")))
+        with self.subTest("heavy skip"):
+            self.two_live()
+            running = {"id": "010-c", "stage": "cloud", "shop": "11", "worker": "shopmac", "account": "main",
+                       "likely": ["src/z.py"]}
+            root = self.project("mm", [*self.STARTED, running, self.queued("060-h", likely=["src/a.py"])])
+            self.assertEqual(self.tick(), (False, "", ""))
+            self.assertEqual(gates(root, "060-h"), "shop_heavy:shopmac\n")
+
     def test_no_launch_no_overlap_work(self):
         with mock.patch.object(self.serve, "busy_files", side_effect=AssertionError("overlap work")), \
                 mock.patch.object(self.board, "machine_ok", side_effect=AssertionError("sensor read")):
