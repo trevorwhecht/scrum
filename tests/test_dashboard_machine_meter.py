@@ -274,6 +274,27 @@ class MachineMeter(unittest.TestCase):
             mac + shop + T("Shop mac2", ring("none", 0, "—", "Shop mac2 unreachable · checked 40s ago") + L() + cool("mac2")),
             mac, mac])
 
+    def test_machine_meter_shop_disk(self):
+        """Job 1550: a shop Mac's free disk sits after its CPU ring as `disk N GB`, coloured as This Mac's disk; a red
+        reading names the wait; a null or missing reading shows nothing."""
+        at = NOW - 40
+        up = {"name": "shopmac", "free_ram_pct": 41, "cpu_load_pct": 62.5, "cpu_cores": 4, "at": at}
+        cases = [{**up, "free_disk_gb": 50.2}, {**up, "free_disk_gb": 15}, {**up, "free_disk_gb": 0.5},
+                 {**up, "free_disk_gb": None}, up]
+        out = self.node_meter(f"console.log(JSON.stringify({json.dumps(cases)}.map(shop => {{\n"
+                              "  renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, verdict: null, shop: [shop]});\n"
+                              "  return el.innerHTML; })));")
+        ring = lambda lvl, pct, text, tip: f'<span class="ring {lvl}" role="img" style="--pct:{pct}" aria-label="{tip}" title="{tip}">{text}</span>'
+        mac = MAC(ring("ok", 60, "40%", "RAM 40% free · swap 1%") + L("RAM") + " " + CPU_NONE + ' <span class="ok">disk 100 GB</span>')
+        rings = (ring("ok", 59, "41%", "Shop shopmac RAM 41% free · read 40s ago") + L("RAM") + " "
+                 + ring("ok", 63, "63%", "Shop shopmac CPU load 63% of 4 cores · read 40s ago") + L("CPU"))
+        shop = lambda disk: mac + T("Shop shopmac", rings + disk + cool())
+        self.assertEqual(out, [
+            shop(' <span class="ok">disk 50 GB</span>'),
+            shop(' <span class="low">disk 15 GB</span>'),
+            shop(' <span class="danger">disk 1 GB, launches wait for 10 GB free</span>'),
+            shop(""), shop("")])
+
     def test_machine_meter_sparklines(self):
         """A 40x14 line of each ring's last 30 min beside it, under its label, scaled 0-100 (CPU: to its peak past 100):
         RAM plots RAM in use, as the ring's arc does; a gap is skipped; fewer than 2 readings draw none."""
