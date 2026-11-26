@@ -1523,6 +1523,8 @@ def cmd_backlog_spec(root, job_id):
             path.parent.mkdir(exist_ok=True)
             path.write_text(body, encoding="utf-8")
     for text, opts in adds:
+        if clean(text, ITEM_MAX).startswith(E2E_SLOW_ITEM) and e2e_slow_in_flight(root):
+            continue
         target = add_target(root, opts["project"])
         if target is None:
             target, text = Path(root), f"{text} (for {opts['project']}: not a registered project)"
@@ -4569,9 +4571,24 @@ def cmd_e2e_stopped(root, job_id, since=None) -> dict:
     return out
 
 
+def e2e_slow_in_flight(root) -> bool:
+    """True while a board job whose stage is not done or aborted has a feature.md starting with E2E_SLOW_ITEM: the
+    item is already claimed, so a second one would redo its edit (job 1626). unless_open sees only open backlog lines."""
+    for job in read_board(root).get("jobs") or []:
+        if not isinstance(job, dict) or job.get("stage") in ("done", "aborted"):
+            continue
+        try:
+            head = (Path(root) / "jobs" / check_id(str(job.get("id"))) / "feature.md").read_text(errors="replace")
+        except (OSError, SystemExit):
+            continue
+        if head.lstrip().startswith(E2E_SLOW_ITEM):
+            return True
+    return False
+
+
 def cmd_e2e_budget(root, job_id, log) -> dict:
     """e2e_budget of the log file plus "backlog": when over budget with no failed test, the one E2E_SLOW_ITEM backlog
-    item this run filed (None when one is already open or nothing is filed). On a worker (on_worker) the item is
+    item this run filed (None when one is already open or in flight as a job, or nothing is filed). On a worker (on_worker) the item is
     written as a "Backlog: add" file in jobs/<id>/followups/ (worker_add) instead, and backlog.md is left alone."""
     job_id = check_id(job_id)
     try:
@@ -4579,7 +4596,7 @@ def cmd_e2e_budget(root, job_id, log) -> dict:
     except OSError:
         raise SystemExit(f"cannot read {log}")
     out = {**e2e_budget(text), "backlog": None}
-    if out["over_budget"] and not out["failed"]:
+    if out["over_budget"] and not out["failed"] and not e2e_slow_in_flight(root):
         times = ", ".join(f"{f} {s:g}s" for f, s in out["slowest"]) or "no per-test times in the log"
         item = f"{E2E_SLOW_ITEM}: {times} (job {job_id} E2E ran past the {E2E_BUDGET_MS // 60000} min budget)"
         if on_worker():  # a worker's backlog.md never comes home: the job's followups do (job 1504)

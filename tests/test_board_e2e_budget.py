@@ -226,6 +226,35 @@ class E2eBudgetBacklogTest(unittest.TestCase):
         self.assertEqual([p.name for p in followups.iterdir()], ["add-1.md"])
         self.assertEqual((followups / "add-1.md").read_text(), f"Backlog: add\nItem: {text}\n")
 
+    def claim(self, stage, job_id="2170-speed-up"):
+        """A board job with that stage whose feature.md starts with the slow-E2E item (job 1626)."""
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": job_id, "stage": stage}]}))
+        d = self.root / "jobs" / job_id
+        d.mkdir(parents=True)
+        (d / "feature.md").write_text("Speed up the slowest job E2E spec files: a.spec.ts 9s (job 1-x)\n")
+
+    def test_in_flight_slow_job_skips_filing(self):
+        self.claim("build")
+        self.assertIsNone(board.cmd_e2e_budget(self.root, "1764-slow-run", self.log)["backlog"])
+        self.assertEqual(self.open_items(), [])
+
+    def test_done_slow_job_still_files(self):
+        self.claim("done")
+        self.assertIsNotNone(board.cmd_e2e_budget(self.root, "1764-slow-run", self.log)["backlog"])
+        self.assertEqual(len(self.open_items()), 1)
+
+    def test_aborted_slow_job_still_files(self):
+        self.claim("aborted")
+        self.assertIsNotNone(board.cmd_e2e_budget(self.root, "1764-slow-run", self.log)["backlog"])
+        self.assertEqual(len(self.open_items()), 1)
+
+    def test_in_flight_slow_job_skips_worker_followup(self):
+        self.claim("build")
+        with mock.patch.dict(os.environ, {"SCRUM_SHOP": "1"}):
+            out = board.cmd_e2e_budget(self.root, "1764-slow-run", self.log)
+        self.assertIsNone(out["backlog"])
+        self.assertFalse((self.root / "jobs" / "1764-slow-run" / "followups").exists())
+
     def test_missing_log_exits(self):
         with self.assertRaises(SystemExit):
             board.cmd_e2e_budget(self.root, "1764-slow-run", Path(self.tmp.name) / "nope.log")
