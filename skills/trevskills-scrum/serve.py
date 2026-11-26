@@ -5161,7 +5161,7 @@ def watchdog_tick():
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     6. Pulse: pulse_loop runs pulse_tick on its own 60 s timer thread (job 1429, so a slow step here never delays its
        stuck_alert); this tick only publishes its busy map to PULSE_BUSY. Slow steps are named on stderr by TIMED_STEPS' wrappers.
-    Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard, then runs e2e_lock_reap and render_reap_tick (stops orphaned render Chromes),
+    Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard, then shop_stats (starts the background shop read; job 1575), then runs e2e_lock_reap and render_reap_tick (stops orphaned render Chromes),
     then write_shop_room (shop-room.json, which cmd_ready reads), written again after a shop_tick that dispatched,
     then agent_links_tick (re-runs install.sh when a scrum agent link is bad, in its own guard), then hot_stop_tick once,
     before the per-project loop (stops a running UI sweep or full E2E while board.heavy_hold gives a reason, in its own
@@ -5173,6 +5173,10 @@ def watchdog_tick():
         board.record_cpu_sample()  # cpu_busy_pct's reading; first, so this tick's machine_ok sees it
     except (Exception, SystemExit) as e:
         print(f"watchdog: cpu sample: {e}", file=sys.stderr, flush=True)
+    try:
+        shop_stats()  # job 1575: starts the TTL-gated background SHOP_STATS read, so the shop disk gate needs no open dashboard
+    except Exception as e:
+        print(f"watchdog: shop stats: {e}", file=sys.stderr, flush=True)
     try:
         e2e_lock_reap(time.time())  # frees e2e.lock (dead, out-of-check, orphaned holder), stops orphaned E2E dev servers
     except Exception as e:
