@@ -1847,6 +1847,16 @@ class WorkerBacklogTest(unittest.TestCase):
         out = board.cmd_backlog_spec(self.root, self.JOB)
         self.assertEqual(out["added"], ["Speed up the slowest job E2E spec files: a.spec.ts 9s (job 042-x)"])
 
+    def test_backlog_spec_add_slow_e2e_item_skipped_while_job_in_flight(self):
+        """Job 1626: an E2E_SLOW_ITEM add is not filed while a live job's feature.md starts with it."""
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": "2170-x", "stage": "build"}]}))
+        (self.root / "jobs" / "2170-x").mkdir(parents=True)
+        (self.root / "jobs" / "2170-x" / "feature.md").write_text("Speed up the slowest job E2E spec files: a 9s\n")
+        self.write_add("add-1.md", "Backlog: add\nItem: Speed up the slowest job E2E spec files: b.spec.ts 8s (job 042-x)\n")
+        self.write_add("add-2.md", "Backlog: add\nItem: Other item\n")
+        out = board.cmd_backlog_spec(self.root, self.JOB)
+        self.assertEqual(out["added"], ["Other item"])
+
     def test_backlog_spec_add_unknown_project(self):
         self.write_add("add-1.md", "Backlog: add\nItem: Lost item\nProject: nowhere\n")
         other_before = self.backlog(self.other)
