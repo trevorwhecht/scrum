@@ -1831,7 +1831,7 @@ PROCESSES = (
     ("UI sweep", ("ui_sweep_tick", "cmd_ui_sweep_record", "hot_stop_tick"), ("ui-sweep.json", "ui-sweep/*/review.md")),
     ("Prod error sweep", ("prod_errors_tick",), ("prod-errors.json",)),
     ("Actions alerts", ("actions_alert",), ()),
-    ("Disk reclaim", ("reclaim_disk",), ()),
+    ("Disk reclaim", ("reclaim_disk", "shop_reclaim_tick", "shop_reclaim"), ()),
     ("Idle cleanup", ("idle_cleanup", "stop_dev_servers", "stop_orphans", "docker_tick", "prune_worktrees"), ()),
     ("Leftover sessions", ("stop_leftovers", "stop_tree", "process_scan"), ()),
     ("Two sessions", ("stop_two_sessions",), ()),

@@ -2880,7 +2880,8 @@ SHOP_ENDED = "requeue: shop session ended without a PR"
 
 def shop_worker():
     """Yield (worker, account) for each shop.workers() worker, in file order, that is out of backoff (SHOP_RETRY_AT),
-    not cooled (board.cooling_down(alias): its own Cool down button; its started jobs finish), runs fewer than its max
+    not cooled (board.cooling_down(alias): its own Cool down button; its started jobs finish), whose last cached
+    SHOP_STATS free_disk_gb is not under board.MIN_FREE_DISK_GB (no entry or null passes; never ssh; job 1550), runs fewer than its max
     stage-cloud `shop` jobs on every board (no `worker` field: shopmac), is shop.ready(alias)
     and has an account: pick_account's own order (soonest seven-day reset), then prefer= each of the worker's accounts
     in its listed order, until one is on the worker's line and ready there. Lazy, so shop_tick, which takes the first,
@@ -2889,7 +2890,11 @@ def shop_worker():
     now = time.time()
     if board.soft_cap_reason():
         return
-    workers = [w for w in shop.workers() if now >= SHOP_RETRY_AT.get(w.alias, 0) and not board.cooling_down(w.alias)]
+    with SHOP_STATS_LOCK:
+        low = {e["name"] for e in SHOP_STATS["value"]
+               if e.get("free_disk_gb") is not None and e["free_disk_gb"] < board.MIN_FREE_DISK_GB}
+    workers = [w for w in shop.workers() if now >= SHOP_RETRY_AT.get(w.alias, 0) and not board.cooling_down(w.alias)
+               and w.alias not in low]
     if not workers:
         return
     on = board.shop_jobs_by_worker()  # each worker's shop jobs, every board
@@ -3654,6 +3659,85 @@ def reclaim_disk(repo: Path, jobs: list[dict]) -> int:
     if removed:
         board.log_process("Disk reclaim", "freed", repo=str(repo), removed=removed)
     return removed
+
+
+SHOP_RECLAIM_EVERY = 3600  # seconds between two shop worktree sweeps of one worker (shop_reclaim_tick)
+SHOP_RECLAIM_AT = {}  # worker alias -> time.time() its last sweep started; memory only, so a restart sweeps at once
+SHOP_RECLAIM = {"busy": False}  # True while a shop_reclaim_tick thread sweeps: one at a time
+SHOP_RECLAIM_LOCK = threading.Lock()
+
+
+def shop_reclaim(alias: str) -> int:
+    """Sweep worker `alias`'s finished worktrees (job 1550): for each board.projects() repo, send shop.reclaim (the
+    shop clone is ~/scrum-work/<repo name>, as shop_tick's clone) that board's done and aborted jobs with each job's
+    `shop` pid (0 with none), leaving out an id whose scrum-<id> folder a job in another stage uses (its id or its
+    worktree's basename: reclaim_disk's keep rule). A board with nothing to send makes no ssh call; a bad board is one
+    `watchdog: shop reclaim: <project>: <error>` stderr line. Writes one `Disk reclaim` processes.log line with
+    worker=<alias> and the folders removed over every project, 0 included, and returns that total."""
+    total = 0
+    for project, repo in board.projects().items():
+        try:
+            root = repo / "scrum"
+            if not (root / "board.json").exists():
+                continue
+            jobs = board.read_board(root)["jobs"]
+            keep = {f"scrum-{j['id']}" for j in jobs if j.get("stage") not in ("done", "aborted")} \
+                | {Path(j["worktree"]).name for j in jobs if j.get("worktree") and j.get("stage") not in ("done", "aborted")}
+            send = [(j["id"], int(j["shop"]) if re.fullmatch(r"[0-9]{1,10}", str(j.get("shop") or "")) else 0)
+                    for j in jobs if j.get("stage") in ("done", "aborted") and f"scrum-{j['id']}" not in keep]
+            if send:
+                total += shop.reclaim(repo.name, send, alias=alias) or 0
+        except (Exception, SystemExit) as e:
+            print(f"watchdog: shop reclaim: {project}: {e}", file=sys.stderr, flush=True)
+    board.log_process("Disk reclaim", "shop", worker=alias, removed=total)
+    return total
+
+
+def shop_reclaim_sweep(aliases: list[str]) -> None:
+    """shop_reclaim_tick's thread: shop_reclaim each alias in turn (one failure never skips the next), then clears
+    SHOP_RECLAIM's busy flag."""
+    try:
+        for alias in aliases:
+            try:
+                shop_reclaim(alias)
+            except (Exception, SystemExit) as e:
+                print(f"watchdog: shop reclaim: {alias}: {e}", file=sys.stderr, flush=True)
+    finally:
+        with SHOP_RECLAIM_LOCK:
+            SHOP_RECLAIM["busy"] = False
+
+
+def shop_reclaim_tick() -> None:
+    """Once a watchdog tick: start one daemon thread (shop_reclaim_sweep; none while one runs) that sweeps every due
+    shop.workers() worker, cooled ones included, so the watchdog thread never runs ssh. A worker is due when
+    SHOP_RECLAIM_EVERY has passed since its last sweep started (SHOP_RECLAIM_AT; never swept: due), or its cached
+    SHOP_STATS free_disk_gb is under board.MIN_FREE_DISK_GB and that reading's `at` is newer than its last sweep.
+    Under unittest it runs only with SCRUM_SHOP_RECLAIM=1, so another test's watchdog tick never starts a sweep."""
+    if "unittest" in sys.modules and os.environ.get("SCRUM_SHOP_RECLAIM") != "1":
+        return
+    now = time.time()
+    with SHOP_STATS_LOCK:
+        stats = {e["name"]: e for e in SHOP_STATS["value"]}
+    with SHOP_RECLAIM_LOCK:
+        if SHOP_RECLAIM["busy"]:
+            return
+        due = []
+        for w in shop.workers():
+            last, e = SHOP_RECLAIM_AT.get(w.alias), stats.get(w.alias) or {}
+            low = e.get("free_disk_gb") is not None and e["free_disk_gb"] < board.MIN_FREE_DISK_GB \
+                and (last is None or (e.get("at") or 0) > last)
+            if last is None or now - last >= SHOP_RECLAIM_EVERY or low:
+                due.append(w.alias)
+                SHOP_RECLAIM_AT[w.alias] = now
+        if not due:
+            return
+        SHOP_RECLAIM["busy"] = True
+    try:
+        threading.Thread(target=shop_reclaim_sweep, args=(due,), daemon=True).start()
+    except BaseException:
+        with SHOP_RECLAIM_LOCK:
+            SHOP_RECLAIM["busy"] = False
+        raise
 
 
 PROD_ERRORS_EVERY = 86400  # seconds between one project's successful prod error sweeps (watchdog only)
@@ -4789,6 +4873,7 @@ def watchdog_tick():
     Then stop_two_sessions keeps one owner when two claude sessions work one job and stops the rest (asks when unclear).
     Then stop_same_tests stops the newer of two identical full Test or E2E runs on one clean commit and logs a full E2E rerun of a head e2e-full.json already holds.
     Then report_hogs lists, never stops, each process outside the scrum over one core for 10+ minutes, for the meter.
+    Then shop_reclaim_tick starts a thread that removes finished jobs' worktrees on each due shop Mac (hourly, or at once on a low disk reading).
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     6. Pulse: pulse_loop runs pulse_tick on its own 60 s timer thread (job 1429, so a slow step here never delays its
@@ -4980,6 +5065,10 @@ def watchdog_tick():
         report_hogs()
     except (Exception, SystemExit) as e:
         print(f"watchdog: cpu hogs: {e}", file=sys.stderr, flush=True)
+    try:  # its own guard: due shop Macs' finished worktrees, swept on a thread (job 1550)
+        shop_reclaim_tick()
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: shop reclaim: {e}", file=sys.stderr, flush=True)
     if claim:
         try:
             auto_continue_tick(busy)
@@ -6159,7 +6248,8 @@ def cached_machine_status():
 
 
 SHOP_STATS_TTL = 30  # seconds between background reads of the shop Macs' RAM and load; /api/machine never waits on ssh
-SHOP_STATS_CMD = "sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q"  # shop.PROBE_CMD's load lines, then free RAM
+# shop.PROBE_CMD's load lines, free RAM, then the shop home volume's free disk (df's last line, column 4: KiB available)
+SHOP_STATS_CMD = 'sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q; df -k "$HOME"'
 SHOP_STATS = {"at": None, "busy": False, "value": []}  # at: time.monotonic() the last refresh ended
 SHOP_STATS_LOCK = threading.Lock()
 
@@ -6175,10 +6265,11 @@ def shop_stats():
 
 
 def refresh_shop_stats():
-    """{"name", "free_ram_pct", "cpu_load_pct", "cpu_cores", "at"} per shop.workers() worker from one shop.run each:
-    memory_pressure's free RAM %, the 1-minute load as a % of all cores (board.cpu_load_pct's unit), the core count and
-    time.time() of the read. An unreadable value is null; a worker with neither reading is unreachable and is re-read
-    only after shop.DOWN_TTL, as shop.probe backs off a sleeping Mac."""
+    """{"name", "free_ram_pct", "cpu_load_pct", "cpu_cores", "free_disk_gb", "at"} per shop.workers() worker from one
+    shop.run each: memory_pressure's free RAM %, the 1-minute load as a % of all cores (board.cpu_load_pct's unit), the
+    core count, the shop home volume's free GB (the Available column of df -k's last line, after its Filesystem header,
+    x 1024 / 1e9, 1 place; job 1550) and time.time() of the read. An unreadable value is null; a worker with neither a
+    RAM nor a CPU reading is unreachable and is re-read only after shop.DOWN_TTL, as shop.probe backs off a sleeping Mac."""
     try:
         old, value = {e["name"]: e for e in SHOP_STATS["value"]}, []
         for w in shop.workers():
@@ -6193,9 +6284,14 @@ def refresh_shop_stats():
                 load, cores = float(lines[0].strip("{} ").split()[0]), int(lines[1])
             except (IndexError, ValueError):
                 load = cores = None
+            head = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith("Filesystem")), None)
+            try:
+                disk = round(int(lines[-1].split()[3]) * 1024 / 1e9, 1) if head is not None and head < len(lines) - 1 else None
+            except (IndexError, ValueError):
+                disk = None
             value.append({"name": w.alias, "free_ram_pct": float(ram.group(1)) if ram else None,
                           "cpu_load_pct": round(load / cores * 100, 1) if load is not None and cores else None,
-                          "cpu_cores": cores, "at": time.time()})
+                          "cpu_cores": cores, "free_disk_gb": disk, "at": time.time()})
         with SHOP_STATS_LOCK:
             SHOP_STATS["value"] = value
     finally:

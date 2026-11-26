@@ -2327,7 +2327,9 @@ class ServeTest(unittest.TestCase):
     def test_shop_stats_reads_each_worker_and_backs_off_a_down_one(self):
         s = self.serve
         self.shop_stats_state()
-        up = "{ 6.00 5.00 4.00 }\n4\nThe system has 8589934592 (524288 pages).\nSystem-wide memory free percentage: 41%\n"
+        up = ("{ 6.00 5.00 4.00 }\n4\nThe system has 8589934592 (524288 pages).\nSystem-wide memory free percentage: 41%\n"
+              "Filesystem   1024-blocks      Used Available Capacity iused ifree %iused  Mounted on\n"
+              "/dev/disk1s5   488245288 470000000  12207031    98%  500000 4882452720    0%   /System/Volumes/Data\n")
         outs = {"shopmac": (0, up), "mac2": (255, "")}
         calls = []
 
@@ -2339,10 +2341,12 @@ class ServeTest(unittest.TestCase):
                 mock.patch.object(s.time, "time", return_value=1000.0) as clock:
             s.refresh_shop_stats()
             self.assertEqual(s.SHOP_STATS["value"], [
-                {"name": "shopmac", "free_ram_pct": 41.0, "cpu_load_pct": 150.0, "cpu_cores": 4, "at": 1000.0},
-                {"name": "mac2", "free_ram_pct": None, "cpu_load_pct": None, "cpu_cores": None, "at": 1000.0}])
-            self.assertEqual(calls, [("sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q", 10, "shopmac"),
-                                     ("sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q", 10, "mac2")])
+                {"name": "shopmac", "free_ram_pct": 41.0, "cpu_load_pct": 150.0, "cpu_cores": 4, "free_disk_gb": 12.5,
+                 "at": 1000.0},
+                {"name": "mac2", "free_ram_pct": None, "cpu_load_pct": None, "cpu_cores": None, "free_disk_gb": None,
+                 "at": 1000.0}])
+            self.assertEqual(calls, [('sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q; df -k "$HOME"', 10, "shopmac"),
+                                     ('sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q; df -k "$HOME"', 10, "mac2")])
             self.assertFalse(s.SHOP_STATS["busy"])
             calls.clear()
             clock.return_value = 1299.0
@@ -2355,12 +2359,32 @@ class ServeTest(unittest.TestCase):
             s.refresh_shop_stats()
             self.assertEqual([c[2] for c in calls], ["shopmac", "mac2"])
             self.assertEqual(s.SHOP_STATS["value"][1],
-                             {"name": "mac2", "free_ram_pct": None, "cpu_load_pct": 12.5, "cpu_cores": 8, "at": 1300.0})
+                             {"name": "mac2", "free_ram_pct": None, "cpu_load_pct": 12.5, "cpu_cores": 8, "free_disk_gb": None,
+                              "at": 1300.0})
         with mock.patch.object(s.shop, "workers", return_value=workers), \
                 mock.patch.object(s.shop, "run", side_effect=KeyError("boom")):
             with self.assertRaises(KeyError):
                 s.refresh_shop_stats()
         self.assertFalse(s.SHOP_STATS["busy"], "a failed refresh never leaves the next one blocked")
+
+    def test_shop_stats_free_disk_gb(self):
+        """Job 1550: free_disk_gb is the Available column (1024-byte blocks) of df's last line, in GB to 1 place; a
+        garbled or missing df line is null, and a worker with RAM and CPU readings still counts as up."""
+        s = self.serve
+        self.shop_stats_state()
+        head = "{ 2.00 2.00 2.00 }\n8\nSystem-wide memory free percentage: 50%\n"
+        df = ("Filesystem   1024-blocks      Used Available Capacity iused ifree %iused  Mounted on\n"
+              "/dev/disk1s5   488245288 480000000    489276   100%  500000 4882452720    0%   /System/Volumes/Data\n")
+        outs = {"good": head + df, "garbled": head + "Filesystem 1024-blocks Used Available\n/dev/disk1s5 12 x y\n"}
+        workers = [s.shop.Worker("good", 1, ("main",)), s.shop.Worker("garbled", 1, ("main",))]
+        with mock.patch.object(s.shop, "workers", return_value=workers), \
+                mock.patch.object(s.shop, "run", side_effect=lambda cmd, timeout, alias: subprocess.CompletedProcess(
+                    [], 0, outs[alias], "")), mock.patch.object(s.time, "time", return_value=1000.0):
+            s.refresh_shop_stats()
+        self.assertEqual([(e["name"], e["free_disk_gb"], e["free_ram_pct"], e["cpu_load_pct"]) for e in s.SHOP_STATS["value"]],
+                         [("good", 0.5, 50.0, 25.0), ("garbled", None, 50.0, 25.0)])
+        with mock.patch.object(s, "shop_stats", return_value=s.SHOP_STATS["value"]):
+            self.assertEqual([e["free_disk_gb"] for e in s.machine_status()["shop"]], [0.5, None])
 
     def test_shop_stats_poll_never_runs_ssh(self):
         s = self.serve
