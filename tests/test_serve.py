@@ -15013,6 +15013,7 @@ class HardStopTickTest(unittest.TestCase):
         reset = int(time.time()) + 86400
         self.usage(98, reset)
         live, owa, stray = self.board_jobs()
+        (self.root / "jobs" / "1798-x").mkdir(parents=True)  # every board job has its folder
         stopped, lines = processes_logged(self.serve.hard_stop_tick)
         self.assertEqual(stopped, ["repo/1798-x"])
         self.assertEqual(live.wait(timeout=5), -signal.SIGTERM)
@@ -15026,6 +15027,20 @@ class HardStopTickTest(unittest.TestCase):
         self.assertEqual(self.serve.board.limited_until("main", time.time()), back, "pick_account skips main")
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0]["reason"].startswith("hard stop: main 98% weekly, back "), lines)
+        self.assertEqual(lines[0]["job"], "1798-x")  # job 1561: the line names the job it stopped
+        held = (self.root / "jobs" / "1798-x" / "limit-holds.txt").read_text().split()
+        self.assertEqual(held[1], "main")
+        self.assertLessEqual(abs(int(held[0]) - time.time()), 60)  # job 1561: the hold's epoch, for timing.md
+
+    def test_a_tracked_run_with_no_board_job_logs_its_run_key(self):
+        self.usage(98, int(time.time()) + 86400)
+        (self.root / "board.json").write_text(json.dumps({"jobs": []}))
+        digest = self.group(args=("claude", "-p", "/trevskills-scrum digest"))
+        self.serve.RUNS["repo/digest"] = {"action": "digest", "started": time.time(), "proc": digest, "log": "x",
+                                          "account": "main"}
+        stopped, lines = processes_logged(self.serve.hard_stop_tick)
+        self.assertEqual(stopped, ["repo/digest"])
+        self.assertEqual([l["job"] for l in lines], ["repo/digest"])
 
     def test_under_the_line_stops_nothing(self):
         self.usage(97, int(time.time()) + 86400)
