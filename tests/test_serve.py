@@ -9979,6 +9979,55 @@ class BillingHoldTest(unittest.TestCase):
         self.assertNotIn("billingHold", self.job("l"))
 
 
+class SweepParentsHeldTest(unittest.TestCase):
+    """sweep_parents keeps a machine-waiting runall parent's waiting children's held minutes running every tick (job 1584)."""
+    REASON = "waiting: swap used 9.1 GB (max 8 GB). Fix: wait for it to drop."
+
+    def setUp(self):
+        import serve
+        self.serve, self.board = serve, serve.board
+        self.root = Path(tempfile.mkdtemp()) / "scrum"
+        self.addCleanup(shutil.rmtree, self.root.parent, True)
+        jobs = [{"id": "001-par", "title": "P", "stage": "running", "lane": "runall", "reason": self.REASON,
+                 "children": ["002-kid", "003-kid"], "updatedAt": self.board.now()},
+                {"id": "002-kid", "title": "K", "stage": "waiting", "parent": "001-par", "updatedAt": self.board.now()},
+                {"id": "003-kid", "title": "K", "stage": "build", "parent": "001-par", "updatedAt": self.board.now()}]
+        for j in jobs:
+            (self.root / "jobs" / j["id"]).mkdir(parents=True)
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.jobs = jobs
+
+    def gates(self, job_id):
+        path = self.root / "jobs" / job_id / "current-gates.json"
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    def sweep(self, claim):
+        with mock.patch.object(self.serve, "start_ready") as ready, \
+                mock.patch.object(self.serve, "respawn_orphans", return_value=False):
+            self.serve.sweep_parents("p", self.root, self.jobs, alive=lambda: (lambda j: True), claim=claim)
+        ready.assert_not_called()
+
+    def test_claim_false_tick_notes_swap_held(self):
+        self.sweep(claim=False)
+        self.assertEqual(self.gates("002-kid")["swap"]["text"], self.REASON)
+        self.assertEqual(self.gates("003-kid"), {}, "a child in build is not a ready waiting child")
+
+    def test_chain_lock_tick_notes_swap_held_and_held_grows(self):
+        (self.root / "jobs" / "001-par" / ".chain.lock").write_text("003-kid")
+        t = 1_000_000.0
+        with mock.patch.object(self.board.time, "time", side_effect=lambda: t):
+            self.sweep(claim=True)
+            t += 120
+            self.sweep(claim=True)
+        self.assertEqual(self.gates("002-kid")["swap"]["held"], 120)
+
+    def test_parent_not_machine_waiting_notes_nothing(self):
+        self.jobs[0]["reason"] = None
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        self.sweep(claim=False)
+        self.assertEqual(self.gates("002-kid"), {})
+
+
 class ExitedRunSweepTest(unittest.TestCase):
     """watchdog_tick's safety net for a dashboard-started `claude -p` start/resume run that exited mid-stage."""
     STALLED = "stalled: session exited while the job was still in build."
