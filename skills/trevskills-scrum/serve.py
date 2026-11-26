@@ -2943,6 +2943,8 @@ SHOP_SETUP_TTL = 3600  # seconds shop_tick skips shop.setup on a worker whose se
 # failed dispatch step there (shop_tick's fail) drops it
 SHOP_SETUP_AT = {}
 SHOP_SLOW_TICK = 5  # seconds: a dispatching shop_tick pass longer than this prints its `steps` line
+# worker alias -> the first check shop_worker failed it on (job 1611); shop_tick's shop_unready gate reason text
+SHOP_WHY = {}
 SHOP_ENDED = "requeue: shop session ended without a PR"
 
 
@@ -2954,20 +2956,35 @@ def shop_worker():
     and has an account: pick_account's own order (soonest seven-day reset), then prefer= each of the worker's accounts
     in its listed order, until one is on the worker's line and ready there. Lazy, so shop_tick, which takes the first,
     never probes a later worker; write_shop_room lists them all. While soft cool down is at its cap
-    (board.soft_cap_reason) it yields nothing: the shop Macs take no new work, their started jobs finish."""
+    (board.soft_cap_reason) it yields nothing: the shop Macs take no new work, their started jobs finish.
+    SHOP_WHY[alias] records each worker's first failed check as text (job 1611); a worker that passes has none."""
     now = time.time()
-    if board.soft_cap_reason():
+    SHOP_WHY.clear()
+    if cap := board.soft_cap_reason():
+        SHOP_WHY.update({w.alias: cap for w in shop.workers()})
         return
     with SHOP_STATS_LOCK:
         low = {e["name"] for e in SHOP_STATS["value"]
                if e.get("free_disk_gb") is not None and e["free_disk_gb"] < board.MIN_FREE_DISK_GB}
-    workers = [w for w in shop.workers() if now >= SHOP_RETRY_AT.get(w.alias, 0) and not board.cooling_down(w.alias)
-               and w.alias not in low]
+    workers = []
+    for w in shop.workers():
+        if now < SHOP_RETRY_AT.get(w.alias, 0):
+            SHOP_WHY[w.alias] = f"backoff {int(SHOP_RETRY_AT[w.alias] - now)}s after a failed step"
+        elif board.cooling_down(w.alias):
+            SHOP_WHY[w.alias] = "cooled down"
+        elif w.alias in low:
+            SHOP_WHY[w.alias] = f"low disk (under {board.MIN_FREE_DISK_GB} GB free)"
+        else:
+            workers.append(w)
     if not workers:
         return
     on = board.shop_jobs_by_worker()  # each worker's shop jobs, every board
     for w in workers:
-        if on[w.alias] >= w.max or not (ready := shop.ready(alias=w.alias))["ready"]:
+        if on[w.alias] >= w.max:
+            SHOP_WHY[w.alias] = f"at max {w.max} shop jobs"
+            continue
+        if not (ready := shop.ready(alias=w.alias))["ready"]:
+            SHOP_WHY[w.alias] = "not ready"
             continue
         # ponytail: this Mac's sessions only; count shop jobs too if the allowance overshoots
         n_live = board.live_sessions()
@@ -2975,7 +2992,10 @@ def shop_worker():
                         if (name := board.pick_account(time.time(), n_live, prefer=pref)[0]) in w.accounts
                         and ready["accounts"].get(name)), None)
         if account:
+            SHOP_WHY.pop(w.alias, None)
             yield w, account
+        else:
+            SHOP_WHY[w.alias] = "no ready account"
 
 
 def shop_full():
@@ -3009,14 +3029,15 @@ def hold_start(root, job_id):
     board.queue_start(root, job_id)
 
 
-def passed_over(root, pool, gates):
+def passed_over(root, pool, gates, why=None):
     """note_queue_gate each of `gates` on every shop_tick pool job not tagged Runs on main (board.stored_runs_on; no
-    Jev call): a job never sent to the shop has no shop wait. timing.md's Queue gate names the wait (jobs 1558, 1568)."""
+    Jev call): a job never sent to the shop has no shop wait. timing.md's Queue gate names the wait (jobs 1558, 1568).
+    `why` maps a gate to its reason= text (current-gates.json's text; job 1611); the gate token stays the same."""
     for job in pool:
         if board.stored_runs_on(root, job) == "main":
             continue
         for gate in gates:
-            note_queue_gate(root, job["id"], gate)
+            note_queue_gate(root, job["id"], gate, reason=(why or {}).get(gate))
 
 
 def shop_tick(project, repo, root) -> bool:
@@ -3088,8 +3109,9 @@ def shop_tick(project, repo, root) -> bool:
     w, account = next(shop_worker(), (None, None))  # the first with room, ready and an account
     if w is None:  # job 1558: each job passed over names every full worker; job 1568: else every unready one
         maxed = shop_full() if pool else []
-        passed_over(root, pool, [f"shop_full:{a}" for a in maxed]
-                    or [f"shop_unready:{x.alias}" for x in shop.workers()])
+        unready = [f"shop_unready:{x.alias}" for x in shop.workers()]
+        passed_over(root, pool, [f"shop_full:{a}" for a in maxed] or unready,
+                    {f"shop_unready:{a}": f"shop_unready:{a} ({r})" for a, r in SHOP_WHY.items()})  # job 1611
         return False
     alias, mains = w.alias, 0
     full = board.shop_heavy_by_worker()[alias] >= board.SHOP_HEAVY_PER_WORKER  # this worker already runs its heavy job
