@@ -7524,8 +7524,11 @@ def note_current_gate(root, job_id: str, gate: str, reason: str | None = None) -
             held = prior.get("held", 0) if isinstance(prior, dict) else 0
             held = held if type(held) in (int, float) and held > 0 else 0
             spans = prior.get("spans") if isinstance(prior, dict) else None  # job 1593: the spans the head was held; malformed starts over
+            legacy = held and type(last) in (int, float) and spans in (None, [])  # job 1595: old entry, held time but no spans
             spans = [[a, b] for sp in spans if isinstance(sp, (list, tuple)) and len(sp) == 2
                      for a, b in [sp] if type(a) in (int, float) and type(b) in (int, float)] if isinstance(spans, list) else []
+            if legacy:  # seed [last - held, last] so legacy held time is not reclassified as unnamed
+                spans = [[last - held, last]]
             near = type(last) in (int, float) and 0 <= now - last < GATE_HELD_GAP_SECS
             if near:
                 held += now - last

@@ -6337,6 +6337,18 @@ class BoardTest(unittest.TestCase):
             board.note_current_gate(self.root, "j", "swap")
         self.assertEqual(spans(), [[1850.0, 1850.0]])
 
+    def test_note_current_gate_seeds_spans_from_legacy_held(self):
+        """Job 1595: an old-format entry (held seconds, no spans) hit again seeds spans with [last - held, last]
+        before the new span, so its held time stays named; a far-later hit keeps the seed and opens another span."""
+        (self.root / "jobs/j").mkdir(parents=True, exist_ok=True)
+        path = self.root / "jobs/j/current-gates.json"
+        gap = board.GATE_HELD_GAP_SECS
+        for at, want in ((1100.0, [[400.0, 1100.0]]), (1000.0 + gap * 2, [[400.0, 1000.0], [1000.0 + gap * 2] * 2])):
+            path.write_text(json.dumps({"swap": {"at": 1000.0, "text": "swap", "held": 600}}))
+            with mock.patch("time.time", return_value=at):
+                board.note_current_gate(self.root, "j", "swap")
+            self.assertEqual(json.loads(path.read_text())["swap"]["spans"], want)
+
     def test_timing_row_every_gate_carries_held_minutes(self):
         """Job 1558: every head in the Queue gate cell prints its held minutes, 0m when current-gates.json has none
         (onewitharts digest 163 printed `overlap_skipped:<id>`, `cpu_queue` and `ram_room` bare), longest first, ties
