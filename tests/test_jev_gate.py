@@ -224,6 +224,24 @@ class JevGateTest(unittest.TestCase):
         self.assertEqual((out, f[1], f[2], f[3], f[4]), ("sonnet", "model", "-", "Complex: no (feature.md)", "sonnet"))
         self.assertEqual(self.sent, [])
 
+    def test_model_lane_fast_skips_jev(self):
+        (self.job / "feature.md").write_text("# Feature\nLane: fast\n\n## Body\nAdd a button")
+        out, f = self.gate("model")
+        self.assertEqual((out, f[1], f[2], f[3], f[4]), ("sonnet", "model", "-", "Lane: fast (feature.md)", "sonnet"))
+        self.assertEqual(self.sent, [])
+
+    def test_model_lane_fast_complex_yes_still_asks(self):
+        (self.job / "feature.md").write_text("# Feature\nLane: fast\nComplex: yes\n\n## Body\nAdd a button")
+        out, f = self.gate("model", ask=lambda s, q, *a: {"q": {"type": "score", "score": 2}})
+        self.assertEqual((out, f[4]), ("opus", "opus"))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_model_no_lane_line_still_asks(self):
+        (self.job / "feature.md").write_text("# Feature\n\n## Body\nAdd a button")
+        out, f = self.gate("model", ask=lambda s, q, *a: {"q": {"type": "score", "score": 2}})
+        self.assertEqual((out, f[4]), ("opus", "opus"))
+        self.assertEqual(len(self.sent), 1)
+
     def test_model_complex_yes_still_asks(self):
         (self.job / "feature.md").write_text("# Feature\nComplex: yes\n\n## Body\nAdd a button")
         out, f = self.gate("model", ask=lambda s, q, *a: {"q": {"type": "score", "score": 2}})
