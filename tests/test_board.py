@@ -16545,6 +16545,14 @@ class HeavyCapReadyTest(HeavyCapBase):
         self.assertNotIn("left", out)
         self.assertEqual(board.find(board.read_board(self.root), "011-h")["stage"], "waiting")
 
+    def test_ready_heavy_only_parent_stays_running(self):
+        self.runall({"id": "011-h"})
+        out = board.cmd_ready(self.root, "010-p")
+        self.assertEqual((out["ready"], out["heavy"]), ([], ["011-h"]))
+        p = board.find(board.read_board(self.root), "010-p")
+        self.assertEqual(p["stage"], "running")
+        self.assertNotEqual(p.get("stopTitle"), "BIGBOY_BLOCKED")
+
     def test_ready_shop_tagged_child_is_left_not_heavy(self):
         self.runall({"id": "011-h", "runs_on": "shop"})
         out = board.cmd_ready(self.root, "010-p")

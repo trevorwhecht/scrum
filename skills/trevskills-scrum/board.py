@@ -7836,7 +7836,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
         elif machine:  # wait for RAM, disk or usage; never needs-human, and a legacy parent keeps its reason to re-evaluate
             if parent["stage"] == "running" and finished < len(kids):
                 new = "running", MACHINE_WAIT + machine
-        elif blocked and (ready or busy or left or finished == len(kids)):
+        elif blocked and (ready or busy or left or heavy_left or finished == len(kids)):
             new = "running", None
         elif not ready and not busy and finished < len(kids) and go:
             human = [k["id"] for k in kids if k["stage"] == "needs-human" or k.get("paused")]
@@ -7850,7 +7850,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
                 new = "running", WAITING_ON + ", ".join(waits)
             elif overlap:  # another tree's job holds the files; sweep_parents' start_ready retries each tick
                 new = "running", OVERLAP_WAIT + ", ".join(dict.fromkeys(overlap))
-            elif left:  # a child waits for a shop Mac: shop_tick or a later call here claims it
+            elif left or heavy_left:  # a child waits for a shop Mac or the heavy cap: shop_tick or a later call here claims it
                 new = "running", None
             elif any(stalled(k) for k in kids):  # a child stalled in its own stage is auto-resumed; keep running
                 new = "running", None
