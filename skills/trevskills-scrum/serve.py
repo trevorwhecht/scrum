@@ -1889,7 +1889,7 @@ def hot_stop_tick() -> list[str]:
     return stopped
 
 
-E2E_MAX_FOOTPRINT_GB = 8  # e2e_runaway_tick: a job E2E's dev server over this footprint is stopped
+E2E_MAX_FOOTPRINT_GB = 12  # e2e_runaway_tick: a job E2E's dev server over this footprint is stopped
 E2E_MIN_FREE_DISK_GB = 3  # e2e_runaway_tick stops a live E2E under this; disk_alert_tick texts on 2 pulses in a row
 FOOTPRINT_RE = re.compile(r"Footprint:\s*([\d.]+)\s*(B|KB|MB|GB|TB)\b")
 E2E_SERVER_RE = re.compile(r"next-server|\bnext dev\b|\bnext\b.*\bdev\b")
@@ -2002,7 +2002,7 @@ def e2e_runaway_tick(now=None, footprint=None) -> list[str]:
                 print(f"watchdog: e2e runaway: marker: {e}", file=sys.stderr, flush=True)
         if stop_group(pid):
             board.log_process("E2E runaway stop", "stopped", reason=reason, pid=pid,
-                              gb=None if gb is None else round(gb, 1))
+                              gb=None if gb is None else round(gb, 1), **({"job": job["id"]} if job else {}))
             print(f"watchdog: e2e runaway stop: holder {pid} ({cwd}) {reason}", file=sys.stderr, flush=True)
             stopped.append(f"{pid}:{reason}")
     return stopped
