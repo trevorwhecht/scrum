@@ -143,6 +143,9 @@ def decide(step, job, asked):
             return "-", "-", "opus"
         if step == "spec-model" and bigboy_child(job):  # the planner ticket already names the files: no Jev call
             return "-", "BigBoy child", "sonnet"
+        if step == "model" and board.header_value(job / "feature.md", "Lane", ("fast",)) \
+                and not board.job_complex(job.parent.parent, job.name):  # a fast-lane job is small by definition: no Jev call
+            return "-", "Lane: fast (feature.md)", "sonnet"
         # model: feature.md's header first, else spec.md's (board.job_complex); spec-model: feature.md only, spec.md is not written yet
         for name in ("feature.md", "spec.md")[:1 if step == "spec-model" else 2]:
             v = board.header_value(job / name, "Complex", ("yes", "no"))
