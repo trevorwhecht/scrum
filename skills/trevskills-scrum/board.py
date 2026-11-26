@@ -97,7 +97,8 @@
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
   board.py pipeline-fit <NNN>      print {"digest","jobs"}: each listed job's lane, agents, diff size, verdicts, fix rounds
                                    and whether a cheaper lane would have done (read-only; Digest step 1)
-  board.py digest-trevor <NNN>     write digests/<NNN>/trevor.md (Trevor's Jev-ranked chat messages, feature.md quotes,
+  board.py digest-trevor <NNN>     write digests/<NNN>/trevor.md (Trevor's Jev-ranked chat messages, each with the
+                                   jobs in any registered project whose feature.md quotes it, feature.md quotes,
                                    new (Trevor …) backlog tags, answer notes since the last digest), print
                                    {"id","chat","quotes","backlog","notes"}; a failed source is a one-line note
   board.py digest-questions <NNN>  write digests/<NNN>/questions.md: the ## Repeated questions lines and ## Stops table
@@ -2621,6 +2622,7 @@ TREVOR_CHAT_MAX = 1500  # per message sent to Jev; jev-rank.py's own MAX_CHARS
 TREVOR_CONTEXT_MAX = 300  # chars of the assistant message a chat quote replied to
 TREVOR_QUOTE_MAX = 400
 TREVOR_SKIP_PREFIXES = ("<command-", "<local-command", "Caveat:")
+TREVOR_MATCH_WORDS = 6  # words in a row a job's feature.md must share with a chat quote to be listed under it
 
 
 def jev_rank_path() -> Path:
@@ -2699,8 +2701,46 @@ def _trevor_messages(root, since):
     return out
 
 
+def _trevor_words(text):
+    """text's words for _trevor_matches: lowercased, apostrophes dropped (`don't` is `dont`), split at every other
+    non-word character."""
+    return re.findall(r"\w+", re.sub(r"['’]", "", text.lower()))
+
+
+def _trevor_matches(root, quotes):
+    """{quote: [`<repo>/<job id> (<stage>)`]}: every job, in this project then each registered one (projects()), whose
+    jobs/*/feature.md holds TREVOR_MATCH_WORDS words of the quote in a row (_trevor_words folds case and punctuation).
+    <stage> is the job's board stage, `?` when it is off the board; an unreadable board or feature.md is skipped. A
+    quote shorter than that matches nothing."""
+    n, grams = TREVOR_MATCH_WORDS, {}
+    for q in quotes:
+        w = _trevor_words(q)
+        for i in range(len(w) - n + 1):
+            grams.setdefault(tuple(w[i:i + n]), set()).add(q)
+    out, firsts = {q: [] for q in quotes}, {g[0] for g in grams}
+    scrums = dict.fromkeys([Path(root).resolve(), *((p / "scrum").resolve() for p in projects().values())])
+    for scrum in scrums if grams else []:
+        try:
+            stages = {j.get("id"): j.get("stage") for j in read_board(scrum)["jobs"]}
+        except (SystemExit, OSError):
+            stages = {}
+        for feature in sorted((scrum / "jobs").glob("*/feature.md")):
+            try:
+                w = _trevor_words(feature.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+            hit = set()
+            for i in range(len(w) - n + 1):
+                if w[i] in firsts:
+                    hit |= grams.get(tuple(w[i:i + n]), set())
+            for q in hit:
+                out[q].append(f"{scrum.parent.name}/{feature.parent.name} ({stages.get(feature.parent.name) or '?'})")
+    return out
+
+
 def _trevor_chat(root, since):
-    """The ## Chat lines: Jev's pick of Trevor's messages, or one failure line."""
+    """The ## Chat lines: Jev's pick of Trevor's messages, each followed by its context line and its _trevor_matches
+    lines, or one failure line."""
     try:
         msgs = _trevor_messages(root, since)
     except OSError as e:
@@ -2723,14 +2763,16 @@ def _trevor_chat(root, since):
     if r.returncode:
         tail = (r.stderr.strip().splitlines() or [""])[-1]
         return [f"- Jev failed: exit {r.returncode}" + (f": {tail[:300]}" if tail else "")]
+    picks = [(score, text) for score, sep, text in (l.partition("\t") for l in r.stdout.splitlines())
+             if sep and text.strip()]
+    matched = _trevor_matches(root, [text for _, text in picks])
     out = []
-    for line in r.stdout.splitlines():
-        score, sep, text = line.partition("\t")
-        if sep and text.strip():
-            at, context = dates.get(text, ("?", ""))
-            out.append(f'- {at} {score}: "{text[:TREVOR_QUOTE_MAX]}"')
-            if context:
-                out.append(f"  context: {context}")
+    for score, text in picks:
+        at, context = dates.get(text, ("?", ""))
+        out.append(f'- {at} {score}: "{text[:TREVOR_QUOTE_MAX]}"')
+        if context:
+            out.append(f"  context: {context}")
+        out += [f"  matched: {m}" for m in matched[text]]
     return out
 
 
@@ -2796,8 +2838,9 @@ def _trevor_notes(root, since):
 
 
 def cmd_digest_trevor(root, digest_id) -> dict:
-    """Write digests/<NNN>/trevor.md: Trevor's typed chat messages (Jev-ranked), feature.md quotes, new backlog tags and
-    answer notes since the previous live digest (else 7 days). A failing source is a one-line note; never raises then."""
+    """Write digests/<NNN>/trevor.md: Trevor's typed chat messages (Jev-ranked, each with a `  matched:` line per job
+    whose feature.md quotes it), feature.md quotes, new backlog tags and answer notes since the previous live digest
+    (else 7 days). A failing source is a one-line note; never raises then."""
     d = Path(root) / "digests" / str(digest_id)
     if not DIGEST_RE.fullmatch(str(digest_id)) or not d.is_dir():
         raise SystemExit(f"no digest {digest_id!r}")
@@ -2818,7 +2861,7 @@ def cmd_digest_trevor(root, digest_id) -> dict:
             items = [f"- {heading[3:]} failed: {e}"]
         failed = len(items) == 1 and items[0].startswith(("- Jev failed:", "- Transcripts failed:",
                                                           f"- {heading[3:]} failed:"))
-        quotes = [i for i in items if not i.startswith("  context: ")]
+        quotes = [i for i in items if not i.startswith(("  context: ", "  matched: "))]
         sections[heading], counts[key] = items or ["None"], 0 if failed else len(quotes)
     body = [f"# Trevor: digest {digest_id}", f"Since: {_iso(since)}"]
     for heading, items in sections.items():
