@@ -474,6 +474,29 @@ class ShopTickTest(unittest.TestCase):
         self.assertEqual((gates("044-m"), gates("045-p")), (None, None))
         self.assertEqual((self.job(root, "043-a")["stage"], self.job(root, "050-q")["stage"]), ("waiting", "spec"))
 
+    def test_unready_gate_reason_names_the_failed_check(self):
+        """Job 1611: shop_worker records each worker's first failed check and shop_tick's shop_unready gate carries it
+        as current-gates.json's text, the gate token unchanged."""
+        self.workers("shopmac 2 owa,main\nbackmac 1 main\ncoolmac 1 main\nnoacct 1 main\n")
+        self.serve.SHOP_RETRY_AT["backmac"] = time.time() + 600
+        self.sh.ready.side_effect = lambda alias: dict(READY, ready=False) if alias == "shopmac" else dict(
+            READY, accounts={"main": False})
+        root = self.project("mm", self.runall({"id": "043-a"}))
+        with mock.patch.object(self.serve.board, "cooling_down", side_effect=lambda a: a == "coolmac"):
+            self.assertEqual(self.tick(), (False, "", ""))
+        cur = json.loads((root / "jobs" / "043-a" / "current-gates.json").read_text())
+        text = lambda a: cur[f"shop_unready:{a}"]["text"]
+        self.assertEqual(text("shopmac"), "shop_unready:shopmac (not ready)")
+        self.assertTrue(text("backmac").startswith("shop_unready:backmac (backoff "), text("backmac"))
+        self.assertEqual(text("coolmac"), "shop_unready:coolmac (cooled down)")
+        self.assertEqual((root / "jobs" / "043-a" / "queue-gates.txt").read_text().split(),
+                         [f"shop_unready:{a}" for a in ("shopmac", "backmac", "coolmac", "noacct")])
+        self.assertEqual(self.serve.SHOP_WHY["noacct"], "no ready account")
+        with self.subTest("ready worker with no ready account"):
+            self.sh.ready.side_effect = lambda alias: dict(READY, accounts={"main": False})
+            self.assertEqual(list(self.serve.shop_worker()), [])
+            self.assertEqual(self.serve.SHOP_WHY["shopmac"], "no ready account")
+
     def test_dispatch_stamps_shop_behind_gate(self):
         """Job 1568: when a worker takes one pool job, every other pool job shop_tick passed over gets
         `shop_behind:<sent id>`; the sent job, a job tagged Runs on main and a failed dispatch get none."""
