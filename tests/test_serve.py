@@ -9710,6 +9710,200 @@ class CloudPollTest(unittest.TestCase):
         flag.unlink()
         self.assertEqual(tick(), ([(root,)], [("good", root, "digest", "digest", "/trevskills-scrum digest")]))
 
+
+class BillingHoldTest(unittest.TestCase):
+    """Job 1541: Claude Code's subscription refusal holds every job in its stage, spending no retry, probes one job every
+    10 min, texts Trevor once per episode and releases every billing-held job once a probe gets past the refusal."""
+    REFUSAL = ("Claude Code can't use your Claude subscription, usually because a payment is past due · "
+               "Pay or renew at https://claude.ai/settings/billing\n")
+    T0 = 1_800_000_000
+
+    def setUp(self):
+        import serve
+        self.serve, self.board = serve, serve.board
+        serve.AUTO_RESUME.clear(); serve.STALL_RESUMED.clear(); serve.BILLING.clear()
+        self.addCleanup(serve.BILLING.clear); self.addCleanup(serve.AUTO_RESUME.clear)
+        self.repo = Path(tempfile.mkdtemp()); self.root = self.repo / "scrum"
+        (self.root / "runs").mkdir(parents=True); (self.root / "jobs").mkdir()
+        self.addCleanup(lambda: [serve.RUNS.pop(k, None) for k in list(serve.RUNS) if k.startswith(("p/", "q/"))])
+        self.sent = []
+        real = serve.alert_dispatch
+        for target, kw in (("alert_missing", {"return_value": None}),
+                           ("alert_argv", {"side_effect": lambda t: ["send", "h", t]}),
+                           ("alert_dispatch", {"side_effect": lambda *a, **k: real(*a[:5], send=self.send)}),
+                           ("resume_refusal", {"return_value": None}), ("take_room", {"return_value": True})):
+            p = mock.patch.object(serve, target, **kw)
+            p.start(); self.addCleanup(p.stop)
+        alive = mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False)
+        alive.start(); self.addCleanup(alive.stop)
+
+    def send(self, argv):
+        self.sent.append(argv[-1])
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    def write(self, jobs, root=None):
+        for j in jobs:
+            j.setdefault("updatedAt", self.board.now()); j.setdefault("reason", None)
+        ((root or self.root) / "board.json").write_text(json.dumps({"jobs": jobs}))
+
+    def jobs(self, root=None):
+        return json.loads(((root or self.root) / "board.json").read_text())["jobs"]
+
+    def job(self, jid, root=None):
+        return next(j for j in self.jobs(root) if j["id"] == jid)
+
+    def exited(self, jid, text, started=None):
+        (self.root / "runs" / f"{jid}.log").write_text(text)
+        proc = mock.Mock(); proc.poll.return_value = 1
+        with self.serve.RUNS_LOCK:
+            self.serve.RUNS[f"p/{jid}"] = {"action": "resume", "started": started or self.T0 - 30, "proc": proc,
+                                           "log": f"runs/{jid}.log"}
+
+    def die_on_refusal(self, ids, at):
+        """Each job in build with a run that exited on the refusal; one respawn_exited pass at `at`."""
+        self.write([{"id": jid, "stage": "build", "runlog": f"runs/{jid}.log"} for jid in ids])
+        for jid in ids:
+            self.exited(jid, "working...\n" + self.REFUSAL)
+        with mock.patch.object(self.serve.time, "time", return_value=at), \
+                mock.patch.object(self.serve, "resume_job") as resume, \
+                mock.patch.object(self.board, "note_limit") as note:
+            flagged = self.serve.respawn_exited("p", self.root)
+        return flagged, resume, note
+
+    def sweep(self, at, resumed="runs/new.log"):
+        """One auto_resume pass at `at`; the ids it resumed."""
+        s = self.serve
+        with mock.patch.object(s.time, "time", return_value=at), mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s, "resume_job", return_value=resumed) as resume:
+            s.auto_resume("p", self.root, self.jobs())
+        return [c.args[2]["id"] for c in resume.call_args_list]
+
+    def live_probe(self, jid, started, text="Reading spec.md\n"):
+        (self.root / "runs" / f"{jid}-probe.log").write_text(text)
+        proc = mock.Mock(); proc.poll.return_value = None
+        with self.serve.RUNS_LOCK:
+            self.serve.RUNS[f"p/{jid}"] = {"action": "resume", "started": started, "proc": proc,
+                                           "log": f"runs/{jid}-probe.log"}
+
+    def test_billing_re_anchored(self):
+        b = self.serve.billing_in
+        self.assertTrue(b(self.REFUSAL))
+        self.assertTrue(b("working\n" + self.REFUSAL))
+        self.assertTrue(b("  ⎿  Claude Code can't use your Claude subscription, usually because"))
+        self.assertTrue(b("> Claude Code can’t use your Claude subscription"))
+        self.assertFalse(b("The log said: Claude Code can't use your Claude subscription"))
+        self.assertFalse(b("## Summary\nJob 1979 stopped because Claude Code can't use your Claude subscription.\n"))
+        self.assertFalse(b("You've hit your limit · resets 2am"))
+
+    def test_refusal_holds_job_without_spending_retry(self):
+        flagged, resume, note = self.die_on_refusal(["a"], self.T0)
+        self.assertEqual(flagged, [])
+        resume.assert_not_called()
+        note.assert_not_called()
+        live = self.job("a")
+        self.assertEqual((live["stage"], live["limitResetAt"], live["billingHold"]), ("build", self.T0 + 600, True))
+        self.assertNotIn("stalled", live)
+        self.assertNotIn("p/a", self.serve.AUTO_RESUME)
+        self.assertEqual(self.serve.STALL_RESUMED, set())
+        # auto_resume's stalled path: a session flagged stalled before respawn_exited saw it is held the same way
+        self.serve.BILLING.clear()
+        (self.root / "runs" / "s.log").write_text(self.REFUSAL)
+        self.write([{"id": "s", "stage": "check", "stalled": True, "runlog": "runs/s.log",
+                     "reason": "stalled: no board update for 30 min and no live session"}])
+        with mock.patch.object(self.board, "note_limit") as note:
+            self.assertEqual(self.sweep(self.T0 + 5), [])
+        note.assert_not_called()
+        live = self.job("s")
+        self.assertEqual((live["stage"], live["limitResetAt"], live["billingHold"]), ("check", self.T0 + 605, True))
+        self.assertNotIn("stalled", live)
+        self.assertEqual((self.serve.AUTO_RESUME, self.serve.STALL_RESUMED), ({}, set()))
+
+    def test_one_alert_for_many_jobs(self):
+        self.die_on_refusal(["a", "b", "c"], self.T0)
+        self.assertEqual(len(self.sent), 1, self.sent)
+        self.assertIn("claude.ai/settings/billing", self.sent[0])
+        self.assertNotRegex(self.sent[0], r"^\w+: ")
+        self.assertEqual([self.job(j)["limitResetAt"] for j in "abc"], [self.T0 + 600] * 3)
+
+    def test_one_probe_per_interval(self):
+        self.die_on_refusal(["a", "b", "c"], self.T0)
+        self.assertEqual(self.sweep(self.T0 + 300), [], "before the probe is due")
+        got = self.sweep(self.T0 + 601)
+        self.assertEqual(len(got), 1, got)
+        self.assertEqual(self.serve.AUTO_RESUME, {}, "a probe spends no try")
+        self.assertEqual(self.sweep(self.T0 + 900), [], "one probe per BILLING_RETRY_EVERY")
+        self.assertEqual(self.serve.AUTO_RESUME, {})
+
+    def test_release_after_probe_passes(self):
+        q_repo = Path(tempfile.mkdtemp()); q_root = q_repo / "scrum"; q_root.mkdir()
+        self.write([{"id": "qa", "stage": "build", "limitResetAt": self.T0 + 600, "billingHold": True},
+                    {"id": "qu", "stage": "build", "limitResetAt": self.T0 + 9000}], q_root)
+        self.die_on_refusal(["a", "b", "c"], self.T0)
+        [probe] = self.sweep(self.T0 + 601)
+        self.live_probe(probe, self.T0 + 601)
+        with mock.patch.object(self.board, "projects", return_value={"p": self.repo, "q": q_repo}):
+            self.assertEqual(self.sweep(self.T0 + 661), [], "alive 60 s: not yet past BILLING_PROBE_OK")
+            self.assertTrue(self.job("b" if probe != "b" else "a")["limitResetAt"])
+            got = self.sweep(self.T0 + 722)
+        for root, jid in ((self.root, "a"), (self.root, "b"), (self.root, "c"), (q_root, "qa")):
+            live = self.job(jid, root)
+            self.assertNotIn("limitResetAt", live, jid)
+            self.assertNotIn("billingHold", live, jid)
+        self.assertEqual(self.job("qu", q_root)["limitResetAt"], self.T0 + 9000, "a usage-limit hold is untouched")
+        self.assertEqual(self.serve.BILLING, {})
+        others = sorted(set("abc") - {probe})
+        self.assertEqual(sorted(got), others, "the released jobs resume at once")
+        self.assertEqual(self.serve.AUTO_RESUME, {})
+        self.assertEqual(self.serve.STALL_RESUMED, set())
+        self.assertEqual(len(self.sent), 1)
+        with self.serve.RUNS_LOCK:
+            for k in [k for k in self.serve.RUNS if k.startswith("p/")]:
+                self.serve.RUNS.pop(k)
+        self.die_on_refusal(["d"], self.T0 + 5000)
+        self.assertEqual(len(self.sent), 2, "a later refusal is a new episode")
+
+    def test_probe_refused_again_rearms(self):
+        self.die_on_refusal(["a", "b", "c"], self.T0)
+        [probe] = self.sweep(self.T0 + 601)
+        jobs = self.jobs()
+        for j in jobs:
+            if j["id"] == probe:
+                j["runlog"] = f"runs/{probe}.log"
+        self.write(jobs)
+        self.exited(probe, "starting\n" + self.REFUSAL, started=self.T0 + 601)
+        with mock.patch.object(self.serve.time, "time", return_value=self.T0 + 610), \
+                mock.patch.object(self.serve, "resume_job") as resume:
+            self.assertEqual(self.serve.respawn_exited("p", self.root), [])
+        resume.assert_not_called()
+        self.assertEqual(self.job(probe)["limitResetAt"], self.T0 + 1210)
+        for jid in set("abc") - {probe}:
+            self.assertEqual(self.job(jid)["limitResetAt"], self.T0 + 600, jid)
+        self.assertEqual(len(self.sent), 1, "no new text for the same episode")
+        self.assertEqual(self.sweep(self.T0 + 700), [], "the next probe waits BILLING_RETRY_EVERY")
+        self.assertEqual(len(self.sweep(self.T0 + 1211)), 1)
+        self.assertEqual(self.serve.AUTO_RESUME, {})
+
+    def test_usage_limit_hold_unchanged(self):
+        self.die_on_refusal(["a"], self.T0)
+        jobs = self.jobs() + [{"id": "u", "stage": "build", "limitResetAt": self.T0 + 100, "reason": None,
+                               "updatedAt": self.board.now()}]
+        self.write(jobs)
+        self.assertEqual(self.sweep(self.T0 + 219), [], "before its reset + 120 s")
+        self.assertEqual(self.sweep(self.T0 + 221), ["u"])
+        self.assertEqual(self.serve.AUTO_RESUME["p/u"][0], 1, "a usage-limit resume spends a try")
+        (self.root / "runs" / "l.log").write_text("You've hit your limit · resets_at=1800009000\n")
+        self.write([{"id": "l", "stage": "build", "runlog": "runs/l.log"}])
+        proc = mock.Mock(); proc.poll.return_value = 1
+        with self.serve.RUNS_LOCK:
+            self.serve.RUNS["p/l"] = {"action": "start", "started": self.T0, "proc": proc, "log": "runs/l.log"}
+        with mock.patch.object(self.serve.time, "time", return_value=self.T0), \
+                mock.patch.object(self.board, "note_limit") as note:
+            self.serve.respawn_exited("p", self.root)
+        note.assert_called_once()
+        self.assertEqual(self.job("l")["limitResetAt"], 1_800_009_000)
+        self.assertNotIn("billingHold", self.job("l"))
+
+
 class ExitedRunSweepTest(unittest.TestCase):
     """watchdog_tick's safety net for a dashboard-started `claude -p` start/resume run that exited mid-stage."""
     STALLED = "stalled: session exited while the job was still in build."
