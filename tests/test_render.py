@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_SWAP_PCT"] = "0"  # no swap: main()'s hold (job 1227) never reads this machine's swap
 os.environ["SCRUM_CPU_LOAD_PCT"] = "0"  # no load: main()'s hold never waits on this machine's load
 os.environ["SCRUM_VM_PRESSURE"] = "1"  # kernel memory pressure normal: main()'s hold never runs sysctl
+os.environ["SCRUM_CLOUDINARY_CACHE"] = tempfile.mkdtemp(prefix="render-cld-")  # never the real cache
 import render  # noqa: E402
 
 PAGE = b"<!doctype html><title>t</title><h1>hi</h1><script>console.error('boom')</script>"
@@ -112,6 +113,44 @@ if sys.argv[1] == "exit":
     os._exit(0)
 time.sleep(120)
 """
+
+
+class RenderCloudinaryCacheTest(unittest.TestCase):
+    URL = "https://res.cloudinary.com/demo/v1/mockup.png"
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="render-cld-test-")
+        p = mock.patch.dict(os.environ, {"SCRUM_CLOUDINARY_CACHE": self.dir})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_miss_downloads_once_then_hits(self):
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            return b"PNGDATA", "image/png"
+        self.assertEqual(render.cached_image(self.URL, fetch), (b"PNGDATA", "image/png"))
+        self.assertEqual(render.cached_image(self.URL, fetch), (b"PNGDATA", "image/png"))
+        self.assertEqual(calls, [self.URL])
+        self.assertEqual(len(list(Path(self.dir).glob("*.body"))), 1)
+        self.assertEqual(len(list(Path(self.dir).glob("*.json"))), 1)
+
+    def test_non_200_or_error_is_not_stored(self):
+        self.assertIsNone(render.cached_image(self.URL, lambda u: (None, "")))
+        self.assertIsNone(render.cached_image(self.URL, mock.Mock(side_effect=OSError("down"))))
+        self.assertEqual(list(Path(self.dir).iterdir()), [])
+
+    def test_paused_request_is_fulfilled_from_cache(self):
+        render.cached_image(self.URL, lambda u: (b"abc", "image/png"))
+        cdp = render.CDP(mock.Mock())
+        msg = {"method": "Fetch.requestPaused", "params": {"requestId": "r1", "request": {"url": self.URL, "method": "GET"}}}
+        self.assertTrue(cdp._paused(msg))
+        sent = json.loads(cdp.ws.send.call_args[0][0])
+        self.assertEqual(sent["method"], "Fetch.fulfillRequest")
+        self.assertEqual(sent["params"]["responseCode"], 200)
+        self.assertEqual(cdp.n, 0)  # a Fetch reply never takes a call() id
+        self.assertFalse(cdp._paused({"method": "Page.loadEventFired"}))
 
 
 class RenderKillTest(unittest.TestCase):

@@ -12,8 +12,11 @@ to out_dir/console.log as `<path> <width> <level>: <text>`, and out_dir/manifest
 Exit 0 when every page is ok, redirected or http_error; 1 on a timeout or when Chrome cannot run (manifest "error");
 2 on a usage error. Every render first reaps (reap()) each scrum-render Chrome whose render.py is gone (ppid 1) and
 its temp dir; --reap does only that, prints {"reaped": [<pids>]} and exits 0.
+Images from https://res.cloudinary.com/ are kept on disk (cache_dir(): SCRUM_CLOUDINARY_CACHE, else
+~/.claude/trevskills-scrum/cloudinary-cache), keyed by the sha1 of the URL like the app's e2e/helpers/cloudinaryCache.ts, so a
+sweep downloads each mockup once; only a 200 is stored, never expired (a re-upload has a new /v<n>/ URL).
 Stdlib only: Chrome DevTools Protocol over a small websocket client."""
-import base64, glob, json, os, re, select, shutil, signal, socket, struct, subprocess, sys, tempfile, time
+import base64, glob, hashlib, json, os, re, select, shutil, signal, socket, struct, subprocess, sys, tempfile, time
 import urllib.request
 from collections import deque
 from pathlib import Path
@@ -33,6 +36,7 @@ HOLD_POLL = 5  # seconds between machine_hold reads while holding
 QUIET = 0.5  # seconds with no request in flight, started or finished, before a loaded page is shot
 SETTLE_CAP = 10  # seconds after the load event at most, so a request that never ends cannot stall the run
 OUR_FILES = ("manifest.json", "console.log")
+CLOUDINARY = "https://res.cloudinary.com/"
 COOKIE_KEYS = ("name", "value", "url", "domain", "path", "secure", "httpOnly", "sameSite", "expires")
 
 
@@ -140,11 +144,67 @@ class WebSocket:
             pass
 
 
+def cache_dir() -> Path:
+    return Path(os.environ.get("SCRUM_CLOUDINARY_CACHE") or Path.home() / ".claude" / "trevskills-scrum" / "cloudinary-cache")
+
+
+def _write_atomic(file: Path, data: bytes):
+    tmp = file.with_name(f"{file.name}.{os.getpid()}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, file)
+
+
+def cached_image(url: str, fetch=None) -> tuple[bytes, str] | None:
+    """(body, content-type) for a res.cloudinary.com url from the disk cache, downloading and storing it on a miss.
+    None when the download fails or is not a 200 (nothing stored; the browser then fetches it itself)."""
+    base = cache_dir() / hashlib.sha1(url.encode()).hexdigest()
+    try:
+        return base.with_suffix(".body").read_bytes(), json.loads(base.with_suffix(".json").read_text())["contentType"]
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        if fetch:
+            body, ctype = fetch(url)
+        else:
+            req = urllib.request.Request(url, headers={"User-Agent": "scrum-render"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                body, ctype = (r.read(), r.headers.get("content-type", "")) if r.status == 200 else (None, "")
+    except (OSError, ValueError):
+        return None
+    if body is None:
+        return None
+    try:  # body first, meta last: a reader that sees the meta sees a whole body
+        base.parent.mkdir(parents=True, exist_ok=True)
+        _write_atomic(base.with_suffix(".body"), body)
+        _write_atomic(base.with_suffix(".json"), json.dumps({"url": url, "status": 200, "contentType": ctype}).encode())
+    except OSError:
+        pass  # a full disk costs a re-download, never a failed render
+    return body, ctype
+
+
 class CDP:
     """One page target: call() waits for its reply and queues the events that arrive meanwhile."""
 
     def __init__(self, ws: WebSocket):
         self.ws, self.n, self.events = ws, 0, deque()
+        self.fetch_n = 1_000_000  # ids for Fetch replies, apart from call()'s so a reply never matches a waiting call
+
+    def _paused(self, msg: dict) -> bool:
+        """Answer a Fetch.requestPaused for a Cloudinary image from the disk cache; True when msg was one."""
+        if msg.get("method") != "Fetch.requestPaused":
+            return False
+        p = msg.get("params", {})
+        got = cached_image(p.get("request", {}).get("url", "")) if p.get("request", {}).get("method") == "GET" else None
+        self.fetch_n += 1  # fire and forget: the reply has an id no call() waits for
+        if got:
+            body, ctype = got
+            cmd = ("Fetch.fulfillRequest", {"requestId": p["requestId"], "responseCode": 200,
+                                            "responseHeaders": [{"name": "Content-Type", "value": ctype}],
+                                            "body": base64.b64encode(body).decode()})
+        else:
+            cmd = ("Fetch.continueRequest", {"requestId": p["requestId"]})
+        self.ws.send(json.dumps({"id": self.fetch_n, "method": cmd[0], "params": cmd[1]}))
+        return True
 
     def call(self, method: str, params: dict | None = None, timeout: float = 30):
         self.n += 1
@@ -158,7 +218,7 @@ class CDP:
                 if "error" in msg:
                     raise RuntimeError(f"{method} failed")  # never the message: it can echo params (cookies)
                 return msg.get("result", {})
-            if "method" in msg:
+            if "method" in msg and not self._paused(msg):
                 self.events.append(msg)
         raise TimeoutError(f"{method} timed out")
 
@@ -166,7 +226,8 @@ class CDP:
         if self.events:
             return self.events.popleft()
         raw = self.ws.recv(max(timeout, 0))
-        return json.loads(raw) if raw else None
+        msg = json.loads(raw) if raw else None
+        return None if msg and self._paused(msg) else msg
 
 
 def _free_port() -> int:
@@ -403,6 +464,7 @@ def render(url: str, out_dir: Path, paths: list[str], cookies: Path | None = Non
             cdp = CDP(ws)
             for domain in ("Page", "Runtime", "Log", "Network"):
                 cdp.call(f"{domain}.enable")
+            cdp.call("Fetch.enable", {"patterns": [{"urlPattern": CLOUDINARY + "*", "requestStage": "Request"}]})
         except (OSError, RuntimeError, TimeoutError) as e:
             manifest["error"] = f"cannot connect to the CDP websocket: {e}"
             return manifest
