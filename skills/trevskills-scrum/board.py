@@ -7201,7 +7201,7 @@ SHOP_HEAVY_PER_WORKER = 1  # heavy jobs one shop worker runs at once (serve.py s
 
 def heavy_job(root, job: dict, parent_lane=None) -> bool:
     """True when `job` is heavy (job 1314: it runs jest, tsc and lint). A board job (it has a `stage`): job_lane
-    standard or debug, no readable lane (crash prevention), or a child of a BigBoy parent (`parent_lane` bigboy, else
+    standard or debug, no readable lane (crash prevention; with points read by _job_points, light under BIG_POINTS), or a child of a BigBoy parent (`parent_lane` bigboy, else
     the parent's lane on root's board). A backlog item (no `stage`): points of BIG_POINTS or more; with no points, a
     `Lane:` of its pre-written spec or its text that is not fast or lilguy, and no `Lane:` at all; any other points
     are light. Never in a no-git project (no_git): an edit job runs none of them, and has no lane until its Route."""
@@ -7214,6 +7214,13 @@ def heavy_job(root, job: dict, parent_lane=None) -> bool:
             except (SystemExit, OSError):
                 parent_lane = None
         lane = job_lane(root, job)
+        if parent_lane != "bigboy" and lane is None and job.get("id"):
+            try:
+                pts = _job_points(root, job["id"])  # job 1631: no readable lane, so its points decide, as a backlog item's do
+            except (SystemExit, OSError):
+                pts = None
+            if pts is not None:
+                return pts >= BIG_POINTS
         return parent_lane == "bigboy" or lane in ("standard", "debug", None)
     points = job.get("points")
     if points is not None:
