@@ -77,7 +77,7 @@ Rules:
 - When the ticket names a rules-file section that has moved (its file now says `Read ... lanes/<file>.md`), list the file it moved to under `## Likely files` too.
 - For every line you add, reword, move or remove in an agent, lane or SKILL.md file, grep all of `tests/` (not only `tests/test_contracts.py`) for a distinctive phrase of the old text; list each hit's test file under `## Likely files` and name its test method, never a line number.
 - **Self-review.** Re-read the spec for placeholders, contradictions and criteria with two readings; pick one and record it under Assumptions.
-- **Work already built.** When the request may be built or says a job was not built, check earlier jobs (`build.md`, board.json `pr`) and `git log $BASE` first; take `OBSOLETE:` if so.
+- **Work already built.** First check earlier jobs (`build.md`, board.json `pr`) and `git log $BASE`; take `OBSOLETE:` if built; an in-flight job's scope is a bare Out line.
 - **Do not restate `RULES_RE`.** Never re-explain the Merge agent-rules guard (`RULES_RE`, `HUMAN_ONLY_FILES`, rule 8) or whether it will fire, Assumptions included; CLAUDE.md says specs need not.
 - **Do not restate the prod-data rule.** Merge's `prod-ok` already holds prod runs until the same change passed on dev, so no Assumption or criterion re-states it; a `## Prod runs` bullet is enough.
 - **List every test file the build edits** (for example `tests/test_serve.py`) under `## Likely files`.
