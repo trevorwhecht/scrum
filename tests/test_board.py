@@ -8062,11 +8062,13 @@ class CurrentGateTextTest(unittest.TestCase):
             with mock.patch("time.time", return_value=50.0):
                 board.note_current_gate(t, "002-x", "ram_room(free=10%)")
                 board.note_current_gate(t, "002-x", "heavy_cap", "heavy_cap(2/2): 2 heavy jobs on this Mac (a, b)")
-            self.assertEqual(read(), {"ram_room": {"at": 50.0, "text": "ram_room(free=10%)"},
-                                      "heavy_cap": {"at": 50.0, "text": "heavy_cap(2/2): 2 heavy jobs on this Mac (a, b)"}})
+            self.assertEqual(read(), {"ram_room": {"at": 50.0, "text": "ram_room(free=10%)", "spans": [[50.0, 50.0]]},
+                                      "heavy_cap": {"at": 50.0, "text": "heavy_cap(2/2): 2 heavy jobs on this Mac (a, b)",
+                                                    "spans": [[50.0, 50.0]]}})
             with mock.patch("time.time", return_value=60.0):
                 board.note_queue_gate(t, "002-x", "ram_room(free=4%)", reason="low RAM")
-            self.assertEqual(read()["ram_room"], {"at": 60.0, "text": "low RAM", "held": 10.0})
+            self.assertEqual(read()["ram_room"], {"at": 60.0, "text": "low RAM", "held": 10.0,
+                                                       "spans": [[50.0, 60.0]]})
             self.assertEqual(read()["heavy_cap"]["at"], 50.0)
 
     def test_note_current_gate_adds_held_seconds(self):
@@ -8081,13 +8083,15 @@ class CurrentGateTextTest(unittest.TestCase):
                 with mock.patch("time.time", return_value=at):
                     board.note_current_gate(t, "002-x", gate)
             hit(1000.0)
-            self.assertEqual(read(), {"vm_pressure": {"at": 1000.0, "text": "vm_pressure(77%)"}})
+            self.assertEqual(read(), {"vm_pressure": {"at": 1000.0, "text": "vm_pressure(77%)",
+                                                   "spans": [[1000.0, 1000.0]]}})
             hit(1060.0)
             self.assertEqual(read()["vm_pressure"]["held"], 60.0)
             hit(1300.0)  # 240 s later: still under 5 min
             self.assertEqual(read()["vm_pressure"]["held"], 300.0)
             hit(1600.0)  # exactly 5 min: not under, so not held
-            self.assertEqual(read()["vm_pressure"], {"at": 1600.0, "text": "vm_pressure(77%)", "held": 300.0})
+            self.assertEqual(read()["vm_pressure"], {"at": 1600.0, "text": "vm_pressure(77%)", "held": 300.0,
+                                                          "spans": [[1000.0, 1300.0], [1600.0, 1600.0]]})
             hit(9000.0)  # hours later: a new hold, the gap is not counted
             hit(9100.0)
             self.assertEqual(read()["vm_pressure"]["held"], 400.0)
