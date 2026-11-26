@@ -491,7 +491,7 @@ class ShopTickTest(unittest.TestCase):
         self.assertEqual(text("coolmac"), "shop_unready:coolmac (cooled down)")
         self.assertEqual((root / "jobs" / "043-a" / "queue-gates.txt").read_text().split(),
                          [f"shop_unready:{a}" for a in ("shopmac", "backmac", "coolmac", "noacct")])
-        self.assertEqual(self.serve.SHOP_WHY["noacct"], "not ready")
+        self.assertEqual(self.serve.SHOP_WHY["noacct"], "no ready account")
         with self.subTest("ready worker with no ready account"):
             self.sh.ready.side_effect = lambda alias: dict(READY, accounts={"main": False})
             self.assertEqual(list(self.serve.shop_worker()), [])
