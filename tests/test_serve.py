@@ -629,6 +629,17 @@ class ServeTest(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: any(f"/trevskills-scrum start {job_id}" in a for c in self.calls() for a in c)))
         self.assertEqual(self.req("POST", "/api/p/repo/backlog/run", {"index": 1})[0], 400)  # already claimed
 
+    def test_run_now_writes_points_header_for_a_pointed_item(self):
+        """job 1586: Run now's feature.md carries the item's points, as the shop's throwaway board has no item to read."""
+        path = self.root / "backlog.md"
+        text = path.read_text()
+        self.addCleanup(path.write_text, text)
+        path.write_text(text + "- [ ] [3] Pointed unique item\n")
+        index = self.serve.board.backlog_items(self.root)[-1]["index"]
+        code, out = self.req("POST", "/api/p/repo/backlog/run", {"index": index})
+        self.assertEqual(code, 202)
+        self.assertEqual((self.root / "jobs" / out["id"] / "feature.md").read_text(), "Pointed unique item\nPoints: 3\n")
+
     def test_backlog_run_refused_at_high_cpu_load(self):
         path = self.root / "backlog.md"
         text = path.read_text()

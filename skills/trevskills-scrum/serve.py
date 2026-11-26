@@ -3101,7 +3101,7 @@ def shop_tick(project, repo, root) -> bool:
         out = board.cmd_next(root, shop=fits)
         if out["id"] is None:
             return False
-        (jobs_dir / out["id"] / "feature.md").write_text(board.feature_text(out["feature"]))  # as Run now writes it
+        (jobs_dir / out["id"] / "feature.md").write_text(board.feature_text(out["feature"], out.get("points")))  # as Run now writes it
         job, child = {"id": out["id"], "stage": "spec"}, False
         if board.tag_runs_on(root, job["id"]) == "main":  # Jev says it needs this Mac: held here, no step, no backoff
             hold_start(root, job["id"])
@@ -9876,7 +9876,7 @@ class Handler(BaseHTTPRequestHandler):
             if cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT:
                 return 409, {"error": f"CPU load {cpu:.0f}% is over {board.MAX_LAUNCH_CPU_LOAD_PCT}%; nothing claimed, try again shortly"}
             out = board.cmd_next(root, body.get("index"))
-            (root / "jobs" / out["id"] / "feature.md").write_text(board.feature_text(out["feature"]))
+            (root / "jobs" / out["id"] / "feature.md").write_text(board.feature_text(out["feature"], out.get("points")))
             if askme:  # interactive, like discuss: questions first, then the same session runs the job
                 code, obj = run_terminal([(osa_new_window(root.parent, *terminal_env(), CLAUDE,
                                                           f"/trevskills-scrum start {out['id']} askme {askme}"),

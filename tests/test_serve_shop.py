@@ -687,6 +687,15 @@ class ShopTickTest(unittest.TestCase):
             for gone in ("queued_launch", "play_queued", "ram_hold"):
                 self.assertNotIn(gone, job)
 
+    def test_new_work_claim_writes_points_header(self):
+        """job 1586: the shop's throwaway board has no backlog item for lilguy-fit, so feature.md carries Points:."""
+        root = self.project("mm", [], profile=AUTO)
+        (root / "backlog.md").write_text("# Backlog\n- [ ] [2] Reword the widget label\n- [ ] Unsized other thing\n")
+        got, out, err = self.tick()
+        self.assertEqual((got, err), (True, ""))
+        job_id = self.board.read_board(root)["jobs"][0]["id"]
+        self.assertEqual((root / "jobs" / job_id / "feature.md").read_text(), "Reword the widget label\nPoints: 2\n")
+
     def test_shop_field_digits_only(self):
         root = self.project("mm", [{"id": "050-x", "stage": "build"}])
         board_py = ROOT / "skills" / "trevskills-scrum" / "board.py"

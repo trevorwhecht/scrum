@@ -956,11 +956,11 @@ class BacklogTest(unittest.TestCase):
         spec.parent.mkdir()
         spec.write_text("# CSV\n")
         out = board.cmd_next(self.root)
-        self.assertEqual(out, {"id": "001-add-csv-export", "feature": "Add CSV export"})
+        self.assertEqual(out, {"id": "001-add-csv-export", "feature": "Add CSV export", "points": 5})
         self.assertEqual((self.root / "jobs" / "001-add-csv-export" / "spec.md").read_text(), "# CSV\n")
         self.assertFalse(spec.exists())
         out = board.cmd_next(self.root)  # no spec file for this one: unchanged behaviour
-        self.assertEqual(out, {"id": "002-dark-mode", "feature": "Dark mode"})
+        self.assertEqual(out, {"id": "002-dark-mode", "feature": "Dark mode", "points": None})
         self.assertEqual(list((self.root / "jobs" / "002-dark-mode").iterdir()), [])
         self.assertIn("- [x] Dark mode → 002-dark-mode\n", self.text())
 
@@ -979,7 +979,7 @@ class BacklogTest(unittest.TestCase):
         self.assertFalse(self.spec_file("Dark mode toggle").exists())
         self.assertEqual(other.read_text(), "# CSV\n")
         out = board.cmd_next(self.root, 2)
-        self.assertEqual(out, {"id": "001-dark-mode-toggle", "feature": "Dark mode toggle"})
+        self.assertEqual(out, {"id": "001-dark-mode-toggle", "feature": "Dark mode toggle", "points": None})
         self.assertEqual(list((self.root / "jobs" / "001-dark-mode-toggle").iterdir()), [])
 
     def test_edit_points_or_same_text_keeps_spec(self):

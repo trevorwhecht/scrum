@@ -948,7 +948,7 @@ def cmd_next(root, index=None, shop=None):
         if twin := e2e_full_duplicate(board, Path(root) / "jobs", item["text"], job_id):
             abort_job(root, find(board, job_id), False, f"duplicate of {twin}")  # job 1301: the line stays claimed
             return {"id": None, "feature": None}
-        return {"id": job_id, "feature": item["text"]}
+        return {"id": job_id, "feature": item["text"], "points": item["points"]}
 
 
 def cmd_cloud_claim(root, n) -> dict:
@@ -5098,11 +5098,13 @@ def header_in(text: str, key: str, words: tuple[str, ...]) -> str | None:
     return m[1].lower() if m else None  # `Lane: lilguy or fast.` names two words: pins neither (job 1560)
 
 
-def feature_text(text: str) -> str:
+def feature_text(text: str, points: int | None = None) -> str:
     """text as a feature.md body: an inline `Lane:` / `Complex:` / `Runs on:` clause (a backlog item is one line) is also
     written on its own header line after the first line, where header_value reads it. The last valid clause of each key wins.
-    A key inside a backtick span is a quote, not a clause (job 1570's `Lane: fast (feature.md)`), and pins nothing."""
-    hdr = {}
+    A key inside a backtick span is a quote, not a clause (job 1570's `Lane: fast (feature.md)`), and pins nothing.
+    points (the claimed backlog item's) is written as a `Points: <n>` header line first (job 1586: a shop run's throwaway
+    board has no backlog item for lilguy-fit to read it from)."""
+    hdr = {"Points": str(points)} if type(points) is int and points in FIB else {}
     for m in re.finditer(r"\b(Lane|Complex|Runs on):\s*(\w+\b.*?)(?=\s+(?:Lane|Complex|Runs on):|\Z)", text, re.S):
         if text.count("`", 0, m.start()) % 2:  # inside a backtick span
             continue
@@ -5370,14 +5372,24 @@ def cmd_lilguy_fit(root, job_id: str) -> dict:
         feature = folder / "feature.md"
         text = _request_text(feature.read_text(encoding="utf-8", errors="replace")) if feature.is_file() else ""
         parent = re.search(r"[ \t]\(from (\d+-[\w-]+)\)\s*\Z", feature.read_text(encoding="utf-8", errors="replace")) if feature.is_file() else None
-        item = next((i for i in read_backlog(root)[1] if i["job"] == job_id), None)
+        pts = _job_points(root, job_id)
         raw = _jev_model(folder) or {}
         files, lines = lilguy_estimate(text, Path(root).parent)
         hard = LILGUY_HARD_STOP_RE.search(text)
-        _write_json(out, {**verdict, "parent": parent[1] if parent else None, "points": item["points"] if item else None,
+        _write_json(out, {**verdict, "parent": parent[1] if parent else None, "points": pts,
                           "hard_stop": hard[0] if hard else None, "estimate": {"files": files, "lines": lines},
                           "jev": {"score": raw.get("score"), "confidence": raw.get("confidence")} if raw else None})
     return {**verdict, "hand off": hand_off} if hand_off else verdict
+
+
+def _job_points(root, job_id: str) -> int | None:
+    """The job's points: its backlog item's, else feature.md's header `Points:` line (job 1586: a shop run's throwaway
+    board has no backlog item naming the job; the claim wrote the points there)."""
+    item = next((i for i in read_backlog(root)[1] if i["job"] == job_id), None)
+    if item and item["points"] is not None:
+        return item["points"]
+    got = header_value(Path(root) / "jobs" / job_id / "feature.md", "Points", tuple(map(str, FIB)))
+    return int(got) if got else None
 
 
 def _lilguy_verdict(root, job_id: str) -> dict:
@@ -5404,8 +5416,8 @@ def _lilguy_verdict(root, job_id: str) -> dict:
     if lines > LILGUY_MAX_LINES or files > LILGUY_MAX_FILES:
         return {"fit": False, "why": f"estimate over lilguy limits: about {lines} added lines in {files} files "
                                      f"(limits {LILGUY_MAX_LINES} lines, {LILGUY_MAX_FILES} files)"}
-    item = next((i for i in read_backlog(root)[1] if i["job"] == job_id), None)
-    if item and item["points"] == 1:
+    pts = _job_points(root, job_id)
+    if pts == 1:
         return {"fit": True, "why": "backlog item is 1 point"}
     raw = _jev_model(folder) or {}
     score, conf = raw.get("score"), raw.get("confidence")
@@ -5413,14 +5425,14 @@ def _lilguy_verdict(root, job_id: str) -> dict:
         return {"fit": True, "why": f"Jev score {score} at confidence {conf}"}
     if files:
         return {"fit": True, "why": f"names {files} file(s), estimate about {lines} added lines"}
-    if item and item["points"] == 2:  # the estimate is within the limits here: an over-limit one was refused above
+    if pts == 2:  # the estimate is within the limits here: an over-limit one was refused above
         return {"fit": True, "why": "backlog item is 2 points, estimate within lilguy limits"}
     lits = copy_from_literals(text)  # names no file here: a named one fit above
     held = copy_literal_files(lits, root)
     quoted = ", ".join(map(repr, lits))
     if held and held <= LILGUY_MAX_FILES:
         return {"fit": True, "why": f"names no file; changes {quoted}, held by {held} repo file(s)"}
-    pts = f"{item['points']} points" if item and item["points"] else "no points"
+    pts = f"{pts} points" if pts else "no points"
     jev = f"Jev score {score} at confidence {conf}" if raw else "no Jev model answer"
     copy = f", {quoted} in {held} files" if held is not None else ""
     return {"fit": False, "why": f"not tiny: {pts}, {jev}{copy}"}
@@ -6510,7 +6522,7 @@ def add_child(root, board, parent, t, depends_on, goal, plain=False):
     job_id = add_job(root, board, short_title(t["title"]), started_by=parent.get("started_by") or "runall")
     setup = t.get("setup", "none")
     setup = None if setup.lower() == "none" else setup
-    feature = feature_text(t["text"]) if plain else \
+    feature = feature_text(t["text"], t.get("points")) if plain else \
         f"{t['title']}\n\n{t['text']}\n\nTicket {t['ticket']} of BigBoy {parent['id']}: {parent['title']}.\n" \
         + (f"Goal: {goal}\n" if goal else "") + f"Hard stops: {t.get('hard', 'none')}\n" \
         + (f"Human setup: {setup}\n" if setup else "") \
@@ -6594,7 +6606,8 @@ def cmd_runall_start(root, match=None):
         parent = board["jobs"][-1]
         kids, by_id = [], {}
         for item in todo:
-            t = {"ticket": None, "title": short_title(item["text"]), "text": item["text"], "parallel": True}
+            t = {"ticket": None, "title": short_title(item["text"]), "text": item["text"], "parallel": True,
+                 "points": item["points"]}
             kids.append(add_child(root, board, parent, t, [], "", plain=True))
             take_spec(root, item["text"], kids[-1])
             claim_item(lines, item, kids[-1])
