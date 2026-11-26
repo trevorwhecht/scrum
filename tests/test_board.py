@@ -2910,7 +2910,7 @@ class BoardTest(unittest.TestCase):
         self.root.mkdir(parents=True)
         (self.root / "backlog.md").write_text("# Backlog\n- [ ] Dark mode\n")
         parent, kids = self.three()
-        self.assertEqual(board.cmd_next(self.root), {"id": "005-dark-mode", "feature": "Dark mode"})
+        self.assertEqual(board.cmd_next(self.root), {"id": "005-dark-mode", "feature": "Dark mode", "points": None})
         self.assertEqual(board.cmd_next(self.root), {"id": None, "feature": None})
         self.assertEqual([self.child(k)["stage"] for k in kids], ["waiting"] * 3)
         self.assertEqual(self.child(parent)["stage"], "running")
@@ -2943,7 +2943,7 @@ class BoardTest(unittest.TestCase):
         p = self.child("001-run-all")
         self.assertEqual((p["title"], p["lane"], p["stage"], p["children"]),
                          ("Run all", "runall", "running", ["002-add-csv-export", "003-dark-mode"]))
-        for kid, text in (("002-add-csv-export", "Add CSV export"), ("003-dark-mode", "Dark mode")):
+        for kid, text in (("002-add-csv-export", "Add CSV export\nPoints: 3"), ("003-dark-mode", "Dark mode")):
             c = self.child(kid)
             self.assertEqual((c["stage"], c["parent"], c["depends_on"], c["parallel"]), ("waiting", "001-run-all", [], True))
             self.assertEqual((self.root / "jobs" / kid / "feature.md").read_text(), text + "\n")
@@ -4347,7 +4347,7 @@ class BoardTest(unittest.TestCase):
         self.root.mkdir(parents=True)
         (self.root / "backlog.md").write_text("# Backlog\n- [x] old → 001-old\n- [ ] Add CSV export\n- [ ] Dark mode\n")
         out = board.cmd_next(self.root)
-        self.assertEqual(out, {"id": "001-add-csv-export", "feature": "Add CSV export"})
+        self.assertEqual(out, {"id": "001-add-csv-export", "feature": "Add CSV export", "points": None})
         self.assertIn("- [x] Add CSV export → 001-add-csv-export", (self.root / "backlog.md").read_text())
         self.assertIn("- [ ] Dark mode", (self.root / "backlog.md").read_text())
         self.assertEqual(board.cmd_next(self.root)["feature"], "Dark mode")
@@ -11749,6 +11749,37 @@ class LilguyFitTest(unittest.TestCase):
         self.points(1)
         (self.jd / "feature.md").write_text("Reword SKILL.md, agents/scrum-builder.md and lanes/lilguy.md\n")
         self.assertIs(self.fit()["fit"], True)
+
+    def test_lilguy_fit_reads_feature_points_header_without_backlog_item(self):
+        """job 1586: a shop run's throwaway board has no backlog item naming the job; feature.md's Points: line decides."""
+        (self.root / "backlog.md").write_text("# Backlog\n")
+        (self.jd / "feature.md").write_text(board.feature_text("Tweak the dashboard label text", 1))
+        self.assertEqual(self.fit(), {"fit": True, "why": "backlog item is 1 point"})
+        self.assertEqual(json.loads((self.jd / "lilguy-fit.json").read_text())["points"], 1)
+        (self.jd / "feature.md").write_text(board.feature_text("Tweak the dashboard label text", 2))
+        self.assertEqual(self.fit(), {"fit": True, "why": "backlog item is 2 points, estimate within lilguy limits"})
+        (self.jd / "feature.md").write_text(board.feature_text("Tweak the dashboard label text", 13))
+        self.assertEqual(self.fit(), {"fit": False, "why": "not tiny: 13 points, no Jev model answer"})
+        self.assertEqual(json.loads((self.jd / "lilguy-fit.json").read_text())["points"], 13)
+
+    def test_lilguy_fit_backlog_points_win_over_header(self):
+        self.points(1)
+        (self.jd / "feature.md").write_text(board.feature_text("Tweak the dashboard label text", 8))
+        self.assertEqual(self.fit()["why"], "backlog item is 1 point")
+
+    def test_feature_text_points_header(self):
+        self.assertEqual(board.feature_text("Do it. Lane: fast.", 3), "Do it. Lane: fast.\nPoints: 3\nLane: fast.\n")
+        self.assertEqual(board.feature_text("Do it.", None), "Do it.\n")
+        self.assertEqual(board.feature_text("Do it.", 4), "Do it.\n")
+        self.assertEqual(board.feature_text("Do it.", True), "Do it.\n")
+
+    def test_next_returns_points_and_runall_child_feature_has_them(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] [2] Reword the board legend\n")
+        self.assertEqual(board.cmd_next(self.root)["points"], 2)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] [3] Reword the legend again\n- [ ] Unsized item\n")
+        out = runall_started(self.root)
+        feats = [(self.root / "jobs" / k / "feature.md").read_text() for k in out["children"]]
+        self.assertEqual(feats, ["Reword the legend again\nPoints: 3\n", "Unsized item\n"])
 
     def test_lilguy_fit_points_2_within_estimate_passes(self):
         self.points(2)
