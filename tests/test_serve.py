@@ -114,7 +114,16 @@ class ServeTest(unittest.TestCase):
         cls.server.shutdown()
         os.environ["SCRUM_REGISTRY"] = DEFAULT_REGISTRY
         os.environ.pop("SCRUM_ROUTE", None)
-        cls.tmp.cleanup()
+        # job 1580: a server thread or child can still write into the tempdir under load ("Directory not empty")
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                cls.tmp.cleanup()
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    shutil.rmtree(cls.tmp.name, ignore_errors=True)
+                    break
 
     def req(self, method, path, body=None, headers=None):
         h = {"Content-Type": "application/json"} if body is not None else {}
