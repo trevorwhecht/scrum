@@ -3661,6 +3661,85 @@ def reclaim_disk(repo: Path, jobs: list[dict]) -> int:
     return removed
 
 
+SHOP_RECLAIM_EVERY = 3600  # seconds between two shop worktree sweeps of one worker (shop_reclaim_tick)
+SHOP_RECLAIM_AT = {}  # worker alias -> time.time() its last sweep started; memory only, so a restart sweeps at once
+SHOP_RECLAIM = {"busy": False}  # True while a shop_reclaim_tick thread sweeps: one at a time
+SHOP_RECLAIM_LOCK = threading.Lock()
+
+
+def shop_reclaim(alias: str) -> int:
+    """Sweep worker `alias`'s finished worktrees (job 1550): for each board.projects() repo, send shop.reclaim (the
+    shop clone is ~/scrum-work/<repo name>, as shop_tick's clone) that board's done and aborted jobs with each job's
+    `shop` pid (0 with none), leaving out an id whose scrum-<id> folder a job in another stage uses (its id or its
+    worktree's basename: reclaim_disk's keep rule). A board with nothing to send makes no ssh call; a bad board is one
+    `watchdog: shop reclaim: <project>: <error>` stderr line. Writes one `Disk reclaim` processes.log line with
+    worker=<alias> and the folders removed over every project, 0 included, and returns that total."""
+    total = 0
+    for project, repo in board.projects().items():
+        try:
+            root = repo / "scrum"
+            if not (root / "board.json").exists():
+                continue
+            jobs = board.read_board(root)["jobs"]
+            keep = {f"scrum-{j['id']}" for j in jobs if j.get("stage") not in ("done", "aborted")} \
+                | {Path(j["worktree"]).name for j in jobs if j.get("worktree") and j.get("stage") not in ("done", "aborted")}
+            send = [(j["id"], int(j["shop"]) if re.fullmatch(r"[0-9]{1,10}", str(j.get("shop") or "")) else 0)
+                    for j in jobs if j.get("stage") in ("done", "aborted") and f"scrum-{j['id']}" not in keep]
+            if send:
+                total += shop.reclaim(repo.name, send, alias=alias) or 0
+        except (Exception, SystemExit) as e:
+            print(f"watchdog: shop reclaim: {project}: {e}", file=sys.stderr, flush=True)
+    board.log_process("Disk reclaim", "shop", worker=alias, removed=total)
+    return total
+
+
+def shop_reclaim_sweep(aliases: list[str]) -> None:
+    """shop_reclaim_tick's thread: shop_reclaim each alias in turn (one failure never skips the next), then clears
+    SHOP_RECLAIM's busy flag."""
+    try:
+        for alias in aliases:
+            try:
+                shop_reclaim(alias)
+            except (Exception, SystemExit) as e:
+                print(f"watchdog: shop reclaim: {alias}: {e}", file=sys.stderr, flush=True)
+    finally:
+        with SHOP_RECLAIM_LOCK:
+            SHOP_RECLAIM["busy"] = False
+
+
+def shop_reclaim_tick() -> None:
+    """Once a watchdog tick: start one daemon thread (shop_reclaim_sweep; none while one runs) that sweeps every due
+    shop.workers() worker, cooled ones included, so the watchdog thread never runs ssh. A worker is due when
+    SHOP_RECLAIM_EVERY has passed since its last sweep started (SHOP_RECLAIM_AT; never swept: due), or its cached
+    SHOP_STATS free_disk_gb is under board.MIN_FREE_DISK_GB and that reading's `at` is newer than its last sweep.
+    Under unittest it runs only with SCRUM_SHOP_RECLAIM=1, so another test's watchdog tick never starts a sweep."""
+    if "unittest" in sys.modules and os.environ.get("SCRUM_SHOP_RECLAIM") != "1":
+        return
+    now = time.time()
+    with SHOP_STATS_LOCK:
+        stats = {e["name"]: e for e in SHOP_STATS["value"]}
+    with SHOP_RECLAIM_LOCK:
+        if SHOP_RECLAIM["busy"]:
+            return
+        due = []
+        for w in shop.workers():
+            last, e = SHOP_RECLAIM_AT.get(w.alias), stats.get(w.alias) or {}
+            low = e.get("free_disk_gb") is not None and e["free_disk_gb"] < board.MIN_FREE_DISK_GB \
+                and (last is None or (e.get("at") or 0) > last)
+            if last is None or now - last >= SHOP_RECLAIM_EVERY or low:
+                due.append(w.alias)
+                SHOP_RECLAIM_AT[w.alias] = now
+        if not due:
+            return
+        SHOP_RECLAIM["busy"] = True
+    try:
+        threading.Thread(target=shop_reclaim_sweep, args=(due,), daemon=True).start()
+    except BaseException:
+        with SHOP_RECLAIM_LOCK:
+            SHOP_RECLAIM["busy"] = False
+        raise
+
+
 PROD_ERRORS_EVERY = 86400  # seconds between one project's successful prod error sweeps (watchdog only)
 PROD_ERRORS_RETRY = 3600  # seconds before a failed vercel logs fetch is tried again
 PROD_ERRORS_CAP = 5  # signature items one sweep adds to one project's backlog; the excess gets one summary line
@@ -4794,6 +4873,7 @@ def watchdog_tick():
     Then stop_two_sessions keeps one owner when two claude sessions work one job and stops the rest (asks when unclear).
     Then stop_same_tests stops the newer of two identical full Test or E2E runs on one clean commit and logs a full E2E rerun of a head e2e-full.json already holds.
     Then report_hogs lists, never stops, each process outside the scrum over one core for 10+ minutes, for the meter.
+    Then shop_reclaim_tick starts a thread that removes finished jobs' worktrees on each due shop Mac (hourly, or at once on a low disk reading).
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     6. Pulse: pulse_loop runs pulse_tick on its own 60 s timer thread (job 1429, so a slow step here never delays its
@@ -4985,6 +5065,10 @@ def watchdog_tick():
         report_hogs()
     except (Exception, SystemExit) as e:
         print(f"watchdog: cpu hogs: {e}", file=sys.stderr, flush=True)
+    try:  # its own guard: due shop Macs' finished worktrees, swept on a thread (job 1550)
+        shop_reclaim_tick()
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: shop reclaim: {e}", file=sys.stderr, flush=True)
     if claim:
         try:
             auto_continue_tick(busy)

@@ -255,6 +255,84 @@ class ShopTickTest(unittest.TestCase):
         self.assertEqual([w.alias for w, _ in self.serve.shop_worker()], ["shopmac", "newmac", "third"],
                          "no entry: not skipped")
 
+    def test_shop_reclaim_sends_final_jobs_only(self):
+        """Job 1550: shop_reclaim(alias) sends shop.reclaim each board's done and aborted jobs with their shop pid (0 with
+        none), never a job in another stage or one whose scrum-<id> folder a live job's worktree uses; a board with
+        nothing to send makes no call; one Disk reclaim processes.log line per sweep with the summed count."""
+        self.project("mm", [{"id": "101-done", "stage": "done", "shop": "4242"},
+                            {"id": "102-gone", "stage": "aborted"},
+                            {"id": "103-cloud", "stage": "cloud", "shop": "11"},
+                            {"id": "104-ask", "stage": "needs-human"},
+                            {"id": "105-old", "stage": "done", "shop": "12"},
+                            {"id": "106-stall", "stage": "build", "worktree": "/x/.claude/worktrees/scrum-105-old"}])
+        self.project("nn", [{"id": "201-done", "stage": "done", "shop": "77"}])
+        self.project("oo", [{"id": "301-spec", "stage": "spec"}])
+        self.sh.reclaim = mock.Mock(side_effect=lambda project, jobs, alias: {"mm": 2, "nn": None}[project])
+        log = self.base / "processes.log"
+        with mock.patch.object(self.serve.shop, "reclaim", self.sh.reclaim), \
+                mock.patch.dict(os.environ, SCRUM_PULSE=str(self.base / "pulse.log")), \
+                mock.patch.object(self.board, "_append_log", side_effect=lambda path, rec, label: log.open("a").write(
+                    json.dumps(rec) + "\n")):
+            self.assertEqual(self.serve.shop_reclaim("mac2"), 2)
+        self.assertEqual(self.sh.reclaim.call_args_list, [
+            mock.call("mm", [("101-done", 4242), ("102-gone", 0)], alias="mac2"),
+            mock.call("nn", [("201-done", 77)], alias="mac2")])
+        lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+        self.assertEqual([{k: v for k, v in r.items() if k != "t"} for r in lines],
+                         [{"process": "Disk reclaim", "result": "shop", "worker": "mac2", "removed": 2}])
+
+    def test_shop_reclaim_tick_hourly_and_on_low_disk(self):
+        """Job 1550: a worker is swept (on a daemon thread, one at a time) when SHOP_RECLAIM_EVERY passed since its last
+        sweep, or at once on a low free_disk_gb read after that sweep; a cooled worker is swept too. watchdog_tick calls
+        it in its own guard."""
+        s = self.serve
+        self.workers("shopmac 2 owa,main\n")
+        (self.base / "cooldown-shopmac").write_text("")
+        s.SHOP_RECLAIM_AT.clear()
+        self.addCleanup(s.SHOP_RECLAIM_AT.clear)
+        self.shop_disk({"shopmac": 50.0})
+        swept, threads = [], []
+
+        class Thread:
+            def __init__(self, target, args=(), daemon=None):
+                threads.append(daemon)
+                self.go = lambda: target(*args)
+
+            def start(self):
+                self.go()
+        t = 10_000.0
+        with mock.patch.dict(os.environ, SCRUM_SHOP_RECLAIM="1", SCRUM_COOLDOWN=str(self.base / "cooldown")), \
+                mock.patch.object(s, "shop_reclaim", side_effect=lambda alias: swept.append(alias) or 0), \
+                mock.patch.object(s.threading, "Thread", Thread), mock.patch.object(s.time, "time") as clock:
+            self.assertTrue(self.board.cooling_down("shopmac"))
+            for now, want in ((t, ["shopmac"]), (t + 60, []), (t + 3599, []), (t + 3600, ["shopmac"]),
+                              (t + 3660, [])):
+                with self.subTest(now=now):
+                    clock.return_value = now
+                    swept.clear()
+                    s.shop_reclaim_tick()
+                    self.assertEqual(swept, want)
+            self.assertEqual(threads, [True, True])
+            self.shop_disk({"shopmac": 4.0})
+            s.SHOP_STATS["value"][0]["at"] = t + 3700  # a fresh low reading
+            for now, want in ((t + 3720, ["shopmac"]), (t + 3780, [])):
+                with self.subTest(now=now):
+                    clock.return_value = now
+                    swept.clear()
+                    s.shop_reclaim_tick()
+                    self.assertEqual(swept, want, "a low reading sweeps once, not again on the same reading")
+            s.SHOP_RECLAIM["busy"] = True
+            clock.return_value = t + 9000
+            swept.clear()
+            s.shop_reclaim_tick()
+            s.SHOP_RECLAIM["busy"] = False
+            self.assertEqual(swept, [], "one sweep thread at a time")
+        err = io.StringIO()
+        with mock.patch.object(s, "shop_reclaim_tick", side_effect=RuntimeError("boom")), \
+                mock.patch.object(s, "actions_alert", return_value=None), contextlib.redirect_stderr(err):
+            s.watchdog_tick()
+        self.assertIn("watchdog: shop reclaim: boom", err.getvalue().splitlines())
+
     def test_cooldown_api_per_worker(self):
         """Job 1185: set_cooldown(on, worker=<alias>) sets only that worker's flag, explicitly on or off; a worker that is
         not a current shop.workers() alias is a 400 that touches nothing; no worker is this Mac's flag, as before.
