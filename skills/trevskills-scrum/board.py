@@ -6385,9 +6385,12 @@ def usage_refresh_due(acc, now):
     return not is_num(at) or now - at > USAGE_REFRESH_SECS
 
 
-def refresh_usage(acc, run=subprocess.run):
+def refresh_usage(acc, run=subprocess.run, _real=subprocess.run):
     """Headless usage refresh: one tiny haiku turn under the account's CLAUDE_CONFIG_DIR, its rate_limit_event windows
-    saved to the account's usage.json through save_limits. True when it wrote, False on any failure (never raises)."""
+    saved to the account's usage.json through save_limits. True when it wrote, False on any failure (never raises).
+    Under unittest the real subprocess.run is refused (False), so no test ever launches a headless claude."""
+    if run is _real and "unittest" in sys.modules:
+        return False
     try:
         with tempfile.TemporaryDirectory() as cwd:
             r = run(["claude", "-p", ".", "--output-format", "stream-json", "--verbose", "--max-turns", "1", "--model", "haiku"],

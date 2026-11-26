@@ -810,6 +810,13 @@ class RefreshUsageTest(AccountEnv):
             self.assertEqual(self.path().read_text(), "old")
 
 
+class RefreshUsageNoRealClaudeTest(AccountEnv):
+    def test_real_run_refused_under_unittest(self):
+        with mock.patch.object(subprocess, "Popen") as popen:
+            self.assertFalse(board.refresh_usage(board.accounts()[1]))
+        popen.assert_not_called()
+
+
 class ReserveHitStaleTest(AccountEnv):
     def test_stale_holds_nothing_fresh_holds(self):
         os.environ["SCRUM_ACCOUNTS"] = json.dumps([["main", str(self.main), None], ["owa", str(self.owa), [80, 90]]])
