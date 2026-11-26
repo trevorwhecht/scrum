@@ -3584,8 +3584,8 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
             heads.append((rd / "head.txt").read_text(encoding="utf-8", errors="replace").strip())
         except OSError:
             heads.append("")
-    if rounds and prev and hwaits:  # a needs-human span opening after the last round's last file shows in no round time: it is that round's Human wait
-        tail = sorted((max(a, prev), min(b, done) if done else b) for a, b in human)
+    if rounds and prev and hwaits and done:  # a needs-human span opening after the last round's last file shows in no round time: it is that round's Human wait
+        tail = sorted((max(a, prev), min(b, done)) for a, b in human)
         upto = prev
         for a, b in tail:  # overlaps count once
             a = max(a, upto)
