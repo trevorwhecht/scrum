@@ -219,6 +219,12 @@ START = ("cd ~/scrum-work/{p} && (umask 077 && mkdir -p {d} && cat > {d}/{j}.pro
 # ponytail: liveness is `ps -p` showing claude; a reused pid of another claude keeps a dead job alive until it ends
 ENDED = ('ps -p {pid} -o command= | grep -q claude && exit 3; f="$HOME/scrum-work/{p}/{d}/{j}.log"; [ -f "$f" ] || exit 0;'
          ' tail -c 8192 "$f"')
+# reclaim(): each stdin `<id> <pid>` line removes the clone's .claude/worktrees/scrum-<id> unless it is no folder, a
+# symlink, or its pid still runs claude (ENDED's check); then one prune. Never a branch, a reset or a clean.
+RECLAIM = ('d="$HOME/scrum-work/{p}"; if [ ! -d "$d/.git" ]; then echo RECLAIMED 0; exit 0; fi; cd "$d" || exit 1;'
+           ' n=0; while read -r j pid; do w=".claude/worktrees/scrum-$j"; if [ ! -d "$w" ] || [ -L "$w" ]; then continue; fi;'
+           ' if [ "$pid" -gt 0 ] && ps -p "$pid" -o command= | grep -q claude; then continue; fi;'
+           ' git worktree remove --force -- "$w" > /dev/null 2>&1 && n=$((n + 1)); done; git worktree prune; echo RECLAIMED $n')
 
 CLONES = ("~/code/scrum", "~/code/trevorhecht-skills")  # the clones the shop's ~/.claude skills, agents and rules link to
 MD_PULL = " && ".join(f"git -C {c} pull --ff-only" for c in CLONES)
@@ -629,6 +635,20 @@ def ended(project: str, job_id: str, pid: int, alias: str = ALIAS) -> str | None
         return None
     r = run(ENDED.format(pid=int(pid), p=project, d=SHOP_LOGS, j=job_id), STEP_TIMEOUT, alias=alias)
     return r.stdout if r.returncode == 0 else None
+
+
+def reclaim(project: str, jobs: list[tuple[str, int]], alias: str = ALIAS) -> int | None:
+    """Remove the shop clone ~/scrum-work/<project>'s .claude/worktrees/scrum-<id> of each (id, pid) in `jobs` with
+    `git worktree remove --force`, then `git worktree prune` once (RECLAIM, one run() call, INSTALL_TIMEOUT): the
+    folders removed, 0 with no clone there, None on a failed or timed-out call. The pairs go only on stdin; a pair whose
+    folder is missing or a symlink, or whose pid (0: none) still runs claude, is skipped. None with no ssh for a project
+    off PROJECT_RE; an id off JOB_RE is dropped first. Never deletes a branch, resets or cleans (job 1550)."""
+    if not PROJECT_RE.fullmatch(project):
+        return None
+    pairs = "".join(f"{j} {int(pid or 0)}\n" for j, pid in jobs if isinstance(j, str) and JOB_RE.fullmatch(j))
+    r = run(RECLAIM.format(p=project), INSTALL_TIMEOUT, input=pairs, alias=alias)
+    counts = [ln.split()[1] for ln in r.stdout.splitlines() if re.fullmatch(r"RECLAIMED [0-9]+", ln.strip())]
+    return int(counts[-1]) if r.returncode == 0 and counts else None
 
 
 def memory_key(path: str) -> str:

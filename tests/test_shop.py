@@ -2224,6 +2224,61 @@ class DispatchTest(SetupCase):
         self.assertEqual(self.argv, [])
 
 
+RECLAIM = ('d="$HOME/scrum-work/onewitharts"; if [ ! -d "$d/.git" ]; then echo RECLAIMED 0; exit 0; fi; cd "$d" || exit 1;'
+           ' n=0; while read -r j pid; do w=".claude/worktrees/scrum-$j"; if [ ! -d "$w" ] || [ -L "$w" ]; then continue; fi;'
+           ' if [ "$pid" -gt 0 ] && ps -p "$pid" -o command= | grep -q claude; then continue; fi;'
+           ' git worktree remove --force -- "$w" > /dev/null 2>&1 && n=$((n + 1)); done; git worktree prune; echo RECLAIMED $n')
+
+
+class ReclaimTest(SetupCase):
+    """Job 1550: reclaim() removes finished jobs' worktrees under the shop clone's .claude/worktrees/ in one ssh call."""
+
+    def git(self, *args, cwd=None):
+        r = REAL_RUN(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd, capture_output=True,
+                     text=True, env={"HOME": self.home, "PATH": "/usr/bin:/bin"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def test_command_stdin_and_count(self):
+        run = self.fake_run(0, "shell noise\nRECLAIMED 2\n")
+        self.assertEqual(shop.reclaim("onewitharts", [("964-a", 4242), ("965-b", 0), ("-966", 1), ("967-c;id", 2),
+                                                      ("968-d\n", 3)]), 2)
+        self.assertEqual(run.call_args_list, [mock.call(RECLAIM, 600, input="964-a 4242\n965-b 0\n", alias="shopmac")])
+        run.reset_mock()
+        self.assertEqual(shop.reclaim("onewitharts", [("964-a", 0)], alias="mac2"), 2)
+        self.assertEqual(run.call_args.kwargs["alias"], "mac2")
+        for project in ("-x", "../x", "a b", "x;id"):
+            with self.subTest(project=project):
+                run.reset_mock()
+                self.assertIsNone(shop.reclaim(project, [("964-a", 0)]))
+                run.assert_not_called()
+        for answer in ((1, "RECLAIMED 2\n"), (124, ""), (0, "no count\n")):
+            with self.subTest(answer=answer):
+                run.return_value = subprocess.CompletedProcess([], *answer, "")
+                self.assertIsNone(shop.reclaim("onewitharts", [("964-a", 0)]))
+
+    def test_removes_only_ended_worktrees_and_keeps_branches(self):
+        h = Path(self.home)
+        self.shop(("RECLAIMED", LOCAL, ""))
+        self.assertEqual(shop.reclaim("onewitharts", [("964-a", 0)]), 0, "no clone there")
+        clone = h / "scrum-work" / "onewitharts"
+        self.git("init", "-q", "-b", "main", str(clone))
+        self.git("commit", "-q", "--allow-empty", "-m", "one", cwd=clone)
+        wts = clone / ".claude" / "worktrees"
+        for j in ("964-a", "965-b", "966-c"):
+            self.git("worktree", "add", "-q", "-b", f"scrum/{j}", str(wts / f"scrum-{j}"), cwd=clone)
+        outside = h / "elsewhere"
+        outside.mkdir()
+        (wts / "scrum-967-d").symlink_to(outside)
+        live = subprocess.Popen(["/bin/sh", "-c", "sleep 30; :", "claude"], start_new_session=True)
+        self.addCleanup(live.wait)
+        self.addCleanup(os.killpg, live.pid, 9)
+        self.assertEqual(shop.reclaim("onewitharts", [("964-a", 0), ("965-b", live.pid), ("967-d", 0), ("968-e", 0)]), 1)
+        self.assertEqual(sorted(p.name for p in wts.iterdir()), ["scrum-965-b", "scrum-966-c", "scrum-967-d"])
+        self.assertTrue(outside.is_dir())
+        self.assertIn("scrum/964-a", self.git("branch", "--list", "scrum/964-a", cwd=clone), "branches stay")
+
+
 class StructureTest(unittest.TestCase):
     def test_stdlib_only(self):
         tree = ast.parse((SKILL / "shop.py").read_text())
