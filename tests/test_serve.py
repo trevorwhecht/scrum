@@ -15456,6 +15456,76 @@ class HotStopTest(unittest.TestCase):
         self.assertIn("hot_stop_tick once", self.serve.watchdog_tick.__doc__)
 
 
+class UsageRefreshTickTest(unittest.TestCase):
+    """usage_refresh_tick starts board.refresh_usage per due account in a daemon thread, never two for one account."""
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        for n in ("main", "owa"):
+            (self.base / n).mkdir()
+        p = mock.patch.dict(os.environ, SCRUM_ACCOUNTS=json.dumps([["main", str(self.base / "main"), None], ["owa", str(self.base / "owa"), None]]))
+        p.start()
+        self.addCleanup(p.stop)
+        os.environ.pop("SCRUM_USAGE", None)
+        self.addCleanup(serve.USAGE_REFRESHING.clear)
+
+    def wait_idle(self):
+        deadline = time.time() + 30
+        while self.serve.USAGE_REFRESHING and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(self.serve.USAGE_REFRESHING)
+
+    def test_only_due_accounts_start(self):
+        (self.base / "main" / "usage.json").write_text(json.dumps({"written_at": time.time(), "rate_limits": {}}))
+        # owa has no usage.json: due
+        with mock.patch.object(self.serve.board, "refresh_usage") as refresh:
+            self.assertEqual(self.serve.usage_refresh_tick(), ["owa"])
+            self.wait_idle()
+        self.assertEqual([c.args[0].name for c in refresh.call_args_list], ["owa"])
+        (self.base / "main" / "usage.json").write_text(json.dumps({"written_at": time.time() - 181, "rate_limits": {}}))
+        with mock.patch.object(self.serve.board, "refresh_usage") as refresh:
+            self.assertEqual(self.serve.usage_refresh_tick(), ["main", "owa"])
+            self.wait_idle()
+
+    def test_no_second_while_running_and_no_wait(self):
+        import threading
+        gate, started = threading.Event(), threading.Event()
+
+        def slow(acc):
+            started.set()
+            gate.wait(30)
+        with mock.patch.object(self.serve.board, "refresh_usage", side_effect=slow) as refresh:
+            t0 = time.time()
+            self.assertEqual(self.serve.usage_refresh_tick(), ["main", "owa"])
+            self.assertLess(time.time() - t0, 5, "the tick never waits on the refresh")
+            self.assertTrue(started.wait(30))
+            self.assertEqual(self.serve.usage_refresh_tick(), [], "both still running")
+            gate.set()
+            self.wait_idle()
+        self.assertEqual(refresh.call_count, 2)
+
+    def test_failing_tick_never_stops_the_watchdog(self):
+        err = io.StringIO()
+        with mock.patch.object(self.serve, "usage_refresh_tick", side_effect=RuntimeError("boom")), \
+                mock.patch.object(self.serve, "hard_stop_tick", side_effect=RuntimeError("later pass")), \
+                mock.patch.object(self.serve.board, "projects", return_value={}), \
+                mock.patch.object(self.serve.board, "record_cpu_sample"), \
+                mock.patch.object(self.serve, "e2e_lock_reap"), mock.patch.object(self.serve, "render_reap_tick"), mock.patch.object(self.serve, "write_shop_room"), \
+                mock.patch.object(self.serve, "agent_links_tick"), mock.patch.object(self.serve, "hot_stop_tick"), \
+                mock.patch.object(self.serve, "e2e_runaway_tick"), \
+                mock.patch.object(self.serve.board, "ram_room", return_value=0), \
+                contextlib.redirect_stderr(err):
+            try:
+                self.serve.watchdog_tick()
+            except Exception:
+                pass
+        self.assertIn("watchdog: usage refresh: boom", err.getvalue())
+        self.assertIn("watchdog: hard stop: later pass", err.getvalue())
+
+
 class HardStopTickTest(unittest.TestCase):
     """Trevor 2026-11-20: at board.HARD_STOP_PCT 7d, serve.py hard_stop_tick holds and stops that account's scrum
     sessions and nothing else. The sessions are real process groups whose argv reads like a scrum `claude -p`."""

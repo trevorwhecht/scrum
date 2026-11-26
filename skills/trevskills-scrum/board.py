@@ -1846,7 +1846,7 @@ PROCESSES = (
     ("Weekly digest", ("weekly_tick",), ()),
     ("Cloud jobs", ("cloud_tick", "cmd_cloud_sync", "cmd_cloud_claim", "shop_tick", "write_shop_room",
                     "project_notes_tick"), ()),
-    ("Usage windows", ("window_tick", "hard_stop_tick"), ("windows",)),
+    ("Usage windows", ("window_tick", "usage_refresh_tick", "hard_stop_tick"), ("windows",)),
     ("Pulse", ("pulse_tick", "publish_busy", "record_cpu_sample", "cooldown_chime"), ()),
     ("Stuck alert", ("stuck_alert", "stuck_process", "disk_alert_tick", "claude_missing_tick", "signin_alert_tick"), ()),
     ("Live checks", ("live_check_tick",), ("jobs/*/live-checks.json",)),
@@ -6191,10 +6191,11 @@ def account_reserve(acc, now):
 def reserve_hit(acc, usage, now):
     """Why the account's reserve (account_reserve) keeps it for Trevor, or None: a window with resets_at > now whose
     used % is at or above its reserve value. A None value, or no reserve at all (the primary), holds only a used-up
-    window (100 %, job 1216: Claude refuses it, so no account is ever picked full). written_at is ignored (used %
-    only grows inside one window)."""
+    window (100 %, job 1216: Claude refuses it, so no account is ever picked full). None when usage.json's written_at
+    is missing or older than USAGE_STALE_SECS (unknown holds nothing)."""
     limits = usage.get("rate_limits") if isinstance(usage, dict) else None
-    if not isinstance(limits, dict):
+    at = usage.get("written_at") if isinstance(usage, dict) else None
+    if not isinstance(limits, dict) or not is_num(at) or now - at > USAGE_STALE_SECS:
         return None
     for (key, label), cap in zip(WINDOWS, account_reserve(acc, now) or (None, None)):
         w = limits.get(key)
@@ -6209,7 +6210,10 @@ def reserve_hit(acc, usage, now):
 def hard_stop(account, now):
     """Why HARD_STOP_PCT stops every scrum session on the account now (its seven_day window at or above it, more than
     FINAL_HOUR_SECS before resets_at), else None. Only as fresh as usage.json: the statusline of an interactive chat on
-    that account writes it."""
+    that account writes it, or refresh_usage; None when written_at is missing or older than USAGE_STALE_SECS."""
+    at = (read_usage(account) or {}).get("written_at")
+    if not is_num(at) or now - at > USAGE_STALE_SECS:
+        return None
     w = seven_day_window(account) or {}
     pct, at = w.get("used_percentage"), w.get("resets_at")
     if is_num(pct) and is_num(at) and at - FINAL_HOUR_SECS > now and pct >= HARD_STOP_PCT:
@@ -6335,15 +6339,8 @@ def merge_limits(old, new, now):
     return merged
 
 
-def cmd_statusline(text):
-    """Claude Code's status line: save stdin's rate_limits to usage.json (temp file + os.replace), return the line."""
-    try:
-        limits = json.loads(text).get("rate_limits")
-    except (ValueError, AttributeError):
-        return ""
-    if not isinstance(limits, dict):
-        return ""  # no rate_limits (yet): leave the old file alone
-    path = usage_path()
+def save_limits(path, limits):
+    """Merge limits into the usage.json at path (merge_limits, written_at now) under its lock: temp file + os.replace."""
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = path.with_name(f"{path.name}.lock")
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # pid: several sessions may write at once
@@ -6358,6 +6355,66 @@ def cmd_statusline(text):
         os.replace(tmp, path)
         # ponytail: unlinking under the lock can let a racing session lock a new inode; the worst case is one lost merge
         lock.unlink(missing_ok=True)
+
+
+def usage_from_stream(text):
+    """rate_limits from `claude -p --output-format stream-json` output: per rate_limit_event, each unifiedWindows
+    five_hour/seven_day entry as {used_percentage: utilization*100, resets_at}; later events win; {} when none or malformed."""
+    out = {}
+    for line in str(text).splitlines():
+        try:
+            ev = json.loads(line)
+            wins = ev["rate_limit_info"]["unifiedWindows"] if ev.get("type") == "rate_limit_event" else None
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+        if not isinstance(wins, dict):
+            continue
+        for key, _ in WINDOWS:
+            w = wins.get(key)
+            if isinstance(w, dict) and is_num(w.get("utilization")) and is_num(w.get("resetsAt")):
+                out[key] = {"used_percentage": w["utilization"] * 100, "resets_at": w["resetsAt"]}
+    return out
+
+
+USAGE_REFRESH_SECS = 180  # a usage.json older than this is due a headless refresh
+
+
+def usage_refresh_due(acc, now):
+    """True when the account's usage.json is missing or its written_at is older than USAGE_REFRESH_SECS."""
+    at = (read_usage(acc.name) or {}).get("written_at")
+    return not is_num(at) or now - at > USAGE_REFRESH_SECS
+
+
+def refresh_usage(acc, run=subprocess.run, _real=subprocess.run):
+    """Headless usage refresh: one tiny haiku turn under the account's CLAUDE_CONFIG_DIR, its rate_limit_event windows
+    saved to the account's usage.json through save_limits. True when it wrote, False on any failure (never raises).
+    Under unittest the real subprocess.run is refused (False), so no test ever launches a headless claude."""
+    if run is _real and "unittest" in sys.modules:
+        return False
+    try:
+        with tempfile.TemporaryDirectory() as cwd:
+            r = run(["claude", "-p", ".", "--output-format", "stream-json", "--verbose", "--max-turns", "1", "--model", "haiku"],
+                    cwd=cwd, env={**os.environ, "CLAUDE_CONFIG_DIR": str(acc.dir)}, capture_output=True, text=True, timeout=90)
+        if r.returncode != 0:
+            return False
+        limits = usage_from_stream(r.stdout)
+        if not limits:
+            return False
+        save_limits(usage_path(acc.name), limits)
+        return True
+    except Exception:
+        return False
+
+
+def cmd_statusline(text):
+    """Claude Code's status line: save stdin's rate_limits to usage.json (temp file + os.replace), return the line."""
+    try:
+        limits = json.loads(text).get("rate_limits")
+    except (ValueError, AttributeError):
+        return ""
+    if not isinstance(limits, dict):
+        return ""  # no rate_limits (yet): leave the old file alone
+    save_limits(usage_path(), limits)
     return " · ".join(f"{label} {round(w['used_percentage'])}%" for key, label in WINDOWS
                       if isinstance(w := limits.get(key), dict) and is_num(w.get("used_percentage")))
 
