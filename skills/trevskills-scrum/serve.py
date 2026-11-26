@@ -3510,7 +3510,7 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
     waiting children when no child session is alive and no chaining session holds the lock. A runall with a child
     still in progress tops up its free slots each tick, unless a chaining session holds the lock. claim=False (this
     tick resumed or Played a job) skips both start_ready calls; everything else still runs. First, on every tick, a
-    runall parent whose reason starts with board.MACHINE_WAIT notes held_gate(reason less that prefix) on its ready waiting
+    runall or bigboy parent whose reason starts with board.MACHINE_WAIT notes held_gate(reason less that prefix) on its ready waiting
     children (note_held, text the full reason), so their held minutes keep running under GATE_HELD_GAP_SECS (job 1584)."""
     alive = alive or once(lambda: board.session_alive_fn())
     by_id = {j["id"]: j for j in jobs}
@@ -3520,8 +3520,8 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
             continue
         kids = [by_id[k] for k in p["children"] if k in by_id]
         why = p.get("reason") or ""
-        if p["lane"] == "runall" and why.startswith(board.MACHINE_WAIT):
-            note_held(root, held_gate(why.removeprefix(board.MACHINE_WAIT)), ready_waiting(root, p["id"]), why)  # every tick, so held minutes keep running (job 1584)
+        if p["lane"] in ("runall", "bigboy") and why.startswith(board.MACHINE_WAIT):
+            note_held(root, held_gate(why.removeprefix(board.MACHINE_WAIT)), ready_waiting(root, p["id"]), why)  # every tick, so held minutes keep running (jobs 1584, 1587)
         if not board.chain_lock_live(root, p["id"]) and respawn_orphans(project, root, p, kids, alive, by_id):
             continue  # a child was just respawned (a resumed one now reads stalled, i.e. idle): not idle this tick
         if not all(board.idle(k) for k in kids):

@@ -10074,6 +10074,15 @@ class SweepParentsHeldTest(unittest.TestCase):
         self.assertIn("finish_first", gates)
         self.assertNotIn("other", gates)
 
+    def test_bigboy_parent_notes_swap_held(self):
+        """Job 1587: a machine-waiting bigboy parent's ready waiting children keep their held minutes too (messageManager
+        bigboy 152 logged `waiting: swap used` and its children's Queue read unnamed)."""
+        self.jobs[0]["lane"] = "bigboy"
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        self.sweep(claim=False)
+        self.assertEqual(self.gates("002-kid")["swap"]["text"], self.REASON)
+        self.assertEqual(self.gates("003-kid"), {}, "a child in build is not a ready waiting child")
+
 
 class ExitedRunSweepTest(unittest.TestCase):
     """watchdog_tick's safety net for a dashboard-started `claude -p` start/resume run that exited mid-stage."""

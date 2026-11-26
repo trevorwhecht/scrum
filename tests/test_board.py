@@ -3578,7 +3578,7 @@ class BoardTest(unittest.TestCase):
         """`Lane: lilguy or fast.` names two lanes: feature_text writes no header line and header_in reads None (job 1560)."""
         item = "Fix x. Lane: lilguy or fast. Hard stop auth."
         self.assertEqual(board.feature_text(item), item + "\n")
-        self.assertIsNone(board.header_in(f"Fix x\nLane: lilguy or fast.\n", "Lane", board.LANES))
+        self.assertIsNone(board.header_in("Fix x\nLane: lilguy or fast.\n", "Lane", board.LANES))
         self.assertEqual(board.header_in("Fix x\nLane: fast, then more.\n", "Lane", board.LANES), "fast")
         self.assertIn("Lane: debug", board.feature_text("Fix x. Lane: debug, cause unknown. Complex: no."))
 
@@ -6120,7 +6120,8 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board._timing_row(self.root, "j", job, {})[0][4], "depends_on:1439-a 0m, depends_on:1440-b 0m")
         self.assertEqual(board._timing_row(self.root, "j", {}, {})[0][4], "-")
         self.write("j/queue-gates.txt", "ram_room\n")
-        self.assertEqual(board._timing_row(self.root, "j", job, {})[0][4], "ram_room 0m")
+        self.assertEqual(board._timing_row(self.root, "j", job, {})[0][4],
+                         "ram_room 0m, depends_on:1439-a 0m, depends_on:1440-b 0m")  # job 1587: beside other gates
 
     def test_timing_ignores_other_stalls(self):
         t0 = 1_700_000_000
@@ -6346,6 +6347,29 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(row({}, None), ["3h05m", "depends_on:1-a 20m, ram_room 0m, unnamed 2h45m"])  # blocker unknown: its held time
         self.assertEqual(row({}, {"1-a": done(3600)}), ["3h05m", "depends_on:1-a 1h00m, ram_room 0m, unnamed 2h05m"])
 
+    def test_timing_row_depends_on_heads_with_other_gates(self):
+        """Job 1587: the board's depends_on:<id> heads join queue-gates.txt's other gates, and unnamed is Queue less
+        the depends_on wait less the longest other head, floored at 0 (messageManager 155 read unnamed 5h02m of 6h00m
+        with 1h36m after depends_on)."""
+        t0 = 1_700_000_000
+        self.claim_clock_job(t0)  # Queue 3h05m
+        at = lambda secs: datetime.fromtimestamp(t0 + secs, timezone.utc).isoformat()
+        done = lambda secs: {"stage": "done", "updatedAt": at(secs)}
+        row = lambda job, by_id: board._timing_row(self.root, "j", job, {}, by_id=by_id)[0][3:5]
+        self.write("j/queue-gates.txt", "swap\n")
+        self.write("j/current-gates.json", json.dumps({"swap": {"at": 1.0, "text": "swap", "held": 1200}}))
+        self.assertEqual(row({"depends_on": ["1-a"]}, {"1-a": done(9000)}),
+                         ["3h05m (35m after depends_on)", "depends_on:1-a 2h30m, swap 20m, unnamed 15m"])
+        self.assertEqual(row({"depends_on": ["1-a", "2-b"]}, {"1-a": done(3600), "2-b": done(9000)}),
+                         ["3h05m (35m after depends_on)",
+                          "depends_on:2-b 2h30m, depends_on:1-a 1h00m, swap 20m, unnamed 15m"])  # overlapping waits count once
+        self.write("j/current-gates.json", json.dumps({"swap": {"at": 1.0, "text": "swap", "held": 3600}}))
+        self.assertEqual(row({"depends_on": ["1-a"]}, {"1-a": done(9000)}),
+                         ["3h05m (35m after depends_on)", "depends_on:1-a 2h30m, swap 1h00m"])  # floored at 0: no unnamed
+        self.write("j/queue-gates.txt", "depends_on:1-a\nswap\n")  # cmd_ready's own head is not listed twice
+        self.assertEqual(row({"depends_on": ["1-a"]}, {"1-a": done(9000)}),
+                         ["3h05m (35m after depends_on)", "depends_on:1-a 2h30m, swap 1h00m"])
+
     def test_timing_row_gate_held_clipped_to_queue_rest_unnamed(self):
         """Job 1568: each head's held minutes are clipped to the job's own Queue (2031 showed swap 27m plus
         vm_pressure 17m in a 7m Queue), and the Queue the longest head leaves is printed last as `unnamed <m>`
@@ -6487,7 +6511,8 @@ class BoardTest(unittest.TestCase):
         cells = row(dep, blocker())
         self.assertEqual((cells[4], len(cells)), ("depends_on:1-a 2h30m, unnamed 35m", 12))  # one cell more would break the table header
         self.write("j/queue-gates.txt", "ram_room\n")
-        self.assertEqual(row(dep, blocker())[3:5], ["3h05m (35m after depends_on)", "ram_room 0m, unnamed 3h05m"])
+        self.assertEqual(row(dep, blocker())[3:5], ["3h05m (35m after depends_on)",
+                                                     "depends_on:1-a 2h30m, ram_room 0m, unnamed 35m"])  # job 1587
 
     def test_bad_window_thresholds(self):
         self.assertEqual((board.BAD_WASTED_PCT, board.BAD_FIRST_PASS, board.BAD_MIN_JOBS, board.EARLY_DIGEST_MIN),
@@ -8418,7 +8443,7 @@ print("stub err", file=sys.stderr)
                 backlog.mkdir()
             else:
                 backlog.rmdir()
-                backlog.write_bytes(b"- [x] [8] Big \xff\xfe \xe2 \u2192 002-pts\n")
+                backlog.write_bytes(b"- [x] [8] Big \xff\xfe \xe2 \\u2192 002-pts\n")
             for job_id, model in (("001-big", "claude-fable-5-1"), ("004-road", "claude-fable-5-1"),
                                   ("002-pts", "sonnet")):
                 self.assertEqual(board.orchestrator_model(self.root, job_id), model, (kind, job_id))

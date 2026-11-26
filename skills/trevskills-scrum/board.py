@@ -3474,12 +3474,13 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
     round like `waits`, then ` (held: <tokens>)` from stall-holds.txt (serve.py note_stall_hold: what auto_resume passed it over for).
     Each `queued` epoch (a questions.log queue-wait line) runs to the job's next run log, else the round's end, is
     subtracted like `waits` and adds one to E2E lock waits. An autoPlayed job's Round times start `paused `, and a job
-    whose board entry lists depends_on gets `depends_on:<id>` as its Queue gate when queue-gates.txt gives none. Every
+    whose board entry lists depends_on gets each `depends_on:<id>` added to queue-gates.txt's gates (job 1587). Every
     gate prints its held minutes, longest first, ties in file order (job 1558): its head's "held" seconds in
     current-gates.json (note_current_gate), 0m with none, e.g. `vm_pressure 6h10m, cpu_queue 0m`; a depends_on:<id>
     gate's are the Queue pieces before that blocker's updatedAt when by_id has it at stage done, else its held
-    seconds, else the whole Queue. With a Queue over 0, each head's minutes are clipped to it and the Queue the longest
-    head leaves prints last as `unnamed <m>` when it rounds to 1m or more (job 1568).
+    seconds, else the whole Queue. With a Queue over 0, each head's minutes are clipped to it and the Queue less the
+    longest depends_on head less the longest other head, floored at 0, prints last as `unnamed <m>` when it rounds to
+    1m or more (jobs 1568, 1587).
     by_id (write_timing's {id: board job}): when every depends_on blocker is on it at stage done (_deps_done_at), the
     Queue cell is `<total> (<after> after depends_on)`, <after> being the part of each Queue piece (feature.md to the
     claim, each dep-waits.txt span, spec.md to round 1's start) after the latest blocker's updatedAt."""
@@ -3587,8 +3588,8 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
         hwaits = [(hwaits[0] if hwaits else 0) + pre_human, *hwaits[1:]]
     if queue and wall is not None:  # Queue is part of Wall, never more
         queue = min(queue, wall)
-    if not gates and isinstance(job.get("depends_on"), list):  # waited on an earlier job by plan
-        gates = list(dict.fromkeys(f"depends_on:{d}" for d in job["depends_on"]))
+    if isinstance(job.get("depends_on"), list):  # waited on an earlier job by plan, beside any other gate (job 1587)
+        gates = list(dict.fromkeys([*gates, *(f"depends_on:{d}" for d in job["depends_on"])]))
     for g in gates:  # job 1558: a depends_on head holds the Queue before its blocker's done updatedAt, else its held time, else all of it
         if g.startswith("depends_on:"):
             dep = (by_id or {}).get(g[11:])
@@ -3598,7 +3599,9 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
     if queue:  # job 1568: a head never holds more than the job's own Queue; the rest the longest leaves is unnamed
         held = {g: min(h, queue) for g, h in held.items()}
     cells_g = [f"{g} {_mins(held[g])}" for g in sorted(gates, key=lambda g: -held[g])]
-    if queue and _mins(rest := queue - max(held.values(), default=0)) != "0m":  # heads overlap (swap and vm_pressure in one tick): never summed
+    dep_wait = max((h for g, h in held.items() if g.startswith("depends_on:")), default=0)  # blockers overlap: never summed
+    other = max((h for g, h in held.items() if not g.startswith("depends_on:")), default=0)  # heads overlap (swap and vm_pressure in one tick): never summed
+    if queue and _mins(rest := max(queue - dep_wait - other, 0)) != "0m":  # job 1587: a machine gate holds after the depends_on wait
         cells_g.append(f"unnamed {_mins(rest)}")
     gate_cell = ", ".join(cells_g) or "-"
     queue_cell = _mins(queue)
