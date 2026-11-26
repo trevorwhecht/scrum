@@ -10027,6 +10027,27 @@ class SweepParentsHeldTest(unittest.TestCase):
         self.sweep(claim=False)
         self.assertEqual(self.gates("002-kid"), {})
 
+    def set_reason(self, reason):
+        self.jobs[0]["reason"] = reason
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+
+    def test_cooling_parent_notes_cool_down(self):
+        reason = "waiting: " + self.board.COOLING
+        self.set_reason(reason)
+        self.sweep(claim=False)
+        gates = self.gates("002-kid")
+        self.assertIn("cool_down", gates)
+        self.assertNotIn("other", gates)
+        self.assertEqual(gates["cool_down"]["text"], reason)
+        self.assertEqual(self.gates("003-kid"), {}, "a child in build is not a ready waiting child")
+
+    def test_finish_first_parent_notes_finish_first(self):
+        self.set_reason("waiting: finishing work in flight first: other/050-queued waits on the E2E queue")
+        self.sweep(claim=False)
+        gates = self.gates("002-kid")
+        self.assertIn("finish_first", gates)
+        self.assertNotIn("other", gates)
+
 
 class ExitedRunSweepTest(unittest.TestCase):
     """watchdog_tick's safety net for a dashboard-started `claude -p` start/resume run that exited mid-stage."""
