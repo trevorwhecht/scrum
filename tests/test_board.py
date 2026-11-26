@@ -3446,7 +3446,7 @@ class BoardTest(unittest.TestCase):
             self.assertEqual((self.root / "backlog.md").read_text(), backlog)
             after = (self.root / "board.json").read_text() if (self.root / "board.json").exists() else None
             self.assertEqual(after, board_before, "no job created")
-            self.assertEqual(board.cmd_next(self.root, 1), {"id": "001-beta", "feature": "Beta"}, "Run now still claims")
+            self.assertEqual(board.cmd_next(self.root, 1), {"id": "001-beta", "feature": "Beta", "points": None}, "Run now still claims")
         self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] Alpha\n- [x] Beta → 001-beta\n")
 
     def test_roadmap_next_cooling_down_holds_next_step(self):
