@@ -201,17 +201,35 @@ class MachineMeter(unittest.TestCase):
         text = DASHBOARD.read_text()
         esc = text[text.index("const esc = "):text.index("\n", text.index("const esc = "))]
         u = {"accounts": [{"name": "main", "seven_day_pct": 20, "resets_at": None, "max_pct": 90}], "allowance": None}
-        cases = [{**u, "fable": "warn"}, {**u, "fable": "paused"}, {**u, "fable": "ok"}, u, {**u, "fable": "unknown"},
-                 "unknown"]
+        cases = [{**u, "fable": "warn", "fable_account": "owa"}, {**u, "fable": "paused", "fable_account": "main"},
+                 {**u, "fable": "paused"}, {**u, "fable": "ok"}, u, {**u, "fable": "unknown"}, "unknown"]
         script = (f"{esc}\n{fn_body(text, 'usagePart')}\n"
                   f"console.log(JSON.stringify({json.dumps(cases)}.map(usagePart)));")
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
         plain = acct("ok", 20, "main 20%")
-        self.assertEqual(out, [plain + ' <span class="low">Fable near limit</span>',
-                               plain + ' <span class="danger">Fable paused, using Opus</span>',
+        self.assertEqual(out, [plain + ' <span class="low">Fable near limit (owa)</span>',
+                               plain + ' <span class="danger">Fable paused (main), using Opus</span>',
+                               plain + ' <span class="danger">Fable paused (main), using Opus</span>',
                                plain, plain, plain, '<span class="ok">usage: unknown</span>'])
         hint = re.search(r'<button class="btn" id="aiUsage"[^>]*>', text).group(0)
         self.assertRegex(hint, r'Fable[^"]*65%[^"]*75%[^"]*80%[^"]*85%')
+
+    def test_machine_meter_stale_reading(self):
+        """Job 1589: a stale account shows its % with "stale" and its age, never orange or red; null % stays a dash."""
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        esc = text[text.index("const esc = "):text.index("\n", text.index("const esc = "))]
+        ago = text[text.index("const ago = "):text.index("\n};\n", text.index("const ago = ")) + 3]
+        now = 1763460000
+        a = {"name": "owa", "seven_day_pct": 99, "resets_at": None, "max_pct": 90, "as_of": now - 3 * 3600 - 60, "stale": True}
+        cases = [{"accounts": [a], "allowance": None}, {"accounts": [{**a, "stale": False}], "allowance": None},
+                 {"accounts": [{**a, "seven_day_pct": None}], "allowance": None}]
+        script = (f"Date.now = () => {now} * 1000;\n{esc}\n{ago}\n{fn_body(text, 'usagePart')}\n"
+                  f"console.log(JSON.stringify({json.dumps(cases)}.map(usagePart)));")
+        out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
+        self.assertEqual(out, [acct("ok", 99, "owa 99% stale 3h"), acct("danger", 99, "owa 99%"), acct("ok", 0, "owa —")])
 
     def node_meter(self, body):
         """Runs `body` after the meter's functions, with the clock at NOW (2025-11-18 10:00 UTC) in TZ=UTC."""
@@ -246,7 +264,7 @@ class MachineMeter(unittest.TestCase):
             acct("ok", 49, f"main 49% {main_r}", title="resets 14:05") + " " + acct("danger", 90, f"owa 90% {owa_r}", title="resets 09:53"),
             acct("low", 80, f"main 80% {main_r}", title="resets 14:05") + " " + acct("ok", 79, f"owa 79% {owa_r}", title="resets 09:53"),
             acct("danger", 95, f"main 95% {main_r}", title="resets 14:05") + " " + acct("ok", 0, "owa —")
-            + ' <span class="danger">held until 14:05</span> <span class="danger">Fable paused, using Opus</span>',
+            + ' <span class="danger">held until 14:05</span> <span class="danger">Fable paused (main), using Opus</span>',
             acct("low", 75, f"&lt;b&gt; 75% {main_r}", cap=85, title="resets 14:05") + ' <span class="low">allowance 2</span>',
             acct("danger", 100, f"main 104% {main_r}", title="resets 14:05"))])
 
@@ -475,7 +493,7 @@ class MachineMeter(unittest.TestCase):
         self.assertEqual(out, [
             cl + T("Codex", acct("ok", 42, "5h 42% resets Tue 2:05 PM", cap=85) + " " + acct("ok", 17, "week 17% resets Sat 5 PM")),
             T("Claude", acct("ok", 49, "main 49% resets Sat 5 PM", title="resets Sat 17:00")
-              + ' <span class="danger">held until 11:00</span> <span class="low">Fable near limit</span>')
+              + ' <span class="danger">held until 11:00</span> <span class="low">Fable near limit (main)</span>')
             + T("Codex", acct("danger", 85, "5h 85% resets Tue 2:05 PM", cap=85) + " " + acct("low", 76, "week 76% resets Sat 5 PM", cap=86)),
             T("Codex", acct("ok", 90, "5h 90% resets Tue 2:05 PM", cap=100) + " " + acct("ok", 30, "week 30% resets Sat 5 PM", cap=100)),
             T("Codex", acct("ok", 0, "5h —", cap=85) + " " + acct("ok", 13, "week 13% resets Sat 5 PM")),
