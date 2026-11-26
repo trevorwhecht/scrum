@@ -1792,6 +1792,31 @@ def stop_group(pid, wait=HOT_STOP_WAIT) -> bool:
     return True
 
 
+USAGE_REFRESHING: set[str] = set()  # accounts with a board.refresh_usage thread running
+USAGE_REFRESH_LOCK = threading.Lock()
+
+
+def usage_refresh_tick() -> list[str]:
+    """Start board.refresh_usage in one daemon thread for each account whose usage.json is due (board.usage_refresh_due),
+    never a second for an account still refreshing; returns at once. Returns the account names started."""
+    now, started = time.time(), []
+    for acc in board.accounts():
+        with USAGE_REFRESH_LOCK:
+            if acc.name in USAGE_REFRESHING or not board.usage_refresh_due(acc, now):
+                continue
+            USAGE_REFRESHING.add(acc.name)
+
+        def work(acc=acc):
+            try:
+                board.refresh_usage(acc)
+            finally:
+                with USAGE_REFRESH_LOCK:
+                    USAGE_REFRESHING.discard(acc.name)
+        threading.Thread(target=work, daemon=True).start()
+        started.append(acc.name)
+    return started
+
+
 def hard_stop_tick() -> list[str]:
     """Trevor 2026-11-20: stop every scrum session on an account board.hard_stop holds. A board job whose recorded pid
     is a live claude process naming the job is held first (hold_limited, fixed at that 7d window's reset, which also writes the limit
@@ -5207,6 +5232,10 @@ def watchdog_tick():
         e2e_runaway_tick()  # job 1497: a job's own E2E dev server over its footprint or disk limit
     except (Exception, SystemExit) as e:
         print(f"watchdog: e2e runaway: {e}", file=sys.stderr, flush=True)
+    try:
+        usage_refresh_tick()  # headless usage.json refresh so reserve and hard stop never read hours-old figures
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: usage refresh: {e}", file=sys.stderr, flush=True)
     try:
         hard_stop_tick()  # Trevor 2026-11-20: 98% weekly stops every scrum session on that account
     except (Exception, SystemExit) as e:

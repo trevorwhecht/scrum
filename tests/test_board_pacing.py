@@ -401,7 +401,7 @@ class PickAccountTest(AccountEnv):
         self.write(self.main, seven=(10, 50000))  # main resets first: order stays main, owa
         board.note_limit("main", NOW + 60)  # the primary stops only on its limit (job 1182)
         for five, seven in (((80, 9000), (10, 90000)), ((10, 9000), (90, 90000))):
-            self.write(self.owa, five=five, seven=seven, written_at=NOW - 3600)  # stale: the reserve still counts
+            self.write(self.owa, five=five, seven=seven, written_at=NOW)  # fresh: a stale reading holds nothing (job 1592)
             name, allow = board.pick_account(NOW)
             self.assertEqual((name, allow), (None, 0), (five, seven))
             self.assertTrue(allow.reason.startswith("no account has room: main limited until"), allow.reason)
@@ -754,6 +754,86 @@ class HeavyHoldTest(unittest.TestCase):
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="10"):
             self.assertEqual(board.machine_ok(self.tmp), "free RAM 10% (< 20%)")
             self.assertIsNone(board.heavy_hold(), "low free RAM with swap 0 never holds")
+
+
+EVENT = json.dumps({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "resetsAt": 1796238000,
+    "rateLimitType": "seven_day", "unifiedWindows": {"seven_day": {"utilization": 0.21, "resetsAt": 1796238000, "status": "allowed"}}}})
+STREAM = '{"type":"system"}\n' + EVENT + '\n{"type":"result"}\n'
+
+
+class UsageFromStreamTest(unittest.TestCase):
+    def test_spike_event(self):
+        self.assertEqual(board.usage_from_stream(STREAM), {"seven_day": {"used_percentage": 21.0, "resets_at": 1796238000}})
+
+    def test_five_hour_merged_and_later_wins(self):
+        ev = json.dumps({"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {
+            "five_hour": {"utilization": 0.5, "resetsAt": 1796000000}, "seven_day": {"utilization": 0.25, "resetsAt": 1796238000}}}})
+        self.assertEqual(board.usage_from_stream(EVENT + "\n" + ev), {
+            "seven_day": {"used_percentage": 25.0, "resets_at": 1796238000},
+            "five_hour": {"used_percentage": 50.0, "resets_at": 1796000000}})
+
+    def test_nothing_usable(self):
+        bad = json.dumps({"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {
+            "seven_day": {"utilization": "x", "resetsAt": None}}}})
+        for text in ("", "not json\n{", '{"type":"system"}', bad, "[1]", '{"type":"rate_limit_event"}'):
+            self.assertEqual(board.usage_from_stream(text), {}, text)
+
+
+class RefreshUsageTest(AccountEnv):
+    def acc(self):
+        return board.accounts()[1]
+
+    def path(self):
+        return self.owa / "usage.json"
+
+    def fake(self, out="", code=0):
+        return mock.Mock(return_value=subprocess.CompletedProcess([], code, out, ""))
+
+    def test_writes_and_merges(self):
+        now = int(time.time())
+        self.path().write_text(json.dumps({"rate_limits": {"five_hour": {"used_percentage": 7, "resets_at": now + 5000}}, "written_at": 1}))
+        run = self.fake(STREAM)
+        self.assertTrue(board.refresh_usage(self.acc(), run=run))
+        got = json.loads(self.path().read_text())
+        self.assertEqual(got["rate_limits"]["seven_day"], {"used_percentage": 21.0, "resets_at": 1796238000})
+        self.assertEqual(got["rate_limits"]["five_hour"]["used_percentage"], 7, "a still-open old window is kept")
+        self.assertGreaterEqual(got["written_at"], now)
+        self.assertEqual(run.call_args.kwargs["env"]["CLAUDE_CONFIG_DIR"], str(self.owa))
+        self.assertEqual(run.call_args.args[0][:2], ["claude", "-p"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 90)
+
+    def test_failures_leave_file_alone(self):
+        self.path().write_text("old")
+        for run in (mock.Mock(side_effect=OSError("x")), mock.Mock(side_effect=subprocess.TimeoutExpired("claude", 90)),
+                    self.fake(STREAM, 1), self.fake('{"type":"result"}')):
+            self.assertFalse(board.refresh_usage(self.acc(), run=run))
+            self.assertEqual(self.path().read_text(), "old")
+
+
+class ReserveHitStaleTest(AccountEnv):
+    def test_stale_holds_nothing_fresh_holds(self):
+        os.environ["SCRUM_ACCOUNTS"] = json.dumps([["main", str(self.main), None], ["owa", str(self.owa), [80, 90]]])
+        owa = board.accounts()[1]
+        fresh = usage(seven=(99, 90000), written_at=NOW)
+        stale = usage(seven=(99, 90000), written_at=NOW)
+        stale["written_at"] = NOW - board.USAGE_STALE_SECS - 1
+        gone = dict(stale)
+        del gone["written_at"]
+        self.assertIn("reserve 7d 99%", board.reserve_hit(owa, fresh, NOW))
+        self.assertIsNone(board.reserve_hit(owa, stale, NOW))
+        self.assertIsNone(board.reserve_hit(owa, gone, NOW))
+
+
+class HardStopStaleTest(AccountEnv):
+    def test_stale_holds_nothing_fresh_holds(self):
+        now = int(time.time())
+        w = {"seven_day": {"used_percentage": 98, "resets_at": now + 86400}}
+        (self.main / "usage.json").write_text(json.dumps({"rate_limits": w, "written_at": now}))
+        self.assertIn("hard stop: main 98% weekly", board.hard_stop("main", now))
+        (self.main / "usage.json").write_text(json.dumps({"rate_limits": w, "written_at": now - board.USAGE_STALE_SECS - 1}))
+        self.assertIsNone(board.hard_stop("main", now))
+        (self.main / "usage.json").write_text(json.dumps({"rate_limits": w}))
+        self.assertIsNone(board.hard_stop("main", now), "a missing written_at is stale")
 
 
 if __name__ == "__main__":
