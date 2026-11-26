@@ -190,7 +190,7 @@ class SameTestsTest(unittest.TestCase):
         self.assertEqual(serve.claude_step("claude -p hello"), (None, None))
 
     def test_e2e_full_tick_run_kept_as_older(self):
-        tick = f"{sys.executable} {Path(serve.buildlock.__file__).resolve()} {E2E}"  # e2e_full_run's Popen argv
+        tick = f"{sys.executable} /x/buildlock.py {E2E}"  # e2e_full_run's Popen argv
         procs = [(300, os.getpid(), 0.5, tick), (301, 300, 0.1, f"/bin/sh -c {E2E}"),
                  (302, 301, 6.0, f"node /opt/homebrew/bin/{E2E}"),
                  (400, 1, 5.0, cl("2003-c")), *bash_run(400, E2E)]
@@ -325,7 +325,7 @@ class SameTestsTest(unittest.TestCase):
         e2e_wt = self.repo / ".claude" / "worktrees" / "e2e-full"
         e2e_wt.mkdir(parents=True)
         self.record({"at": 1, "head": HEAD, "result": "fail", "exit": 1, "failed": [], "lastGreen": None})
-        procs = [(300, os.getpid(), 0.5, f"{sys.executable} {Path(serve.buildlock.__file__).resolve()} {E2E}"),
+        procs = [(300, os.getpid(), 0.5, f"{sys.executable} /x/buildlock.py {E2E}"),
                  (301, 300, 0.1, f"/bin/sh -c {E2E}"), (302, 301, 6.0, f"node /opt/homebrew/bin/{E2E}")]
         self.cwds = {300: e2e_wt}
         self.assert_left_alone(procs)

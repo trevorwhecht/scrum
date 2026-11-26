@@ -9179,9 +9179,11 @@ def cmd_pause(root, job_id):
 
 def _is_claude(command):
     """True when claude is the program: argv0 named `claude`, a bare `claude` token, or the claude-code package.
-    A path that merely passes through `.claude/` (a worktree's dev server) does not count."""
+    A path that merely passes through `.claude/` (a worktree's dev server) does not count, nor does a checkout slug
+    holding `claude-code`."""
     toks = command.split()
-    return bool(toks) and (os.path.basename(toks[0]) == "claude" or "claude" in toks or "claude-code" in command)
+    return bool(toks) and (os.path.basename(toks[0]) == "claude" or "claude" in toks
+                                  or "claude-code" in re.sub(r"/\.claude/worktrees/[^/\s]+", "", command))
 
 
 def session_alive_fn(skip: int | set | None = None):
