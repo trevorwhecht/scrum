@@ -110,25 +110,33 @@ class RunawayTest(Base):
         h, child = self.holder()
         outside, inside_other_group = self.server(), self.start(["sleep", "300"])
         seen = []
-        out = serve.e2e_runaway_tick(footprint=lambda p: seen.append(p) or 9.0)
+        out = serve.e2e_runaway_tick(footprint=lambda p: seen.append(p) or 13.0)
         self.assertEqual(out, [f"{h.pid}:memory"])
         self.assertEqual(seen, [child])  # only the holder's tree is measured
         self.assertTrue(gone(h.pid) and gone(child))
         self.assertTrue(alive(outside.pid) and alive(inside_other_group.pid))
-        self.log.assert_called_once_with("E2E runaway stop", "stopped", reason="memory", pid=h.pid, gb=9.0)
+        self.log.assert_called_once_with("E2E runaway stop", "stopped", reason="memory", pid=h.pid, gb=13.0,
+                                         job="1497-runaway-test")
+
+    def test_healthy_dev_server_keeps_running(self):
+        h, child = self.holder()
+        self.assertEqual(serve.e2e_runaway_tick(footprint=lambda p: 9.4), [])
+        self.assertTrue(alive(h.pid) and alive(child))
+        self.assertFalse(self.marker.exists())
+        self.log.assert_not_called()
 
     def test_outside_tree_never_signalled(self):
         h, child = self.holder()
         outside = self.server()
         with mock.patch.object(serve, "port_listeners", return_value={outside.pid}):
-            serve.e2e_runaway_tick(footprint=lambda p: 9.0)
+            serve.e2e_runaway_tick(footprint=lambda p: 13.0)
         self.assertTrue(gone(h.pid) and gone(child))
         self.assertTrue(alive(outside.pid))  # outside the tree, even though it listens on a kept port
 
     def test_kept_port_in_tree_stops_nothing(self):
         h, child = self.holder()
         with mock.patch.object(serve, "port_listeners", return_value={child}):
-            self.assertEqual(serve.e2e_runaway_tick(footprint=lambda p: 9.0), [])
+            self.assertEqual(serve.e2e_runaway_tick(footprint=lambda p: 13.0), [])
         self.assertTrue(alive(h.pid) and alive(child))
 
     def test_low_disk_stops_holder_group(self):
@@ -146,18 +154,18 @@ class RunawayTest(Base):
 
     def test_stop_writes_marker_and_counts(self):
         h, _ = self.holder()
-        serve.e2e_runaway_tick(now=123.0, footprint=lambda p: 9.0)
+        serve.e2e_runaway_tick(now=123.0, footprint=lambda p: 13.0)
         self.assertEqual(json.loads(self.marker.read_text()), {"reason": "memory", "count": 1, "at": 123.0})
         self.assertTrue(gone(h.pid))
         self.holder()
-        serve.e2e_runaway_tick(now=456.0, footprint=lambda p: 9.0)
+        serve.e2e_runaway_tick(now=456.0, footprint=lambda p: 13.0)
         self.assertEqual(json.loads(self.marker.read_text()), {"reason": "memory", "count": 2, "at": 456.0})
 
     def test_main_checkout_run_stops_without_marker(self):
         other = self.tmp / "main"
         other.mkdir()
         h, _ = self.holder(cwd=other)
-        self.assertEqual(serve.e2e_runaway_tick(footprint=lambda p: 9.0), [f"{h.pid}:memory"])
+        self.assertEqual(serve.e2e_runaway_tick(footprint=lambda p: 13.0), [f"{h.pid}:memory"])
         self.assertTrue(gone(h.pid))
         self.assertFalse(self.marker.exists())
 
