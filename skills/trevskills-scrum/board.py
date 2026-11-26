@@ -134,8 +134,9 @@
                                    round-(n-1)/head.txt, else null (Check gate step 1)
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
                                    git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
-  board.py lane-read               print one line `read: <sed -n commands>` for the lane parts a fast or standard job runs
-                                   (lanes/newjob.md from step 2, review.md, merge.md from step 3), or `read: none`
+  board.py lane-read <part>        print one line `read: <sed -n commands>` for one part of the lane files a fast or standard
+                                   job runs (`start`: lanes/newjob.md from step 2 and review.md; `merge`: merge.md from
+                                   step 3), or `read: none`
   board.py lilguy-fit <id>         print {"fit","why"} (+ "read": a sed command for the lane parts a lilguy job runs, when fit): whether the job is tiny (backlog points 1 or 2, or jev.log's last model
                                    answer score < 1.5 at confidence >= 0.7, or feature.md names a file path, or names
                                    none and quotes a text or dollar amount it changes from that 1-10 repo files hold) with no
@@ -4908,12 +4909,18 @@ LILGUY_READ_PARTS = (
 )
 
 
-# Same shape for a fast or standard job; an end of None reads to the file's last line
-PIPELINE_READ_PARTS = (
-    ("newjob.md", r"2\. \*\*Base:\*\*", None),
-    ("review.md", r"# Review", None),
-    ("merge.md", r"3\. \*\*PR\.\*\*", None),
-)
+# Same shape for a fast or standard job, keyed by the part `lane-read` takes: `start` at the job's start, `merge` when
+# the session first reaches Merge (job 1553: merge.md read at the start rode every later turn); an end of None reads to
+# the file's last line
+PIPELINE_READ_PARTS = {
+    "start": (
+        ("newjob.md", r"2\. \*\*Base:\*\*", None),
+        ("review.md", r"# Review", None),
+    ),
+    "merge": (
+        ("merge.md", r"3\. \*\*PR\.\*\*", None),
+    ),
+}
 
 
 def lilguy_read(lane_dir: Path | None = None) -> str | None:
@@ -4921,9 +4928,10 @@ def lilguy_read(lane_dir: Path | None = None) -> str | None:
     return _read_parts(LILGUY_READ_PARTS, lane_dir)
 
 
-def pipeline_read(lane_dir: Path | None = None) -> str | None:
-    """The same for the lane parts a fast or standard job runs, or None when a file or anchor is missing."""
-    return _read_parts(PIPELINE_READ_PARTS, lane_dir)
+def pipeline_read(part: str, lane_dir: Path | None = None) -> str | None:
+    """The same for one PIPELINE_READ_PARTS part (`start` or `merge`) of the lane files a fast or standard job runs, or
+    None when one of that part's files or anchors is missing."""
+    return _read_parts(PIPELINE_READ_PARTS[part], lane_dir)
 
 
 def _read_parts(parts, lane_dir: Path | None) -> str | None:
@@ -9803,7 +9811,7 @@ def main(argv=None):
     sub.add_parser("window-report")
     sub.add_parser("move-ratio").add_argument("id")
     sub.add_parser("lilguy-fit").add_argument("id")
-    sub.add_parser("lane-read")
+    sub.add_parser("lane-read").add_argument("part", choices=list(PIPELINE_READ_PARTS))
     sub.add_parser("claude-paths").add_argument("id")
     sub.add_parser("claude-batch").add_argument("id")
     sub.add_parser("claude-migrate").add_argument("--dry-run", action="store_true")
@@ -9977,7 +9985,7 @@ def main(argv=None):
             out = {**out, "read": read}
         print(json.dumps(out))
     elif a.cmd == "lane-read":
-        print(f"read: {pipeline_read() or 'none'}")
+        print(f"read: {pipeline_read(a.part) or 'none'}")
     elif a.cmd == "claude-paths":
         print(json.dumps(cmd_claude_paths(a.dir, a.id)))
     elif a.cmd == "claude-batch":
