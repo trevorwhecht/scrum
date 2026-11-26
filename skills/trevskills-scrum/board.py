@@ -2349,7 +2349,8 @@ def write_tokens(root, digest_id):
     per job with rows, costliest first (lane, added lines from _fit_diff, usd, tokens, tokens per added line or `-`) and
     one indented line per (agent, round, model), costliest first; then each job with no rows, in listed order, which
     says so and never reads its diff. `## Flagged`: the jobs _token_reasons flags, costliest first, each with
-    _costliest_detail. Under unittest with no SCRUM_TRANSCRIPTS it reads no transcripts (job_costs' guard), and an
+    _costliest_detail. A lane's median leaves out jobs whose board entry has shop, worker or cloud (None when the lane
+    has no other job). Under unittest with no SCRUM_TRANSCRIPTS it reads no transcripts (job_costs' guard), and an
     unregistered root reads none. Overwrites the file on every run."""
     d = Path(root) / "digests" / digest_id
     listed = list(dict.fromkeys(l.strip() for l in (d / "jobs.txt").read_text().splitlines() if l.strip()))
@@ -2403,10 +2404,11 @@ def write_tokens(root, digest_id):
     ranked = sorted(costs, key=lambda j: (-costs[j][1], j))
     top = {j for j in ranked[:TOKENS_FLAG["top"]] if costs[j][1] > 0}
     medians = {}
-    for ln in set(lane.values()):
-        vals = sorted(costs[j][1] for j in costs if lane[j] == ln)
+    for ln in set(lane.values()):  # a shop, worker or cloud run's agents are not in these transcripts: no median input
+        vals = sorted(costs[j][1] for j in costs if lane[j] == ln
+                      and not any(board.get(j, {}).get(k) for k in ("shop", "worker", "cloud")))
         mid = len(vals) // 2
-        medians[ln] = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+        medians[ln] = None if not vals else vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
     out += ["", "## Flagged"]
     for j in ranked:
         reasons = _token_reasons(j, costs[j][1], groups[j], medians[lane[j]], top) + _two_sessions(by_job[j]) \
