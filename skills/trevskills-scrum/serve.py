@@ -3739,7 +3739,7 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
             if not running(project, "run-all") and claimable(root):
                 refused = board.machine_ok(root, claim=True)
                 if refused and refused.startswith("free disk"):  # only this project's volume is full: try the next
-                    note_hold(root, held_gate(refused))
+                    note_hold(root, held_gate(refused), refused)
                     continue
                 if refused or (fin := board.finish_first(root)):  # no room on this machine, or work in flight first
                     note_hold(root, held_gate(refused or fin), refused or fin)

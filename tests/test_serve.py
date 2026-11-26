@@ -16096,6 +16096,19 @@ class PulseTest(unittest.TestCase):
             s.auto_continue_tick({"app": True})
         self.assertEqual(s.claim_hold_text(root), fin)
 
+    def test_sweep_free_disk_hold_is_published(self):
+        """Job 1559: auto_continue_tick's free-disk refusal reaches claim_hold_text with the refusal text."""
+        s = self.serve
+        root = (self.base / "app" / "scrum").resolve()
+        self.addCleanup(s.PULSE_HOLDS.clear)
+        self.addCleanup(s.CLAIM_HOLD_TEXT.clear)
+        why = "free disk 3.2 GB (< 10 GB)"
+        with mock.patch.object(s, "running", return_value=False), mock.patch.object(s, "claimable", return_value=True), \
+                mock.patch.object(s, "auto_continue", return_value=1), \
+                mock.patch.object(s.board, "machine_ok", return_value=why):
+            s.auto_continue_tick({"app": True})
+        self.assertEqual(s.claim_hold_text(root), why)
+
     def test_start_ready_notes_shop_left_and_run_all_hold(self):
         """Job 1215: start_ready notes runs_on_shop when cmd_ready left children for the shop and claimed none; a running
         run-all with claimable work is noted by auto_continue_tick."""
