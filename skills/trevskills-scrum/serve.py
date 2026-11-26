@@ -9102,7 +9102,8 @@ def digest_retry_tick(project, repo, root):
     """Re-run digest_apply for repo edit proposals held as queued `uncommitted changes` in root/digests, once their target repo's
     checkout is clean (the target may be another registered repo than `repo`), and for ones held as `push failed`, at most
     DIGEST_PUSH_RETRIES times, DIGEST_PUSH_RETRY_GAP seconds apart (a retry that fails with tries left aborts its own job;
-    the last one parks a DIGEST card, and the job of the first failure is then aborted, as it is when a retry lands). A
+    the last one parks a DIGEST card, and the job of the first failure is then aborted, as it is when a retry lands); a
+    push-failed hold whose recorded job is aborted on its target repo's board (Abort or Remove this job) is not retried. A
     landed one becomes applied; stale old text is skipped; a contract-test failure becomes a backlog item; a board job,
     commit or push failure keeps its new reason so it is not retried. Any other refusal leaves it queued for the next tick. Status writes are under DIGEST_LOCK with from_status="queued"."""
     held = {}  # (digest id, target repo) -> props: a digest in this root may target another registered repo
@@ -9122,7 +9123,15 @@ def digest_retry_tick(project, repo, root):
             elif (v.get("reason") or "").startswith("push failed") and isinstance(e.get("retries", 0), int) \
                     and e.get("retries", 0) < DIGEST_PUSH_RETRIES \
                     and time.time() - (e["retry_at"] if isinstance(e.get("retry_at"), (int, float)) else 0) >= DIGEST_PUSH_RETRY_GAP:
-                held.setdefault((d.name, Path(os.path.realpath(r[0]))), []).append(v)
+                target_repo = Path(os.path.realpath(r[0]))
+                if isinstance(job := e.get("job"), str):
+                    try:
+                        jobs = as_dict(board.read_board(target_repo / "scrum")).get("jobs")
+                    except SystemExit:
+                        jobs = []  # unreadable board: retry as before
+                    if any(isinstance(j, dict) and j.get("id") == job and j.get("stage") == "aborted" for j in (jobs if isinstance(jobs, list) else [])):
+                        continue  # its card was aborted or removed: stop retrying, leave the hold as it is
+                held.setdefault((d.name, target_repo), []).append(v)
                 pushed[(d.name, v["id"])] = e
     ready = {}
     for (digest_id, target_repo), props in held.items():
