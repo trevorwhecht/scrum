@@ -224,12 +224,23 @@ class MachineMeter(unittest.TestCase):
         ago = text[text.index("const ago = "):text.index("\n};\n", text.index("const ago = ")) + 3]
         now = 1763460000
         a = {"name": "owa", "seven_day_pct": 99, "resets_at": None, "max_pct": 90, "as_of": now - 3 * 3600 - 60, "stale": True}
+        fresh = {**a, "stale": False, "as_of": now - 130, "resets_at": now + 4 * 3600}
         cases = [{"accounts": [a], "allowance": None}, {"accounts": [{**a, "stale": False}], "allowance": None},
-                 {"accounts": [{**a, "seven_day_pct": None}], "allowance": None}]
-        script = (f"Date.now = () => {now} * 1000;\n{esc}\n{ago}\n{fn_body(text, 'usagePart')}\n"
+                 {"accounts": [{**a, "seven_day_pct": None}], "allowance": None},
+                 {"accounts": [fresh], "allowance": None}, {"accounts": [{**fresh, "resets_at": None}], "allowance": None},
+                 {"accounts": [{**fresh, "resets_at": None, "as_of": None}], "allowance": None},
+                 {"accounts": [{k: v for k, v in fresh.items() if k not in ("as_of", "resets_at")}], "allowance": None}]
+        fns = "".join(fn_body(text, f) + "\n" for f in ("heldUntilText", "resetText", "usagePart"))
+        script = (f"Date.now = () => {now} * 1000;\n{esc}\n{ago}\n{fns}"
                   f"console.log(JSON.stringify({json.dumps(cases)}.map(usagePart)));")
-        out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
-        self.assertEqual(out, [acct("ok", 99, "owa 99% stale 3h"), acct("danger", 99, "owa 99%"), acct("ok", 0, "owa —")])
+        out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True,
+                                        env={**os.environ, "TZ": "UTC"}).stdout)
+        self.assertEqual(out, [acct("ok", 99, "owa 99% stale 3h", title="updated 3h ago"),
+                               acct("danger", 99, "owa 99%", title="updated 3h ago"),
+                               acct("ok", 0, "owa —", title="updated 3h ago"),
+                               acct("danger", 99, "owa 99% resets Tue 2 PM", title="resets 14:00 · updated 2m ago"),
+                               acct("danger", 99, "owa 99%", title="updated 2m ago"),
+                               acct("danger", 99, "owa 99%"), acct("danger", 99, "owa 99%")])
 
     def node_meter(self, body):
         """Runs `body` after the meter's functions, with the clock at NOW (2025-11-18 10:00 UTC) in TZ=UTC."""
