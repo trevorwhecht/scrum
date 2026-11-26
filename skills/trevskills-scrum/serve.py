@@ -3340,7 +3340,9 @@ def billing_release(now):
     refusal line in its log tail, end the episode: on every registered board (and the probe's own), under that board's
     lock, each billingHold job loses billingHold and limitResetAt, and one in a WATCHED stage that is not paused, not
     the probe and not running is flagged stalled with BILLING_RELEASED, which auto_resume resumes at once with no try.
-    BILLING is cleared, so a later refusal texts again. Returns {project: {job id: live job}} of the released jobs."""
+    BILLING is cleared, so a later refusal texts again. A probe run that exited with the refusal in its tail re-arms the
+    probe as billing_hold does (probe None, next due BILLING_RETRY_EVERY on), for a run respawn_exited skipped (job 1581).
+    Returns {project: {job id: live job}} of the released jobs."""
     probe = BILLING.get("probe")
     if not probe:
         return {}
@@ -3352,8 +3354,12 @@ def billing_release(now):
             BILLING["probe"] = None  # its run was never tracked: the next probe may go
         return {}
     exited = run["proc"].poll() is not None
-    if not exited and now - run["started"] < BILLING_PROBE_OK or billing_in(run_log_tail(root, {"runlog": run.get("log")})[0]):
-        return {}  # too young, or refused again (respawn_exited re-arms it)
+    if not exited and now - run["started"] < BILLING_PROBE_OK:
+        return {}  # too young
+    if billing_in(run_log_tail(root, {"runlog": run.get("log")})[0]):
+        if exited:  # refused again; respawn_exited re-arms it, but skips a paused, stalled or moved job (job 1581)
+            BILLING.update(probe=None, probe_at=now + BILLING_RETRY_EVERY)
+        return {}  # a live run with the refusal keeps the probe out
     roots = {p: r / "scrum" for p, r in board.projects().items()}
     roots.setdefault(project, Path(root))
     out = {}

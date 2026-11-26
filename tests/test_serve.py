@@ -9917,6 +9917,47 @@ class BillingHoldTest(unittest.TestCase):
         self.assertEqual(len(self.sweep(self.T0 + 1211)), 1)
         self.assertEqual(self.serve.AUTO_RESUME, {})
 
+    def test_paused_probe_refused_rearms(self):
+        """Job 1581: a probe paused before respawn_exited saw its refused run is re-armed by billing_release."""
+        self.die_on_refusal(["a", "b", "c"], self.T0)
+        [probe] = self.sweep(self.T0 + 601)
+        jobs = self.jobs()
+        for j in jobs:
+            if j["id"] == probe:
+                j.update(runlog=f"runs/{probe}.log", paused=True)
+        self.write(jobs)
+        self.exited(probe, "starting\n" + self.REFUSAL, started=self.T0 + 601)
+        s = self.serve
+        with mock.patch.object(s.time, "time", return_value=self.T0 + 610), \
+                mock.patch.object(s, "resume_job") as resume, \
+                mock.patch.object(s, "billing_hold") as hold:
+            s.respawn_exited("p", self.root)
+        resume.assert_not_called()
+        hold.assert_not_called()
+        self.assertEqual(s.BILLING["probe"][2], probe, "the paused probe's refusal was skipped")
+        since, alerted = s.BILLING["since"], s.BILLING["alerted"]
+        self.assertEqual(s.billing_release(self.T0 + 620), {})
+        self.assertIsNone(s.BILLING["probe"])
+        self.assertEqual(s.BILLING["probe_at"], self.T0 + 1220)
+        self.assertEqual((s.BILLING["since"], s.BILLING["alerted"]), (since, alerted))
+        self.assertEqual(len(self.sent), 1, "no new text for the same episode")
+        self.assertEqual(self.sweep(self.T0 + 700), [], "the next probe waits BILLING_RETRY_EVERY")
+        got = self.sweep(self.T0 + 1221)
+        self.assertEqual(len(got), 1, got)
+        self.assertNotEqual(got[0], probe, "the paused job is not the new probe")
+        self.assertEqual(s.BILLING["probe"][2], got[0])
+        self.assertEqual(s.AUTO_RESUME, {})
+
+    def test_live_probe_with_refusal_not_rearmed(self):
+        """Job 1581: a probe run still alive with the refusal in its tail keeps the probe set."""
+        self.die_on_refusal(["a", "b", "c"], self.T0)
+        [probe] = self.sweep(self.T0 + 601)
+        probe_at = self.serve.BILLING["probe_at"]
+        self.live_probe(probe, self.T0 + 601, text="starting\n" + self.REFUSAL)
+        self.assertEqual(self.serve.billing_release(self.T0 + 800), {})
+        self.assertEqual(self.serve.BILLING["probe"][2], probe)
+        self.assertEqual(self.serve.BILLING["probe_at"], probe_at)
+
     def test_usage_limit_hold_unchanged(self):
         self.die_on_refusal(["a"], self.T0)
         jobs = self.jobs() + [{"id": "u", "stage": "build", "limitResetAt": self.T0 + 100, "reason": None,
