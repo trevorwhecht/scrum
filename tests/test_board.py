@@ -5367,7 +5367,7 @@ class BoardTest(unittest.TestCase):
         text = (self.root / "digests" / "001" / "timing.md").read_text()
         self.assertIn("| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls | Cloud |\n"
                       "|---|---|---|---|---|---|---|---|---|---|---|---|\n", text)
-        self.assertIn(f"| {job} | 3h20m | 10m | 10m | - | 3 | 50m, 1h00m, 1h00m | 0m, 0m, 0m | 2 (rounds 2,3) | 1 | ? | - |\n", text)
+        self.assertIn(f"| {job} | 3h20m | 10m | 10m | unnamed 10m | 3 | 50m, 1h00m, 1h00m | 0m, 0m, 0m | 2 (rounds 2,3) | 1 | ? | - |\n", text)
         self.assertIn("Jobs: 1 · wall 3h20m · rounds 3 · no-change rounds 2 in 1 jobs · E2E lock waits 1 in 1 jobs"
                       " · stalls 1 (0m to resume)\n", text)
         self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{waiting}: 1h30m\n\n"
@@ -6335,16 +6335,33 @@ class BoardTest(unittest.TestCase):
         done = lambda secs: {"stage": "done", "updatedAt": at(secs)}
         row = lambda job, by_id: board._timing_row(self.root, "j", job, {}, by_id=by_id)[0][3:5]
         self.assertEqual(row({"depends_on": ["1-a", "2-b"]}, {"1-a": done(3600), "2-b": done(9000)}),
-                         ["3h05m (35m after depends_on)", "depends_on:2-b 2h30m, depends_on:1-a 1h00m"])
+                         ["3h05m (35m after depends_on)", "depends_on:2-b 2h30m, depends_on:1-a 1h00m, unnamed 35m"])
         self.assertEqual(row({"depends_on": ["1-a"]}, {"1-a": done(3600)}),
-                         ["3h05m (2h05m after depends_on)", "depends_on:1-a 1h00m"])
+                         ["3h05m (2h05m after depends_on)", "depends_on:1-a 1h00m, unnamed 2h05m"])
         self.assertEqual(row({"depends_on": ["1-a", "2-b"]}, {"1-a": done(3600)}),
                          ["3h05m", "depends_on:2-b 3h05m, depends_on:1-a 1h00m"])  # 2-b not on the board: whole Queue
         self.assertEqual(row({"depends_on": ["1-a"]}, None), ["3h05m", "depends_on:1-a 3h05m"])
         self.write("j/queue-gates.txt", "depends_on:1-a\nram_room\n")  # cmd_ready's gate, re-stamped while it held
         self.write("j/current-gates.json", json.dumps({"depends_on:1-a": {"at": 1.0, "held": 1200}}))
-        self.assertEqual(row({}, None), ["3h05m", "depends_on:1-a 20m, ram_room 0m"])  # blocker unknown: its held time
-        self.assertEqual(row({}, {"1-a": done(3600)}), ["3h05m", "depends_on:1-a 1h00m, ram_room 0m"])
+        self.assertEqual(row({}, None), ["3h05m", "depends_on:1-a 20m, ram_room 0m, unnamed 2h45m"])  # blocker unknown: its held time
+        self.assertEqual(row({}, {"1-a": done(3600)}), ["3h05m", "depends_on:1-a 1h00m, ram_room 0m, unnamed 2h05m"])
+
+    def test_timing_row_gate_held_clipped_to_queue_rest_unnamed(self):
+        """Job 1568: each head's held minutes are clipped to the job's own Queue (2031 showed swap 27m plus
+        vm_pressure 17m in a 7m Queue), and the Queue the longest head leaves is printed last as `unnamed <m>`
+        (2034 named 44m of its 3h01m Queue); a fully named Queue prints no unnamed part."""
+        self.claim_clock_job(1_700_000_000)  # Queue 3h05m
+        cell = lambda: board._timing_row(self.root, "j", {}, {})[0][3:5]
+        self.assertEqual(cell(), ["3h05m", "unnamed 3h05m"])  # no gate at all
+        self.write("j/queue-gates.txt", "swap\nvm_pressure\nshop_full:shopmac\n")
+        current = lambda held: self.write("j/current-gates.json", json.dumps(
+            {g: {"at": 1.0, "text": g, "held": h} for g, h in zip(("swap", "vm_pressure", "shop_full:shopmac"), held)}))
+        current((1620, 1020, 2640))
+        self.assertEqual(cell(), ["3h05m", "shop_full:shopmac 44m, swap 27m, vm_pressure 17m, unnamed 2h21m"])
+        current((1620, 1020, 14400))
+        self.assertEqual(cell(), ["3h05m", "shop_full:shopmac 3h05m, swap 27m, vm_pressure 17m"])
+        current((40000, 30000, 0))
+        self.assertEqual(cell(), ["3h05m", "swap 3h05m, vm_pressure 3h05m, shop_full:shopmac 0m"])
 
     def test_timing_row_stall_holds_cell(self):
         """Job 927: stall-holds.txt (serve.py note_stall_hold) names what held the job's stalls in its Stalls cell."""
@@ -6424,7 +6441,7 @@ class BoardTest(unittest.TestCase):
         row = next(l for l in (self.root / "digests" / "001" / "timing.md").read_text().splitlines()
                    if l.startswith(f"| {job} |"))
         self.assertEqual([c.strip() for c in row.strip("|").split("|")][3:5],
-                         ["3h05m (35m after depends_on)", f"depends_on:{blocker} 2h30m"])
+                         ["3h05m (35m after depends_on)", f"depends_on:{blocker} 2h30m, unnamed 35m"])
 
     def test_timing_row_queue_after_depends_on(self):
         """Job 1268: a depends_on job whose blockers are all done splits out the Queue after the latest blocker's
@@ -6468,9 +6485,9 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(row(dep, blocker(updatedAt=at(-600)))[3], "3h05m (3h05m after depends_on)")  # before feature.md
         self.assertEqual(row(dep, blocker(), "none")[3], "-")  # no spec.md: no Queue
         cells = row(dep, blocker())
-        self.assertEqual((cells[4], len(cells)), ("depends_on:1-a 2h30m", 12))  # one cell more would break the table header
+        self.assertEqual((cells[4], len(cells)), ("depends_on:1-a 2h30m, unnamed 35m", 12))  # one cell more would break the table header
         self.write("j/queue-gates.txt", "ram_room\n")
-        self.assertEqual(row(dep, blocker())[3:5], ["3h05m (35m after depends_on)", "ram_room 0m"])
+        self.assertEqual(row(dep, blocker())[3:5], ["3h05m (35m after depends_on)", "ram_room 0m, unnamed 3h05m"])
 
     def test_bad_window_thresholds(self):
         self.assertEqual((board.BAD_WASTED_PCT, board.BAD_FIRST_PASS, board.BAD_MIN_JOBS, board.EARLY_DIGEST_MIN),
