@@ -4429,10 +4429,44 @@ def worktree_job(root, job_id) -> dict:
     return job
 
 
+def _e2e_passed_head(root, job_id, job):
+    """The earlier round's head.txt commit when round N >= 2 and the latest earlier round-<k>/check.md is `CHECK: PASS`
+    with an `E2E:` line that has no `not run` or `skipped`, and that commit is an ancestor of the worktree's HEAD; else None."""
+    try:
+        n = int(job.get("round") or 0)
+    except (TypeError, ValueError):
+        return None
+    d = Path(root) / "jobs" / job_id
+    if n < 2:
+        return None
+    for k in range(n - 1, 0, -1):
+        rd = d / f"round-{k}"
+        if (rd / "check.md").is_file():
+            break
+    else:
+        return None
+    try:
+        lines = (rd / "check.md").read_text(encoding="utf-8", errors="replace").splitlines()
+        head = (rd / "head.txt").read_text(encoding="utf-8", errors="replace").strip()
+        if not head or head.startswith("-") or not lines or lines[0].strip() != "CHECK: PASS":
+            return None
+        e2e = [l for l in lines if l.strip().startswith("E2E:")]
+        if not e2e or any("not run" in l.lower() or "skipped" in l.lower() for l in e2e):
+            return None
+        subprocess.run(["git", "-C", str(job["worktree"]), "merge-base", "--is-ancestor", head, "HEAD"],
+                       check=True, capture_output=True, timeout=30)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return head
+
+
 def cmd_e2e_specs(root, job_id) -> dict:
-    """e2e_specs for the job's worktree and base with root/project.md, with the job E2E time budget."""
+    """e2e_specs for the job's worktree and base with root/project.md, with the job E2E time budget. A later round whose
+    latest earlier check passed its E2E in full maps only the files changed since that round's head (full globs still
+    give full); an over-budget or not-run E2E, or a head that is not an ancestor of HEAD, maps the whole diff."""
     job = worktree_job(root, job_id)
-    return e2e_specs(job["worktree"], job["base"], Path(root) / "project.md", budget=True)
+    base = _e2e_passed_head(root, job_id, job) or job["base"]
+    return e2e_specs(job["worktree"], base, Path(root) / "project.md", budget=True)
 
 
 def related_tests(wt, base: str) -> list:

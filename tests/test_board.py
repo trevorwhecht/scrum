@@ -10489,6 +10489,42 @@ class E2eSpecsTest(unittest.TestCase):
         self.assertEqual(out["mode"], "scoped")  # the root layout covers every route as a prefix
         self.assertEqual(out["specs"], ["e2e/order.spec.ts", "e2e/pricing.spec.ts"])
 
+    def delta_specs(self, check, head=None, rnd=2):
+        """cmd_e2e_specs after the pricing page passed round 1 (check.md text `check`) and the order page changed."""
+        self.change("src/app/(pages)/pricing/page.tsx")
+        sha = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], capture_output=True, text=True,
+                             check=True).stdout.strip()
+        root = Path(self.tmp.name) / "root"
+        rd = root / "jobs" / "7" / "round-1"
+        rd.mkdir(parents=True)
+        (rd / "check.md").write_text(check)
+        (rd / "head.txt").write_text((head or sha) + "\n")
+        (root / "project.md").write_text(self.pfile.read_text())
+        self.change("src/app/order/[id]/page.tsx")
+        job = {"worktree": str(self.repo), "base": "main", "round": rnd}
+        with mock.patch.object(board, "worktree_job", return_value=job):
+            return board.cmd_e2e_specs(root, "7")
+
+    def test_later_round_maps_only_files_changed_since_passed_e2e(self):
+        out = self.delta_specs("CHECK: PASS\nE2E: 3 passed\n")
+        self.assertEqual(out["specs"], ["e2e/order.spec.ts"])
+
+    def test_prior_over_budget_run_maps_whole_diff(self):
+        out = self.delta_specs("CHECK: PASS\nE2E: over budget, 3 passed, 2 not run\n")
+        self.assertEqual(out["specs"], ["e2e/order.spec.ts", "e2e/pricing.spec.ts"])
+
+    def test_prior_skipped_e2e_maps_whole_diff(self):
+        out = self.delta_specs("CHECK: PASS\nE2E: skipped, no spec covers the diff\n")
+        self.assertEqual(out["specs"], ["e2e/order.spec.ts", "e2e/pricing.spec.ts"])
+
+    def test_non_ancestor_head_maps_whole_diff(self):
+        out = self.delta_specs("CHECK: PASS\nE2E: 3 passed\n", head="0" * 40)
+        self.assertEqual(out["specs"], ["e2e/order.spec.ts", "e2e/pricing.spec.ts"])
+
+    def test_round_one_maps_whole_diff(self):
+        out = self.delta_specs("CHECK: PASS\nE2E: 3 passed\n", rnd=1)
+        self.assertEqual(out["specs"], ["e2e/order.spec.ts", "e2e/pricing.spec.ts"])
+
     def test_tests_only_diff_runs_nothing(self):
         self.assertEqual(self.change("e2e/pricing.spec.ts"), {
             "mode": "none", "command": None, "specs": [], "uncovered": [], "trigger": None})
