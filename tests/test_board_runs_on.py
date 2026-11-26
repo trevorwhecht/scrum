@@ -414,10 +414,23 @@ class RunsOnTest(unittest.TestCase):
         self.assertEqual(board.SHOP_FIRST_MAX_S, 300)
         recent = self.job("011-b")["shop_first_since"]
         self.assertEqual(self.ready(), ["010-a"])
-        self.assertNotIn("shop_first_since", self.job("010-a"), "a claim drops it")
+        self.assertIn("shop_first_since", self.job("010-a"), "a claim keeps the first stamp")
         self.assertEqual(self.job("011-b")["shop_first_since"], recent)
         self.assertNotEqual(self.job("012-c")["shop_first_since"], "soon", "a malformed time starts again")
         self.assertEqual(self.job("012-c")["stage"], "waiting")
+
+    def test_shop_claim_put_back_keeps_wait_and_claims_locally(self):
+        (self.root.parent / "src").mkdir()
+        first = self.ago(40)
+        self.runall(self.kid("010-a", "a", shop_first_since=first))
+        self.room()
+        self.jev(False)
+        self.assertEqual(self.ready(shop="010-a"), ["010-a"], "the shop claims it")
+        self.assertEqual(self.job("010-a")["shop_first_since"], first)
+        board.cmd_set(self.root, "010-a", ["stage=waiting"], expect="spec")
+        self.assertEqual(self.job("010-a")["shop_first_since"], first, "the first stamp survives")
+        with mock.patch.object(board, "SHOP_FIRST_MAX_S", 30):  # 40 s of total wait is past it
+            self.assertEqual(self.ready(), ["010-a"], "claimed locally on the next unheld tick")
 
     def test_ready_never_claims_shop_child(self):
         (self.root.parent / "src").mkdir()

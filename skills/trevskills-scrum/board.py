@@ -7642,7 +7642,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
     `shop` (only= and manual included) first tags each waiting child that is not shop_excluded with tag_runs_on, before
     the lock (Jev is a network call), then leaves an `any` child (an untagged one counts as any; under the lock only the
     header and stored field are read) in waiting for the shop, setting `shop_first_since` once, until it is older than
-    SHOP_FIRST_MAX_S; a claim drops it. Job 1314: a call without `shop` and not `manual`, while heavy_cap_reason(root)
+    SHOP_FIRST_MAX_S; a claim keeps the stamp (job 1612: a shop claim put back to waiting never restarts the 300 s). Job 1314: a call without `shop` and not `manual`, while heavy_cap_reason(root)
     holds, leaves each heavy_job child waiting for the shop Mac (like a `shop` tag), so only light children claim here."""
     jobs_dir = Path(root) / "jobs"
     shop_first = not shop and shop_room(root)  # a worker has room: an `any` child goes there first
@@ -7806,7 +7806,6 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
                 note_queue_gate(root, k["id"], f"overlap_skipped:{i}")
             k.update(stage="spec", updatedAt=now())
             k.pop("overlap_hold", None)
-            k.pop("shop_first_since", None)
             try:  # the claim time, written once, for timing.md's Spec start (see _timing_row)
                 with (jobs_dir / k["id"] / "claimed-at.txt").open("x", encoding="utf-8") as f:
                     f.write(f"{int(time.time())}\n")
