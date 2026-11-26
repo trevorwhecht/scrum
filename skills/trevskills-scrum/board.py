@@ -8465,6 +8465,16 @@ def cmd_cloud_sync(root: Path, ended=()) -> dict:
                         cmd_manual_add(root, [f"{reason[len('obsolete: '):]} (from {job_id})"])
                     except (OSError, SystemExit) as e:  # never blocks the abort
                         print(f"cloud-sync: {job_id}: manual-add failed: {e}", file=sys.stderr)
+                if reason.startswith("obsolete:"):  # newjob 3b's Closed unwatched check, for Trevor's own words
+                    try:
+                        first = (Path(root) / "jobs" / job_id / "feature.md").read_text().splitlines()[:1]
+                    except OSError:  # no readable feature.md adds nothing
+                        first = []
+                    if first and not re.search(r" \(from [^)]*\)\s*$", first[0]):
+                        try:
+                            cmd_manual_add(root, [f"Closed unwatched, check: {reason[len('obsolete:'):].strip()} (from {job_id})"])
+                        except (OSError, SystemExit) as e:  # never blocks the abort
+                            print(f"cloud-sync: {job_id}: manual-add failed: {e}", file=sys.stderr)
                 _cloud_abort(root, job_id, url, abort[0], reason, lane)
             else:
                 worktree = cloud_worktree(repo, job_id, head) if wants_worktree else None
