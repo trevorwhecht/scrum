@@ -16489,6 +16489,18 @@ class HeavyCapReasonTest(HeavyCapBase):
         self.assertFalse(board.heavy_job(self.root, by["013-r"]))
         self.assertTrue(board.heavy_job(self.root, {"id": "099-gone", "stage": "spec"}), "no readable lane counts as heavy")
 
+    def test_no_lane_job_with_points_is_light_under_big_points(self):
+        self.jobs({"id": "020-a", "stage": "spec"}, {"id": "021-b", "stage": "spec"}, {"id": "022-c", "stage": "spec"},
+                  {"id": "023-d", "stage": "spec", "parent": "010-p"}, {"id": "010-p", "stage": "running", "lane": "bigboy"})
+        for jid, pts in (("020-a", 3), ("021-b", 1), ("022-c", 5), ("023-d", 1)):
+            (self.root / "jobs" / jid / "feature.md").write_text(f"Fix\nPoints: {pts}\n")
+        by = {j["id"]: j for j in board.read_board(self.root)["jobs"]}
+        self.assertFalse(board.heavy_job(self.root, by["020-a"]), "3 points")
+        self.assertFalse(board.heavy_job(self.root, by["021-b"]), "1 point")
+        self.assertTrue(board.heavy_job(self.root, by["022-c"]), "5 points")
+        self.assertTrue(board.heavy_job(self.root, by["023-d"]), "BigBoy child stays heavy")
+        self.assertIsNone(board.heavy_cap_reason(self.root, by["020-a"]))
+
     def test_backlog_line_heavy_classification(self):
         line = lambda text, points: {"text": text, "points": points, "done": False}
         self.assertTrue(board.heavy_job(self.root, line("Fix the widget", None)), "no points and no Lane")
