@@ -486,7 +486,7 @@ class ShopTickTest(unittest.TestCase):
             self.assertEqual(self.tick(), (False, "", ""))
         cur = json.loads((root / "jobs" / "043-a" / "current-gates.json").read_text())
         text = lambda a: cur[f"shop_unready:{a}"]["text"]
-        self.assertEqual(text("shopmac"), "shop_unready:shopmac (not ready)")
+        self.assertEqual(text("shopmac"), "shop_unready:shopmac (no account answering)")
         self.assertTrue(text("backmac").startswith("shop_unready:backmac (backoff "), text("backmac"))
         self.assertEqual(text("coolmac"), "shop_unready:coolmac (cooled down)")
         self.assertEqual((root / "jobs" / "043-a" / "queue-gates.txt").read_text().split(),
@@ -496,6 +496,38 @@ class ShopTickTest(unittest.TestCase):
             self.sh.ready.side_effect = lambda alias: dict(READY, accounts={"main": False})
             self.assertEqual(list(self.serve.shop_worker()), [])
             self.assertEqual(self.serve.SHOP_WHY["shopmac"], "no ready account")
+
+    def test_unready_reason_is_first_failed_part(self):
+        """Job 1618: SHOP_WHY names the first failed part of shop.ready."""
+        self.workers("shopmac 1 main\n")
+        cases = [({"up": False, "gh": False}, "down"), ({"gh": False}, "gh not logged in"),
+                 ({"node": False}, "node missing"), ({"claude": False}, "claude missing"),
+                 ({"accounts": {"main": False}}, "no account answering")]
+        for over, want in cases:
+            with self.subTest(want):
+                self.sh.ready.side_effect = lambda alias, o=over: dict(READY, ready=False, **o)
+                self.assertEqual(list(self.serve.shop_worker()), [])
+                self.assertEqual(self.serve.SHOP_WHY["shopmac"], want)
+
+    def test_unready_over_an_hour_texts_once_until_ready(self):
+        """Job 1618: one text naming worker and part after an hour not ready; again only after a ready in between."""
+        s, sent = self.serve, []
+        s.SHOP_UNREADY.clear()
+        send = lambda argv: sent.append(argv[-1])
+        with mock.patch.object(s, "alert_missing", return_value=None), \
+                mock.patch.object(s, "alert_argv", side_effect=lambda t: ["x", t]):
+            self.assertIsNone(s.shop_unready_tick("shopmac", "node missing", 1000.0, send, False))
+            self.assertIsNone(s.shop_unready_tick("shopmac", "node missing", 4600.0, send, False))
+            text = s.shop_unready_tick("shopmac", "node missing", 4601.0, send, False)
+            self.assertEqual(sent, [text])
+            self.assertIn("shopmac", text)
+            self.assertIn("node missing", text)
+            self.assertIsNone(s.shop_unready_tick("shopmac", "node missing", 9000.0, send, False))
+            self.assertIsNone(s.shop_unready_tick("shopmac", None, 9100.0, send, False))
+            self.assertIsNone(s.shop_unready_tick("shopmac", "down", 9200.0, send, False))
+            self.assertIsNotNone(s.shop_unready_tick("shopmac", "down", 12801.0, send, False))
+            self.assertEqual(len(sent), 2)
+        s.SHOP_UNREADY.clear()
 
     def test_dispatch_stamps_shop_behind_gate(self):
         """Job 1568: when a worker takes one pool job, every other pool job shop_tick passed over gets

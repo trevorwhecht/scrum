@@ -2946,6 +2946,35 @@ SHOP_SLOW_TICK = 5  # seconds: a dispatching shop_tick pass longer than this pri
 # worker alias -> the first check shop_worker failed it on (job 1611); shop_tick's shop_unready gate reason text
 SHOP_WHY = {}
 SHOP_ENDED = "requeue: shop session ended without a PR"
+SHOP_UNREADY_S = 3600  # shop_unready_tick: a worker not ready this long texts once (job 1618)
+# worker alias -> [time.time() it was first seen not ready, True once its text was dispatched]; memory only
+SHOP_UNREADY = {}
+
+
+def shop_unready_part(r: dict) -> str:
+    """The first failed part of a shop.ready() result, as text: down, gh not logged in, node missing, claude missing,
+    no account answering."""
+    for key, text in (("up", "down"), ("gh", "gh not logged in"), ("node", "node missing"),
+                      ("claude", "claude missing")):
+        if not r.get(key):
+            return text
+    return "no account answering"
+
+
+def shop_unready_tick(alias: str, part: str | None, now: float, send=None, background=None) -> str | None:
+    """Job 1618: track how long worker `alias` has stayed not ready (part = shop_unready_part, None = ready). Ready
+    drops its record, so the next outage is a new episode. Not ready for over SHOP_UNREADY_S and not yet texted: one
+    text through alert_dispatch naming the worker and part, never `<word>:` first. Returns the text sent inline, else None."""
+    if part is None:
+        SHOP_UNREADY.pop(alias, None)
+        return None
+    rec = SHOP_UNREADY.setdefault(alias, [now, False])
+    if now - rec[0] <= SHOP_UNREADY_S or rec[1]:
+        return None
+    rec[1] = True
+    text = f"Shop worker {alias} has not been ready for over an hour: {part}. Shop jobs are waiting on it."
+    return alert_dispatch(board.pulse_path().with_name("shop-unready.json"), now, f"shop {alias} {part}", text,
+                          "sent", send, background)
 
 
 def shop_worker():
@@ -2984,8 +3013,13 @@ def shop_worker():
             SHOP_WHY[w.alias] = f"at max {w.max} shop jobs"
             continue
         if not (ready := shop.ready(alias=w.alias))["ready"]:
-            SHOP_WHY[w.alias] = "not ready"
+            SHOP_WHY[w.alias] = part = shop_unready_part(ready)
+            try:
+                shop_unready_tick(w.alias, part, now)
+            except (Exception, SystemExit) as e:
+                print(f"watchdog: shop unready alert: {e}", file=sys.stderr, flush=True)
             continue
+        shop_unready_tick(w.alias, None, now)
         # ponytail: this Mac's sessions only; count shop jobs too if the allowance overshoots
         n_live = board.live_sessions()
         account = next((name for pref in (None, *w.accounts)  # pick_account's own order first, then the worker's order
