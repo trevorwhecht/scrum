@@ -10509,6 +10509,12 @@ class E2eSpecsTest(unittest.TestCase):
         out = self.delta_specs("CHECK: PASS\nE2E: 3 passed\n")
         self.assertEqual(out["specs"], ["e2e/order.spec.ts"])
 
+    def test_later_round_keeps_earlier_uncovered_ui_files(self):
+        self.change("src/components/Orphan.tsx")  # round 1 changed a UI file no spec covers
+        out = self.delta_specs("CHECK: PASS\nE2E: 3 passed\n")
+        self.assertEqual(out["specs"], ["e2e/order.spec.ts"])
+        self.assertEqual(out["uncovered"], ["src/components/Orphan.tsx"])
+
     def test_prior_over_budget_run_maps_whole_diff(self):
         out = self.delta_specs("CHECK: PASS\nE2E: over budget, 3 passed, 2 not run\n")
         self.assertEqual(out["specs"], ["e2e/order.spec.ts", "e2e/pricing.spec.ts"])

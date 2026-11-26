@@ -4463,10 +4463,15 @@ def _e2e_passed_head(root, job_id, job):
 def cmd_e2e_specs(root, job_id) -> dict:
     """e2e_specs for the job's worktree and base with root/project.md, with the job E2E time budget. A later round whose
     latest earlier check passed its E2E in full maps only the files changed since that round's head (full globs still
-    give full); an over-budget or not-run E2E, or a head that is not an ancestor of HEAD, maps the whole diff."""
+    give full); an over-budget or not-run E2E, or a head that is not an ancestor of HEAD, maps the whole diff. With the
+    delta base, `uncovered` still lists the whole job diff's uncovered UI files."""
     job = worktree_job(root, job_id)
     base = _e2e_passed_head(root, job_id, job) or job["base"]
-    return e2e_specs(job["worktree"], base, Path(root) / "project.md", budget=True)
+    out = e2e_specs(job["worktree"], base, Path(root) / "project.md", budget=True)
+    if base != job["base"]:  # a UI file an earlier round left uncovered stays uncovered (review step 3 must not skip)
+        whole = e2e_specs(job["worktree"], job["base"], Path(root) / "project.md", budget=True)
+        out["uncovered"] = sorted(set(out["uncovered"]) | set(whole["uncovered"]))
+    return out
 
 
 def related_tests(wt, base: str) -> list:
