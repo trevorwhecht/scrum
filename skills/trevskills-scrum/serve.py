@@ -4243,13 +4243,21 @@ listeners = board.listeners
 def stop_dev_servers(idle: dict[str, Path], listening: list[tuple[int, int, str]]) -> list[int]:
     """SIGTERM each listener whose cwd is inside <repo>/.claude/worktrees/ of a project in idle, and, when no headless
     session runs and every registered project is idle, each one under /tmp/scrum-*. Never a pid that also listens on
-    a KEEP_PORTS port, never serve.py itself, never a main checkout or anywhere else. Returns the pids signalled."""
+    a KEEP_PORTS port, never serve.py itself, never a main checkout or anywhere else. While E2E_FULL names a project's
+    full run, never a listener in that project's e2e-full worktree (its shard servers). Returns the pids signalled."""
     bases = tuple(os.path.realpath(repo / ".claude" / "worktrees") + os.sep for repo in idle.values())
     if board.live_sessions() == 0 and set(board.projects()) <= set(idle):
         bases += TMP_SCRUM
     keep = {pid for pid, port, _ in listening if port in KEEP_PORTS} | {os.getpid()}
+    running = E2E_FULL.get("running")
+    e2e_wt = ""
+    if running and running in idle:
+        wt = os.path.realpath(idle[running] / ".claude" / "worktrees" / "e2e-full")
+        e2e_wt = (wt, wt + os.sep)
     killed = []
     for pid, _, cwd in listening:
+        if e2e_wt and (cwd == e2e_wt[0] or cwd.startswith(e2e_wt[1])):
+            continue
         if pid in keep or pid in killed or not bases or not cwd.startswith(bases):  # strictly inside
             continue
         try:

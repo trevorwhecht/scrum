@@ -13928,6 +13928,20 @@ class IdleCleanupTest(unittest.TestCase):
         got, _ = self.stop({"a": a}, [(21, 3000, wt), (21, 3001, wt)])
         self.assertEqual(got, [], "a pid that also holds 3001 is kept")
 
+    def test_e2e_full_listeners_kept_during_a_run(self):
+        """Job 1661: a full run's shard servers (cwd the e2e-full worktree or under it) survive while E2E_FULL names
+        the project; they are stopped when no run is in flight, and other worktrees are stopped either way."""
+        a = self.repo("a")
+        full = str(a / ".claude" / "worktrees" / "e2e-full")
+        other = str(a / ".claude" / "worktrees" / "scrum-9")
+        listening = [(1, 3100, full), (2, 3101, full + "/apps/web"), (3, 3000, other)]
+        with mock.patch.dict(self.serve.E2E_FULL, {"running": "a"}):
+            got, kills = self.stop({"a": a}, listening)
+        self.assertEqual((got, kills), ([3], [(3, 15)]))
+        with mock.patch.dict(self.serve.E2E_FULL, {"running": None}):
+            got, kills = self.stop({"a": a}, listening)
+        self.assertEqual((got, kills), ([1, 2, 3], [(1, 15), (2, 15), (3, 15)]))
+
     def test_busy_project_servers_untouched(self):
         a, b = self.repo("a"), self.repo("b")
         wa, wb = str(a / ".claude/worktrees/w1"), str(b / ".claude/worktrees/w2")
