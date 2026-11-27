@@ -11836,6 +11836,31 @@ class AutoContinueTest(unittest.TestCase):
         self.tick(alive=lambda job: True)  # ps unreadable: always-True fn keeps parked .next
         self.assertTrue((wt("human") / ".next/cache").is_dir())
 
+    def test_prune_e2e_builds(self):
+        """A parked or finished job loses every .next-e2e-* folder (node_modules stays for a parked one); a running
+        job keeps its own; a symlinked one is left in place."""
+        repo = self.base / "a"
+        wt = lambda name: repo / ".claude" / "worktrees" / name
+        for name in ("human", "done", "check"):
+            for sub in ("node_modules/pkg", ".next-e2e-1/cache", ".next-e2e-2/cache", "src"):
+                (wt(name) / sub).mkdir(parents=True)
+        outside = self.base / "outside"
+        (outside / "keep").mkdir(parents=True)
+        (wt("human") / ".next-e2e-3").symlink_to(outside)
+        self.project("a", n=1, backlog="", jobs=[
+            {"id": "001-human", "stage": "needs-human", "worktree": str(wt("human"))},
+            {"id": "002-done", "stage": "done", "worktree": str(wt("done"))},
+            {"id": "003-check", "stage": "check", "worktree": str(wt("check"))}])
+        self.tick()
+        for name in ("human", "done"):
+            for n in (1, 2):
+                self.assertFalse((wt(name) / f".next-e2e-{n}").exists(), name)
+            self.assertTrue((wt(name) / "src").is_dir(), name)
+        self.assertTrue((wt("human") / "node_modules/pkg").is_dir())
+        self.assertTrue((outside / "keep").is_dir())
+        for n in (1, 2):
+            self.assertTrue((wt("check") / f".next-e2e-{n}/cache").is_dir())
+
     def test_starts_beside_work_in_flight(self):
         self.project("a", n=1); self.project("b", n=2, jobs=[{"id": "001-x", "stage": "build"}])
         self.assertEqual(self.tick(), self.started("a") + self.started("b"), "b in flight still starts (job 751)")
