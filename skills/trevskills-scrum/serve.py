@@ -860,7 +860,7 @@ def launch_queued(project, root, job, jobs) -> str:
     """Re-run a launch spawn's gate queued (queued_launch) through spawn as it was: "dropped" (unqueued: its job is
     running or left that stage), "skip" (a `start` tagged Runs on shop, board.stored_runs_on: it stays queued for
     shop_tick), "stop" (take_room refused: the resume budget is spent or solo_only holds it; mark_ram_hold ran),
-    "waits" (spawn held it again: the room goes back, and when the job is still queued (re-read; LiveSession unqueues
+    "capped" ("waits" whose only current gate is heavy_cap, job 1668), "waits" (spawn held it again: the room goes back, and when the job is still queued (re-read; LiveSession unqueues
     it) the hold is noted queued_launch:<id> (note_hold) for pulse_tick) or "started". One held past RAM_HOLD_SECS
     (held_over) re-runs with idle=True, as idle_claim's does, while board.machine_ok(root, claim=True) passes (job
     1356). A click Trevor made (play_queued_manual) is gated as his click: no CPU gate. A "stop" while MACHINE_WHY names
@@ -890,6 +890,8 @@ def launch_queued(project, root, job, jobs) -> str:
                 note_hold(root, f"queued_launch:{job['id']}")
         except (SystemExit, OSError, ValueError):
             pass  # gone from the board meanwhile: nothing holds it
+        if gate_heads(root, job) == {"heavy_cap"}:
+            return "capped"  # job 1668: held only on heavy_cap (never a light job): no other start is held, so it sets no pending
         return "waits"  # job 1428: a heavy_cap or RAM hold on this launch never stops a later one the gates let through
     return "started"
 
@@ -901,7 +903,8 @@ def hand_queue_tick() -> set[str]:
     other than free disk sets RESUME_ROOM to 0 (inside a tick), writes the refusal as that job's machine_hold
     (note_machine_hold, job 1540) and ends the pass, a free-disk refusal skips that job; a "stop" from
     launch_queued ends the pass too. A job solo_only holds is skipped (job 1375). Returns the projects where one started
-    ("started"), waits on spawn's gate ("waits") or was left queued by a "stop", so watchdog_tick claims nothing new."""
+    ("started"), waits on spawn's gate ("waits") or was left queued by a "stop", so watchdog_tick claims nothing new. A
+    "capped" launch (held only on heavy_cap, job 1668) is none of these: it holds no light start."""
     global RESUME_ROOM
     found = []
     for project, repo in board.projects().items():
@@ -942,7 +945,7 @@ def play_queue_tick(project, root, jobs) -> bool:
     hold waits and the next one is tried; a Runs on shop `start` is skipped and stays queued for shop_tick). A click
     Trevor made (play_queued_manual) is gated as his click: no CPU gate. A hand-queued start (board.hand_queued) is
     skipped and stays queued: hand_queue_tick launches it (job 1454). True when it
-    started one or one waits on a slot. While RESUME_ONLY names a queued solo holder, every other job is skipped and
+    started one or one waits on a slot ("capped", held only on heavy_cap, is not a wait: job 1668). While RESUME_ONLY names a queued solo holder, every other job is skipped and
     stays queued (solo_only, job 1375)."""
     started = waits = False
     # cpu_held first, so the order agrees with cpu_first(): spawn holds every other start while it waits
