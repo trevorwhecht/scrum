@@ -3889,6 +3889,14 @@ class ServeTest(unittest.TestCase):
         self.assertEqual([argv[0], *argv[2:]], ["-p", "--model", "sonnet", "--allowedTools", "Read,Grep,Glob"])
         self.assertEqual(self.routing_lines(scrum), [{"role": "estimator", "runner": "cloud", "model": "-", "outcome": "ok"}])
 
+    def test_estimate_makes_only_read_tools_available(self):
+        """--allowedTools only skips the prompt, so Edit/Write/Bash stayed available (job 1644): --tools removes them."""
+        scrum = self.estimate_scrum("est-tools", "Tools item")
+        self.serve.estimate(scrum, "Tools item")
+        [argv] = self.stub_calls_for("Tools item")
+        self.assertEqual(argv[argv.index("--tools") + 1:], ["Read,Grep,Glob"])
+        self.assertNotIn("--allowedTools", argv)
+
     def test_estimate_failed_cloud_is_not_retried(self):
         scrum = self.estimate_scrum("est-fail", "Fail item")
         with mock.patch.object(self.serve.subprocess, "run", return_value=mock.Mock(stdout="no json")) as run:
