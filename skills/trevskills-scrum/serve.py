@@ -754,7 +754,7 @@ RESUME_ROOM: int | None = None  # watchdog_tick's per-tick resume budget (board.
 E2E_RESUMED: bool | None = None  # one E2E-queue resume per watchdog_tick across projects; None outside a tick = one per call
 RESUME_ONLY: tuple[str, str] | None = None  # (resolved scrum path, job id) of the queued solo holder (resume_budget):
 # only its own queued launch may spend RESUME_ROOM; None = any job may
-CLAIM_OFF_BY: list[str] | None = None  # job 1638: inside a tick, the id of the first job whose resume or Play wait, or auto_play start, turned the claim off ([] until then); None outside a tick
+CLAIM_OFF_BY: list[str] | None = None  # job 1638: inside a tick, the id of the first job whose resume or Play wait, auto_play start, hand_queue_tick start, main_ff_tick resume or idle_claim start turned the claim off ([] until then); None outside a tick
 
 
 def claim_cause(job_id) -> None:
@@ -921,6 +921,7 @@ def hand_queue_tick() -> set[str]:
         result = launch_queued(project, root, job, jobs)
         if result in ("started", "waits", "stop"):
             pending.add(project)
+            claim_cause(job_id)  # job 1640: the first one names this tick's claim_off
         if result == "stop":
             break
     return pending
@@ -1064,11 +1065,16 @@ def idle_claim(project, root, jobs) -> bool:
         return False
     IDLE_SINCE.pop(project, None)  # one try per IDLE_CLAIM_SECS, so a refused pick never spends a slot every tick
     if launch := pick.get("queued_launch"):
-        return spawn(project, root, pick["id"], launch["action"], launch["prompt"],
-                     manual=bool(pick.get("play_queued_manual")), idle=True) is not None
+        started = spawn(project, root, pick["id"], launch["action"], launch["prompt"],
+                        manual=bool(pick.get("play_queued_manual")), idle=True) is not None
+        if started:
+            claim_cause(pick["id"])  # job 1640
+        return started
     out = board.cmd_ready(root, pick["parent"], live_ids(project), only=pick["id"])  # re-checks the live child under the lock
-    return any([spawn(project, root, c, "start", f"/trevskills-scrum start {c}", idle=True) is not None
-                for c in out["ready"]])
+    started = [c for c in out["ready"] if spawn(project, root, c, "start", f"/trevskills-scrum start {c}", idle=True) is not None]
+    if started:
+        claim_cause(started[0])  # job 1640
+    return bool(started)
 
 
 OPS_RESUME = "ops job: there is no worktree or build session to resume. Fix: answer its question on the card, or run the lane again by hand (lanes/ops.md)."
@@ -2781,6 +2787,7 @@ def main_ff_tick(project, repo, root, jobs) -> bool:
         MAIN_FF_TRIED[key] = job.get("updatedAt")
         resume_job(project, root, job, jobs)
         spawned = True
+        claim_cause(job["id"])  # job 1640
     return spawned
 
 

@@ -9191,6 +9191,27 @@ class MainFfTickTest(unittest.TestCase):
             result = s.main_ff_tick("p", self.repo, self.root, jobs)
         return result, [c.args[2:] for c in spawn.call_args_list], git, play
 
+    def cause_tick(self, cause, refusal=None, ready=True, room=True):
+        s = self.serve
+        jobs = json.loads((self.root / "board.json").read_text())["jobs"]
+        with mock.patch.object(s, "CLAIM_OFF_BY", cause), mock.patch.object(s, "resume_job"), \
+                mock.patch.object(s, "main_ready", return_value=ready), mock.patch.object(s, "take_room", return_value=room), \
+                mock.patch.object(s, "resume_refusal", return_value=refusal), mock.patch.object(s, "family_live", return_value=False), \
+                mock.patch.object(s.board, "session_alive_fn", return_value=lambda job: False):
+            result = s.main_ff_tick("p", self.repo, self.root, jobs)
+            return result, s.CLAIM_OFF_BY
+
+    def test_main_ff_tick_keeps_cause_job(self):
+        """Job 1640: a resumed parent is the tick's claim_off cause; a skipped one, a kept cause and no tick change nothing."""
+        self.assertEqual(self.cause_tick([]), (True, ["308-big"]))
+        self.serve.MAIN_FF_TRIED.clear()
+        self.assertEqual(self.cause_tick(["a"]), (True, ["a"]))
+        self.serve.MAIN_FF_TRIED.clear()
+        self.assertEqual(self.cause_tick(None), (True, None))
+        for kw in ({"ready": False}, {"refusal": "no"}, {"room": False}):
+            self.serve.MAIN_FF_TRIED.clear()
+            self.assertEqual(self.cause_tick([], **kw), (False, []))
+
     def test_main_ff_tick_resumes_when_pull_succeeds(self):
         result, spawns, git, _ = self.tick()
         self.assertTrue(result)
@@ -12045,6 +12066,39 @@ class IdleClaimTest(unittest.TestCase):
         self.assertIs(got, True)
         self.assertEqual(self.started(spawn), [("003-small", "start", True)])
         self.assertNotIn("ic", s.IDLE_SINCE)
+
+    def cause(self, cause):
+        s = self.serve
+        with mock.patch.object(s, "CLAIM_OFF_BY", cause):
+            got, spawn = self.claim()
+            return got, s.CLAIM_OFF_BY
+
+    def test_idle_claim_keeps_cause_job(self):
+        """Job 1640: the held job idle_claim starts (waiting child or queued launch) is the claim_off cause; no start keeps none."""
+        s = self.serve
+        self.write()
+        self.assertEqual(self.cause([]), (True, ["003-small"]))
+        jobs = self.write(kids={})
+        jobs.append({"id": "010-q", "stage": "spec", "updatedAt": self.board.now(),
+                     "queued_launch": {"action": "start", "prompt": "/trevskills-scrum start 010-q", "stage": "spec"}})
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.assertEqual(self.cause([]), (True, ["010-q"]))
+        with mock.patch.object(s, "cpu_hot", return_value=True):
+            self.assertEqual(self.cause([]), (False, []))
+        self.write(kids={})
+        self.assertEqual(self.cause([]), (False, []))
+        self.write()
+        with mock.patch.object(s, "take_room", return_value=False):
+            self.assertEqual(self.cause([]), (False, []))
+        s.IDLE_SINCE["ic"] = time.time()
+        with mock.patch.object(s, "IDLE_CLAIM_SECS", 3600):
+            self.assertEqual(self.cause([]), (False, []))
+
+    def test_claim_cause_first_wins_across_tick_paths(self):
+        """Job 1640: an idle_claim start never replaces a cause a tick path kept; outside a tick it stays None."""
+        self.write()
+        self.assertEqual(self.cause(["a"]), (True, ["a"]))
+        self.assertEqual(self.cause(None), (True, None))
 
     def test_child_of_a_parent_writing_child_specs_is_not_held_work(self):
         """Job 1275 path 2: while the parent's fresh childSpecs mark stands, its waiting children are no held work, so
@@ -18576,6 +18630,29 @@ class MachineHoldTest(unittest.TestCase):
 
     def approve(self, **extra):
         return self.queued("001-edit", "approve", "needs-human", **extra)
+
+    def test_hand_queue_tick_keeps_cause_job(self):
+        """Job 1640: a started, waiting or stopped hand launch is the tick's claim_off cause; skipped or refused is not."""
+        s = self.serve
+        self.put(self.queued("001-hand", "start", "spec", started_by="hand"))
+        for result, want in (("started", ["001-hand"]), ("waits", ["001-hand"]), ("stop", ["001-hand"]), ("skipped", [])):
+            with mock.patch.object(s, "CLAIM_OFF_BY", []), mock.patch.object(s, "launch_queued", return_value=result), \
+                    mock.patch.object(s.board, "machine_ok", return_value=None):
+                s.hand_queue_tick()
+                self.assertEqual(s.CLAIM_OFF_BY, want, result)
+        with mock.patch.object(s, "CLAIM_OFF_BY", ["a"]), mock.patch.object(s, "launch_queued", return_value="started"), \
+                mock.patch.object(s.board, "machine_ok", return_value=None):
+            s.hand_queue_tick()
+            self.assertEqual(s.CLAIM_OFF_BY, ["a"])
+        with mock.patch.object(s, "CLAIM_OFF_BY", None), mock.patch.object(s, "launch_queued", return_value="started"), \
+                mock.patch.object(s.board, "machine_ok", return_value=None):
+            s.hand_queue_tick()
+            self.assertIsNone(s.CLAIM_OFF_BY)
+        with mock.patch.object(s, "CLAIM_OFF_BY", []), mock.patch.object(s, "launch_queued") as launch, \
+                mock.patch.object(s.board, "machine_ok", return_value=self.CPU), mock.patch.object(s, "note_machine_hold"):
+            s.hand_queue_tick()
+            launch.assert_not_called()
+            self.assertEqual(s.CLAIM_OFF_BY, [])
 
     def test_hand_queue_tick_records_machine_hold(self):
         # board.hand_queued takes only a `start` launch, so the hand pass's job is a hand-queued start
