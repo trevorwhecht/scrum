@@ -2,12 +2,16 @@
 """The shared review render (lanes/review.md step 2): load each changed page once in headless Chrome and save what
 scrum-review-ui and scrum-review-ux read instead of loading it themselves.
 
-  python3 render.py <url> <out_dir> [--cookies <file>] <path>...
+  python3 render.py <url> <out_dir> [--cookies <file>] <path>... [--click <path>=<selector>]...
   python3 render.py --reap
 
 For each path: <slug>-390.png and <slug>-1440.png (viewport-sized, 900 px tall), console errors and warnings appended
 to out_dir/console.log as `<path> <width> <level>: <text>`, and out_dir/manifest.json
 {"url", "cookies", "pages": [{"path", "final_url", "http_status", "status", "shots", "console_errors"}]}.
+--click <path>=<selector> (repeatable, CSS only, the path is one of the paths): after that page has loaded and settled
+at a width, click each selector given for it in order (the first visible match), let the page settle again and save
+<slug>-clicked-<width>.png as well; the manifest page gets "clicks": [<selector>...]. A selector that matches no visible
+element sets the page status to click_failed and saves no clicked shot there (exit code unchanged).
 --cookies loads a Playwright storageState file's cookies first; no cookie name or value is ever written out.
 Exit 0 when every page is ok, redirected or http_error; 1 on a timeout or when Chrome cannot run (manifest "error");
 2 on a usage error. Every render first reaps (reap()) each scrum-render Chrome whose render.py is gone (ppid 1) and
@@ -24,7 +28,7 @@ from urllib.parse import urlparse
 
 import buildlock  # a sibling: machine_hold and board_module for main()'s hold before Chrome starts (job 1227)
 
-USAGE = "usage: render.py <url> <out_dir> [--cookies <file>] <path>...\n       render.py --reap"
+USAGE = "usage: render.py <url> <out_dir> [--cookies <file>] <path>... [--click <path>=<selector>]...\n       render.py --reap"
 MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 WIDTHS = ((390, True), (1440, False))
 HEIGHT = 900
@@ -436,11 +440,35 @@ def _route(url: str) -> tuple[str, str]:
     return u.path.rstrip("/") or "/", u.query
 
 
-RANK = {"ok": 0, "redirected": 1, "http_error": 2, "timeout": 3}
+RANK = {"ok": 0, "redirected": 1, "http_error": 2, "click_failed": 3, "timeout": 4}
+
+CLICK_JS = """(() => {{
+  let e; try {{ e = document.querySelector({sel}); }} catch (x) {{ return false; }}
+  if (!e || e.getClientRects().length === 0) return false;
+  e.click(); return true;
+}})()"""
 
 
-def render(url: str, out_dir: Path, paths: list[str], cookies: Path | None = None) -> dict:
-    """Render every path at 390 and 1440 px into out_dir (deleted and re-created first); return the manifest."""
+def _click(cdp: CDP, selector: str) -> bool:
+    """Click the first element matching selector when it is visible; False when there is none or the selector is bad."""
+    r = cdp.call("Runtime.evaluate", {"expression": CLICK_JS.format(sel=json.dumps(selector)), "returnByValue": True},
+                 timeout=10)
+    return r.get("result", {}).get("value") is True
+
+
+def _settle(cdp: CDP, deadline: float):
+    """After a click: wait QUIET, then while a loading indicator shows (at most SETTLE_CAP s); events are dropped."""
+    end = min(time.monotonic() + SETTLE_CAP, deadline)
+    time.sleep(QUIET)
+    while time.monotonic() < end and _busy(cdp):
+        time.sleep(0.25)
+    cdp.events.clear()
+
+
+def render(url: str, out_dir: Path, paths: list[str], cookies: Path | None = None,
+           clicks: dict[str, list[str]] | None = None) -> dict:
+    """Render every path at 390 and 1440 px into out_dir (deleted and re-created first); return the manifest.
+    clicks maps a path to the selectors to click, in order, for the extra <slug>-clicked-<width>.png shot."""
     start, url, out_dir = time.monotonic(), url.rstrip("/"), Path(out_dir)
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True)
@@ -475,6 +503,8 @@ def render(url: str, out_dir: Path, paths: list[str], cookies: Path | None = Non
             for path in paths:
                 page = {"path": path, "final_url": None, "http_status": None, "status": "ok", "shots": [],
                         "console_errors": 0}
+                if clicks and clicks.get(path):
+                    page["clicks"] = list(clicks[path])
                 for width, mobile in WIDTHS:
                     if time.monotonic() >= deadline:
                         page["status"] = "timeout"
@@ -486,6 +516,17 @@ def render(url: str, out_dir: Path, paths: list[str], cookies: Path | None = Non
                             name = f"{slug(path)}-{width}.png"
                             (out_dir / name).write_bytes(base64.b64decode(shot))
                             page["shots"].append(name)
+                            if clicks and clicks.get(path):
+                                for sel in clicks[path]:
+                                    if not _click(cdp, sel):
+                                        res["status"] = "click_failed"
+                                        break
+                                    _settle(cdp, deadline)
+                                else:
+                                    shot = cdp.call("Page.captureScreenshot", {"format": "png"})["data"]
+                                    name = f"{slug(path)}-clicked-{width}.png"
+                                    (out_dir / name).write_bytes(base64.b64decode(shot))
+                                    page["shots"].append(name)
                     except (TimeoutError, RuntimeError, KeyError, ValueError):
                         res = {"status": "timeout", "errors": 0, "http_status": None, "final_url": None}
                     log.flush()
@@ -518,10 +559,25 @@ def main(argv: list[str]) -> int:
             return 2
         cookies = Path(args.pop(i + 1))
         args.pop(i)
+    raw_clicks = []
+    while "--click" in args:
+        i = args.index("--click")
+        if i + 1 >= len(args):
+            print(USAGE, file=sys.stderr)
+            return 2
+        raw_clicks.append(args.pop(i + 1))
+        args.pop(i)
     if len(args) < 3 or not all(p.startswith("/") for p in args[2:]) or args[0].startswith("-"):
         print(USAGE, file=sys.stderr)
         return 2
     url, out_dir, paths = args[0], Path(args[1]), args[2:]
+    clicks: dict[str, list[str]] = {}
+    for raw in raw_clicks:  # <path>=<selector>: the longest listed path that fits, as a path can hold an =
+        owner = max((p for p in paths if raw.startswith(p + "=") and len(raw) > len(p) + 1), key=len, default=None)
+        if owner is None:
+            print(USAGE, file=sys.stderr)
+            return 2
+        clicks.setdefault(owner, []).append(raw[len(owner) + 1:])
     if out_dir.exists() and (not out_dir.is_dir() or any(
             not p.is_file() or not (p.name in OUR_FILES or p.suffix == ".png") for p in out_dir.iterdir())):
         print(f"render.py: {out_dir} holds files render.py did not write; refusing to delete it", file=sys.stderr)
@@ -537,7 +593,7 @@ def main(argv: list[str]) -> int:
     olds = {sig: signal.signal(sig, lambda *_: sys.exit(1))  # run the finally that kills Chrome
             for sig in (signal.SIGTERM, signal.SIGHUP)}
     try:
-        manifest = render(url, out_dir, paths, cookies)
+        manifest = render(url, out_dir, paths, cookies, clicks)
     finally:
         for sig, old in olds.items():
             signal.signal(sig, old)

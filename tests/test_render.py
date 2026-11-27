@@ -29,6 +29,14 @@ LOADING_PAGES["/load-empty"] = ("<!doctype html><title>l</title><div role=\"stat
                                 + LOADING_JS.format(sel="div")).encode()
 LOADING_PAGES["/status-permanent"] = b'<!doctype html><title>s</title><div role="status">Payment overdue</div>'
 LOADING_PAGES["/status-hidden"] = b'<!doctype html><title>s</title><div role="status" style="display:none">Loading</div>'
+CLICK_PAGES = {
+    "/click-modal": b"<!doctype html><title>c</title><button id=open onclick=\"fetch('/hit-open');"
+                    b"document.getElementById('modal').style.display='block'\">Open</button>"
+                    b"<div id=modal style=\"display:none;position:fixed;inset:0;background:red\">Modal</div>",
+    "/click-two": b"<!doctype html><title>c</title><button id=first onclick=\"fetch('/hit-first');"
+                  b"document.body.insertAdjacentHTML('beforeend','<button id=second onclick=&quot;fetch(\\'/hit-second\\')"
+                  b"&quot;>Two</button>')\">One</button>",
+}
 REDIRECTS = {"/q?view=leads": "/q?view=orders", "/a": "/other", "/t/": "/t"}
 
 
@@ -41,13 +49,15 @@ class Page(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if self.path.startswith("/hit-"):
+            self.server.hits.append(self.path)
         if self.path == "/slow":
             time.sleep(2)
         elif self.path == "/hang":
             self.server.release.wait(90)  # held open until the test ends
             self.server.hangs_ended += 1
             return
-        body = {"/fetch": FETCH_PAGE, "/hung": HUNG_PAGE, **LOADING_PAGES}.get(self.path, PAGE)
+        body = {"/fetch": FETCH_PAGE, "/hung": HUNG_PAGE, **LOADING_PAGES, **CLICK_PAGES}.get(self.path, PAGE)
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.end_headers()
@@ -415,6 +425,14 @@ class RenderUnitTest(unittest.TestCase):
         self.assertEqual(m["pages"], [])
         self.assertEqual(m["error"], f"no Chrome found at {Path(self.tmp.name) / 'no-chrome'}")
 
+    def test_click_usage_errors(self):
+        base = ["http://127.0.0.1:1", str(self.out), "/", "/b"]
+        for extra in (["--click"], ["--click", "/"], ["--click", "/=" ], ["--click", "/nope=#x"], ["--click", "#x"]):
+            code, _, err = run_main(base + extra)
+            self.assertEqual(code, 2, extra)
+            self.assertIn("usage: render.py <url> <out_dir>", err, extra)
+            self.assertIn("--click <path>=<selector>", err, extra)
+
     def test_refuses_out_dir_with_other_files(self):
         self.out.mkdir()
         (self.out / "notes.txt").write_text("keep")
@@ -488,6 +506,7 @@ class RenderChromeTest(unittest.TestCase):
         self.srv.cookies = []
         self.srv.release = threading.Event()
         self.srv.hangs_ended = 0
+        self.srv.hits = []
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.addCleanup(self.srv.server_close)
         self.addCleanup(self.srv.shutdown)
@@ -506,6 +525,36 @@ class RenderChromeTest(unittest.TestCase):
         page = m["pages"][0]
         self.assertEqual((page["path"], page["status"], page["http_status"], page["shots"], page["console_errors"]),
                          ("/", "ok", 200, ["root-390.png", "root-1440.png"], 2))
+
+    def test_click_opens_modal(self):
+        code, _, err = run_chrome([self.url, str(self.out), "--click", "/click-modal=#open", "/click-modal"])
+        self.assertEqual(code, 0, err)
+        for n in ("click-modal-390", "click-modal-1440", "click-modal-clicked-390", "click-modal-clicked-1440"):
+            self.assertTrue((self.out / f"{n}.png").read_bytes().startswith(b"\x89PNG"), n)
+        self.assertNotEqual((self.out / "click-modal-390.png").read_bytes(),
+                            (self.out / "click-modal-clicked-390.png").read_bytes())
+        page = json.loads((self.out / "manifest.json").read_text())["pages"][0]
+        self.assertEqual(page["shots"], ["click-modal-390.png", "click-modal-clicked-390.png",
+                                         "click-modal-1440.png", "click-modal-clicked-1440.png"])
+        self.assertEqual((page["status"], page["clicks"]), ("ok", ["#open"]))
+        self.assertEqual(self.srv.hits, ["/hit-open", "/hit-open"])
+
+    def test_clicks_run_in_order(self):
+        code, _, err = run_chrome([self.url, str(self.out), "--click", "/click-two=#first",
+                                   "--click", "/click-two=#second", "/click-two"])
+        self.assertEqual(code, 0, err)
+        page = json.loads((self.out / "manifest.json").read_text())["pages"][0]
+        self.assertEqual((page["status"], page["clicks"]), ("ok", ["#first", "#second"]))
+        self.assertEqual(len(page["shots"]), 4)
+        self.assertEqual(self.srv.hits, ["/hit-first", "/hit-second"] * 2)
+
+    def test_click_selector_missing(self):
+        code, _, err = run_chrome([self.url, str(self.out), "--click", "/click-modal=#nope", "/click-modal"])
+        self.assertEqual(code, 0, err)
+        page = json.loads((self.out / "manifest.json").read_text())["pages"][0]
+        self.assertEqual((page["status"], page["clicks"], page["shots"]),
+                         ("click_failed", ["#nope"], ["click-modal-390.png", "click-modal-1440.png"]))
+        self.assertFalse(list(self.out.glob("*clicked*")))
 
     def test_cookie_file_missing_is_noted(self):
         missing = Path(self.tmp.name) / "auth.json"
