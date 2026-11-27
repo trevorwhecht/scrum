@@ -1366,6 +1366,42 @@ class ServeTest(unittest.TestCase):
             self.assertTrue(s.play_queue_tick("repo", self.root, jobs))
         self.assertEqual(started, [later])
 
+    def test_launch_queued_heavy_cap_only_is_capped(self):
+        """Job 1668: a launch spawn held with heavy_cap as its only current gate is "capped"; any other gate keeps "waits"."""
+        s = self.serve
+        for gates, want in ((["heavy_cap(2/2)"], "capped"), (["heavy_cap(2/2)", "ram_room(1)"], "waits"), (["ram_room(1)"], "waits"), ([], "waits")):
+            with self.subTest(gates=gates):
+                job_id = self.queued_launch_job("Capped " + "".join(gates), 1)
+                for g in gates:
+                    s.board.note_current_gate(self.root, job_id, g)
+                job = self.stage_of(job_id)
+                with mock.patch.object(s, "running", return_value=False), mock.patch.object(s, "take_room", return_value=True), \
+                        mock.patch.object(s.board, "stored_runs_on", return_value=None), \
+                        mock.patch.object(s, "spawn", return_value=None), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(s.launch_queued("repo", self.root, job, [job]), want)
+
+    def test_play_queue_tick_capped_launch_does_not_set_pending(self):
+        s = self.serve
+        job_id = self.queued_launch_job("Capped play", 1)
+        job = self.stage_of(job_id)
+        for result, want in (("capped", False), ("waits", True)):
+            with self.subTest(result=result), mock.patch.object(s, "CLAIM_OFF_BY", []), \
+                    mock.patch.object(s, "launch_queued", return_value=result), \
+                    mock.patch.object(s, "solo_only", return_value=False), mock.patch.object(s.board, "hand_queued", return_value=False):
+                self.assertIs(s.play_queue_tick("repo", self.root, [job]), want)
+                self.assertEqual(s.CLAIM_OFF_BY, [] if result == "capped" else [job_id])
+        # the real launch_queued path keeps the launch queued and heavy_cap noted
+        s.board.note_current_gate(self.root, job_id, "heavy_cap(2/2)")
+        with mock.patch.object(s, "running", return_value=False), mock.patch.object(s, "take_room", return_value=True), \
+                mock.patch.object(s.board, "stored_runs_on", return_value=None), mock.patch.object(s, "spawn", return_value=None), \
+                mock.patch.object(s, "CLAIM_OFF_BY", []), contextlib.redirect_stderr(io.StringIO()):
+            self.assertFalse(s.play_queue_tick("repo", self.root, [job]))
+            self.assertEqual(s.CLAIM_OFF_BY, [])
+        left = self.stage_of(job_id)
+        self.assertTrue(left.get("play_queued"))
+        self.assertTrue(left.get("queued_launch"))
+        self.assertEqual(s.gate_heads(self.root, left), {"heavy_cap"})
+
     def test_play_queue_tick_ram_hold_machine_wait(self):
         ids = []
         for i in range(2):
@@ -11033,6 +11069,23 @@ class WatchdogIdleParentTest(unittest.TestCase):
                 ready.assert_not_called()
                 self.assertEqual(self.job("003-wait")["stage"], "waiting")
 
+    def test_watchdog_tick_heavy_cap_only_wait_keeps_claim(self):
+        """Job 1668: a heavy start held only on heavy_cap leaves the tick's claim on; a second start waiting on RAM turns it off."""
+        s = self.serve
+        hand = lambda i: {"id": i, "stage": "spec", "started_by": "hand", "play_queued": "2026-11-24T22:50:00+00:00",
+                          "queued_launch": {"action": "start", "prompt": f"/trevskills-scrum start {i}", "stage": "spec"}}
+        for results, want in ((["capped"], True), (["capped", "waits"], False)):
+            with self.subTest(results=results):
+                self.claimable_board({"stage": "needs-human", "reason": "x"}, *[hand(f"01{n}-h") for n in range(len(results))])
+                with mock.patch.object(self.board, "projects", return_value={"idle": self.repo}), \
+                        mock.patch.object(self.board, "cmd_watchdog", return_value=[]), \
+                        mock.patch.object(self.board, "machine_ok", return_value=None), \
+                        mock.patch.object(s, "launch_queued", side_effect=results), \
+                        mock.patch.object(s, "wake_waiting") as wake, mock.patch.object(s, "sweep_parents"), \
+                        mock.patch.object(s, "idle_claim", return_value=False), mock.patch.object(s, "spawn"):
+                    s.watchdog_tick()
+                self.assertEqual(wake.called, want)
+
     def test_watchdog_tick_auto_plays_oldest_paused_when_idle(self):
         self.two_paused()
         with self.ps_file(""):
@@ -18703,6 +18756,16 @@ class MachineHoldTest(unittest.TestCase):
             s.hand_queue_tick()
             launch.assert_not_called()
             self.assertEqual(s.CLAIM_OFF_BY, [])
+
+    def test_hand_queue_tick_capped_launch_not_pending(self):
+        s = self.serve
+        self.put(self.queued("001-hand", "start", "spec", started_by="hand"))
+        for result, want in (("capped", set()), ("waits", {"repo"}), ("started", {"repo"})):
+            with self.subTest(result=result), mock.patch.object(s, "CLAIM_OFF_BY", []), \
+                    mock.patch.object(s, "launch_queued", return_value=result), \
+                    mock.patch.object(s.board, "machine_ok", return_value=None):
+                self.assertEqual(s.hand_queue_tick(), want)
+                self.assertEqual(s.CLAIM_OFF_BY, [] if result == "capped" else ["001-hand"])
 
     def test_hand_queue_tick_records_machine_hold(self):
         # board.hand_queued takes only a `start` launch, so the hand pass's job is a hand-queued start
