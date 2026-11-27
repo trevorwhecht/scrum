@@ -3930,7 +3930,8 @@ def prune_worktrees(repo: Path, jobs: list[dict], project: str | None = None, al
     so a resume is fast) for a parked job (needs-human, paused or stalled) with no live session (dashboard-spawned or
     any other, per the `once` handle `alive`, scanned lazily). Only under
     repo/.claude/worktrees/ (never a lilguy job's main checkout). Errors are ignored, and a symlinked folder is left
-    in place."""
+    in place. Both also lose every `.next-e2e-*` folder in the worktree root (the per-shard dev builds a killed
+    `next dev` E2E run leaves behind, GiBs each), never following a symlink."""
     base = (repo / ".claude" / "worktrees").resolve()
     alive = alive or once(lambda: board.session_alive_fn())
     for job in jobs:
@@ -3947,6 +3948,9 @@ def prune_worktrees(repo: Path, jobs: list[dict], project: str | None = None, al
         if base in wt.parents and wt.is_dir():
             for name in names:
                 shutil.rmtree(wt / name, ignore_errors=True)
+            for d in wt.glob(".next-e2e-*"):
+                if d.is_dir() and not d.is_symlink():
+                    shutil.rmtree(d, ignore_errors=True)
 
 
 def reclaim_disk(repo: Path, jobs: list[dict]) -> int:
