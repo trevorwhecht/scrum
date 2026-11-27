@@ -4506,6 +4506,16 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "never load above 8"):
             self.assertIn(phrase, stops, phrase)
 
+    def test_overload_ask_yields_to_over_budget_e2e(self):
+        """An over_budget E2E with failed 0 and passed >= 1 is never a quiet-machine ask, whatever the load."""
+        stops = (SKILL_DIR / "lanes" / "stops.md").read_text()
+        line = next(l for l in stops.splitlines() if l.startswith("- Machine load"))
+        unblock = (SKILL_DIR / "lanes" / "unblock.md").read_text()
+        bullet = next(l for l in unblock.splitlines() if "**ESCALATE because the stop was machine load**" in l)
+        for text in (line, bullet):
+            for phrase in ("`over_budget` true", "`failed` 0", "`passed` at least 1", "`lanes/newjob.md`", "whatever the load"):
+                self.assertIn(phrase, text, phrase)
+
     def test_stops_wrong_project_is_automatic(self):
         stops = (SKILL_DIR / "lanes" / "stops.md").read_text()
         line = next(l for l in stops.splitlines() if l.startswith("- **Wrong project:**"))
