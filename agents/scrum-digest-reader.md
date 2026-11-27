@@ -142,7 +142,7 @@ For `## Processes`, use `DIGEST_DIR/processes.md`:
 - Write one line per process that has runs or a changed file, in file order.
 - Read each changed file it names before writing the line.
 - Flag a `fail`, `error` or `alert` result, a run re-tried or re-run for one cause (one job or item run again, not one sweep that starts or resumes several jobs once each), a run far slower than its others, and a false alarm: its `false alarms` count, an E2E `loaded` run, or a backlog item the process filed whose job in `JOBS_DIR/../board.json` closed OBSOLETE or aborted.
-- A single resume after a stall that `## Stops` already counts, or a changed file with no runs (such as `windows/open.json`), is `flags: none`.
+- A single resume after a stall that `## Stops` already counts, a changed file with no runs (such as `windows/open.json`), or a Stuck alert sent again for one reason 3 h or more after its last text (serve.py `STUCK_ALERT_REPEAT_S`, the designed reminder while the cause holds) is `flags: none`.
 - Write `None` when the file is missing or no process has runs or a changed file.
 - This section is exempt from the 2 or more different jobs rule.
 
