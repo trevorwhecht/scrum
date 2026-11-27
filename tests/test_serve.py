@@ -1257,8 +1257,11 @@ class ServeTest(unittest.TestCase):
 
     def test_mark_ram_hold_skips_cpu_held(self):
         cpu, ram = self.held_job("Mark cpu", 2), self.held_job("Mark ram", 2)
-        for job_id in (cpu, ram):
-            self.edit_job(job_id, queued_launch={"action": "start", "prompt": "p", "stage": "needs-human"})
+        # Job 1659: edit_job rewrites board.json with no lock, so a late background write under full-suite load could
+        # drop queued_launch (cpu then reads as RAM-held); set it under the board lock like gate_job does.
+        with self.serve.board.locked_board(self.root) as data:
+            for job_id in (cpu, ram):
+                self.serve.board.find(data, job_id)["queued_launch"] = {"action": "start", "prompt": "p", "stage": "needs-human"}
         self.gates_file(cpu).write_text("cpu_load(600%)\n")
         self.gates_file(ram).write_text("ram_room(free=5%)\n")
         with mock.patch.object(self.serve.board, "session_ages", return_value=[500] * 3), \
