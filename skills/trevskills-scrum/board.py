@@ -866,10 +866,32 @@ def drop_spec(root, text, items):
         spec_path(root, text).unlink(missing_ok=True)
 
 
+def spec_stale(root, spec):
+    """True when `git log origin/<default> --since=<spec mtime>` in the repo above root lists a commit touching a backticked
+    path under the spec's `## Likely files`: the change may already have shipped. Any git failure or no such path: False."""
+    paths = sorted(likely_files(spec.read_text(encoding="utf-8", errors="replace")))
+    if not paths:
+        return False
+    repo = Path(root).parent
+    try:
+        ref = _git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").decode().strip()
+    except (ValueError, OSError, subprocess.SubprocessError):
+        ref = "origin/main"
+    try:
+        out = _git(repo, "log", "--format=%H", f"--since={int(spec.stat().st_mtime)}", ref, "--", *paths)
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return False
+    return bool(out.strip())
+
+
 def take_spec(root, text, job_id):
-    """Move the item's pre-written spec, if any, to the new job's spec.md. Caller holds the lock."""
+    """Move the item's pre-written spec, if any, to the new job's spec.md. Caller holds the lock. A spec whose Likely files
+    gained a commit on the default branch since it was written is dropped instead (spec_stale), so the spec writer writes a fresh one."""
     src = spec_path(root, text)
     if src.is_file():
+        if spec_stale(root, src):
+            src.unlink()
+            return
         dst = Path(root) / "jobs" / job_id / "spec.md"
         os.replace(src, dst)
         os.utime(dst)  # os.replace keeps the triager's mtime; _timing_row starts Queue at spec.md's, so stamp the take time

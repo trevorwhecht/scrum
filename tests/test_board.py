@@ -6097,6 +6097,40 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(cells[3], "0m")  # from the take, not 21 min earlier
         self.assertNotIn("unnamed", cells[4])
 
+    def _spec_repo(self, spec_text, commit_at):
+        repo = self.root.parent
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@t", "GIT_COMMITTER_DATE": f"{commit_at} +0000", "GIT_AUTHOR_DATE": f"{commit_at} +0000"}
+        run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], env=env, check=True, capture_output=True)
+        run("init", "-q")
+        (repo / "a.py").write_text("x\n")
+        (repo / "b.py").write_text("x\n")
+        run("add", "a.py", "b.py")
+        run("commit", "-q", "-m", "touch a")
+        run("update-ref", "refs/remotes/origin/main", "HEAD")
+        (self.root / "backlog-specs").mkdir(parents=True, exist_ok=True)
+        src = board.spec_path(self.root, "Item")
+        src.write_text(spec_text)
+        (self.root / "jobs/j").mkdir(parents=True, exist_ok=True)
+        os.utime(src, (1_700_000_000, 1_700_000_000))
+        return src
+
+    def test_take_spec_skips_spec_with_newer_commit_on_likely_file(self):
+        src = self._spec_repo("## Likely files\n- `a.py`\n", 1_700_001_000)
+        board.take_spec(self.root, "Item", "j")
+        self.assertFalse((self.root / "jobs/j/spec.md").exists())
+        self.assertFalse(src.exists())
+
+    def test_take_spec_takes_spec_when_newer_commit_is_elsewhere_or_older(self):
+        self._spec_repo("## Likely files\n- `b.py`\n", 1_699_000_000)  # commit older than the spec
+        board.take_spec(self.root, "Item", "j")
+        self.assertEqual((self.root / "jobs/j/spec.md").read_text(), "## Likely files\n- `b.py`\n")
+
+    def test_take_spec_takes_spec_when_newer_commit_touches_no_likely_file(self):
+        self._spec_repo("## Likely files\n- `c.py`\n", 1_700_001_000)  # a.py/b.py changed after, c.py never
+        board.take_spec(self.root, "Item", "j")
+        self.assertTrue((self.root / "jobs/j/spec.md").is_file())
+
     def test_timing_needs_human_after_last_round_is_human_wait(self):
         t0 = 1_700_000_000
         for at, rel in ((0, "feature.md"), (0, "spec.md"), (3600, "round-1/head.txt")):
