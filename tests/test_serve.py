@@ -10075,6 +10075,28 @@ class SweepParentsHeldTest(unittest.TestCase):
             self.serve.sweep_parents("p", self.root, self.jobs, alive=lambda: (lambda j: True), claim=True)
         self.assertEqual(self.gates("002-kid"), {})
 
+    def bigboy(self, kid_stage):
+        self.jobs[0].update(lane="bigboy", reason=None)
+        self.jobs[2]["stage"] = kid_stage
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+
+    def test_bigboy_running_sibling_notes_bigboy_sibling_gate(self):
+        self.bigboy("build")
+        with mock.patch.object(self.serve, "start_ready") as ready, \
+                mock.patch.object(self.serve, "respawn_orphans", return_value=False):
+            self.serve.sweep_parents("p", self.root, self.jobs, alive=lambda: (lambda j: True), claim=True)
+        ready.assert_not_called()
+        self.assertIn("bigboy_sibling:003-kid", self.gates("002-kid"))
+        self.assertEqual(self.gates("003-kid"), {})
+
+    def test_bigboy_no_child_in_progress_starts_ready_and_notes_no_sibling_gate(self):
+        self.bigboy("done")
+        with mock.patch.object(self.serve, "start_ready") as ready, \
+                mock.patch.object(self.serve, "respawn_orphans", return_value=False):
+            self.serve.sweep_parents("p", self.root, self.jobs, alive=lambda: (lambda j: False), claim=True)
+        ready.assert_called_once()
+        self.assertFalse([g for g in self.gates("002-kid") if g.startswith("bigboy_sibling")])
+
     def set_reason(self, reason):
         self.jobs[0]["reason"] = reason
         (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
