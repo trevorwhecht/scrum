@@ -6641,7 +6641,7 @@ def points_in(out):
 
 
 def run_estimate(argv, root, env):
-    """One cloud estimate attempt (the prompt goes right after -p: --allowedTools takes every value after it, so a
+    """One cloud estimate attempt (the prompt goes right after -p: --tools takes every value after it, so a
     prompt placed later is swallowed as a tool name): its points JSON, or None (no JSON, timeout, OSError)."""
     try:
         return points_in(subprocess.run(argv, cwd=root.parent, capture_output=True, text=True, timeout=180,
@@ -6653,7 +6653,7 @@ def run_estimate(argv, root, env):
 def estimate(root, text):
     """One cloud Sonnet attempt, logged to root/routing.log. On any failure the item just stays unestimated (no retry).
     Returns True when points landed."""
-    argv = [CLAUDE, "-p", ESTIMATE_PROMPT.format(text=text), "--model", "sonnet", "--allowedTools", "Read,Grep,Glob"]
+    argv = [CLAUDE, "-p", ESTIMATE_PROMPT.format(text=text), "--model", "sonnet", "--tools", "Read,Grep,Glob"]  # --tools removes Edit/Write/Bash; --allowedTools only skips their prompt (job 1644)
     start = time.monotonic()
     data = run_estimate(argv, root, dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1"))
     try:
