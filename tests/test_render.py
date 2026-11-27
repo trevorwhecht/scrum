@@ -36,6 +36,14 @@ CLICK_PAGES = {
     "/click-two": b"<!doctype html><title>c</title><button id=first onclick=\"fetch('/hit-first');"
                   b"document.body.insertAdjacentHTML('beforeend','<button id=second onclick=&quot;fetch(\\'/hit-second\\')"
                   b"&quot;>Two</button>')\">One</button>",
+    "/click-hidden-first": b"<!doctype html><title>c</title><button class=b style=\"display:none\">No</button>"
+                           b"<button class=b onclick=\"document.title='clicked'\">Yes</button>",
+    "/click-all-hidden": b"<!doctype html><title>c</title><button class=b style=\"display:none\">No</button>"
+                         b"<button class=b style=\"display:none\">No2</button>",
+    "/click-console": b"<!doctype html><title>c</title><button id=go onclick=\"console.warn('careful');"
+                      b"console.error('click boom')\">Go</button>",
+    "/click-throw": b"<!doctype html><title>c</title><button id=go onclick=\"setTimeout(() => {throw new Error('late')})\">"
+                    b"Go</button>",
 }
 REDIRECTS = {"/q?view=leads": "/q?view=orders", "/a": "/other", "/t/": "/t"}
 
@@ -555,6 +563,40 @@ class RenderChromeTest(unittest.TestCase):
         self.assertEqual((page["status"], page["clicks"], page["shots"]),
                          ("click_failed", ["#nope"], ["click-modal-390.png", "click-modal-1440.png"]))
         self.assertFalse(list(self.out.glob("*clicked*")))
+
+    def _click_page(self, path, sel):
+        code, _, err = run_chrome([self.url, str(self.out), "--click", f"{path}={sel}", path])
+        self.assertEqual(code, 0, err)
+        return json.loads((self.out / "manifest.json").read_text())["pages"][0]
+
+    def test_click_skips_hidden_first_match(self):
+        page = self._click_page("/click-hidden-first", ".b")
+        self.assertEqual(page["status"], "ok")
+        self.assertTrue((self.out / "click-hidden-first-clicked-390.png").exists())
+
+    def test_click_all_matches_hidden(self):
+        page = self._click_page("/click-all-hidden", ".b")
+        self.assertEqual((page["status"], len(page["shots"])), ("click_failed", 2))
+        self.assertFalse(list(self.out.glob("*clicked*")))
+
+    def test_click_bad_selector(self):
+        page = self._click_page("/click-modal", "#a[")
+        self.assertEqual(page["status"], "click_failed")
+        self.assertFalse(list(self.out.glob("*clicked*")))
+
+    def test_click_console_error_counted(self):
+        page = self._click_page("/click-console", "#go")
+        self.assertEqual((page["status"], page["console_errors"]), ("ok", 2))
+        lines = (self.out / "console.log").read_text().splitlines()
+        self.assertIn("/click-console 390 warning: careful", lines)
+        self.assertIn("/click-console 390 error: click boom", lines)
+        self.assertIn("/click-console 1440 error: click boom", lines)
+
+    def test_click_exception_counted(self):
+        page = self._click_page("/click-throw", "#go")
+        self.assertEqual(page["console_errors"], 2)
+        lines = (self.out / "console.log").read_text().splitlines()
+        self.assertTrue(any(l.startswith("/click-throw 390 error: Error: late") for l in lines), lines)
 
     def test_cookie_file_missing_is_noted(self):
         missing = Path(self.tmp.name) / "auth.json"
