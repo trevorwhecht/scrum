@@ -31,8 +31,8 @@ import json, os, sys
 with open(os.environ["STUB_LOG"], "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")
 args = sys.argv[1:]
-# Like the real CLI, --allowedTools takes every value after it, so a prompt placed after it is lost.
-if "--allowedTools" in args and any("estimating" in a for a in args[args.index("--allowedTools"):]):
+# Like the real CLI, --tools takes every value after it, so a prompt placed after it is lost.
+if "--tools" in args and any("estimating" in a for a in args[args.index("--tools"):]):
     sys.exit("Error: Input must be provided either through stdin or as a prompt argument when using --print")
 if any("estimating" in a for a in sys.argv):
     if not (os.environ.get("STUB_LOCAL_FAILS") and os.environ.get("ANTHROPIC_BASE_URL")):
@@ -3886,7 +3886,7 @@ class ServeTest(unittest.TestCase):
         chat.assert_not_called()
         self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] [5] Cloud item <!-- several files -->\n")
         [argv] = self.stub_calls_for("Cloud item")
-        self.assertEqual([argv[0], *argv[2:]], ["-p", "--model", "sonnet", "--allowedTools", "Read,Grep,Glob"])
+        self.assertEqual([argv[0], *argv[2:]], ["-p", "--model", "sonnet", "--tools", "Read,Grep,Glob"])
         self.assertEqual(self.routing_lines(scrum), [{"role": "estimator", "runner": "cloud", "model": "-", "outcome": "ok"}])
 
     def test_estimate_makes_only_read_tools_available(self):
