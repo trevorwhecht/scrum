@@ -110,6 +110,63 @@ class RunTest(ShopCase):
         self.assertEqual((r.stdout, r.stderr), ("ok�", "�"))
 
 
+class UnreachableWorkerTest(ShopCase):
+    """Job 1650: the first failed ssh marks the worker down, so later steps cost no ssh call."""
+    UP_CACHED = {"up": True, "load": 1.0, "tools": {t: True for t in shop.TOOLS}}
+
+    def hang(self):
+        self.ssh = []
+
+        def fake(argv, **kw):
+            self.ssh.append(argv[6])
+            raise subprocess.TimeoutExpired(argv, kw["timeout"])
+        self.sp.side_effect = fake
+
+    def test_timeout_counts_as_unreachable(self):
+        shop._cache["shopmac"] = (time.monotonic(), self.UP_CACHED)
+        self.hang()
+        self.assertEqual(shop.run("true", 5, alias="shopmac").returncode, 124)
+        self.assertFalse(shop._cache["shopmac"][1]["up"])
+        self.assertEqual(shop.run("true", 5, alias="shopmac").returncode, 255)
+        self.assertEqual(len(self.ssh), 1)
+
+    def test_ssh_failure_and_start_failure_count_as_unreachable(self):
+        for how in (subprocess.CompletedProcess([], 255, b"", b"refused"), FileNotFoundError("ssh")):
+            with self.subTest(how=how):
+                shop._cache.clear()
+                self.sp.reset_mock()
+                self.sp.side_effect = [how] if isinstance(how, BaseException) else None
+                self.sp.return_value = how
+                shop.run("true", 5, alias="shopmac")
+                self.assertFalse(shop._cache["shopmac"][1]["up"])
+
+    def test_remote_127_leaves_worker_up(self):
+        shop._cache["shopmac"] = (time.monotonic(), self.UP_CACHED)
+        self.answer(127, b"", b"gh: not found")
+        self.assertEqual(shop.run("gh x", 5, alias="shopmac").returncode, 127)
+        self.assertTrue(shop._cache["shopmac"][1]["up"])
+
+    def test_midpass_ssh_failure_stops_later_steps(self):
+        shop._cache["shopmac"] = (time.monotonic(), self.UP_CACHED)
+        self.hang()
+        self.assertFalse(shop.ready("shopmac")["ready"])
+        shop.run("git clone x", 60, alias="shopmac")
+        self.assertEqual(len(self.ssh), 1, self.ssh)
+
+    def test_backoff_after_unreachable_worker(self):
+        shop._cache["shopmac"] = (time.monotonic(), self.UP_CACHED)
+        self.hang()
+        shop.run("x", 5, alias="shopmac")
+        self.assertFalse(shop.probe("shopmac")["up"])  # cached down: no probe ssh within DOWN_TTL
+        self.assertEqual(len(self.ssh), 1)
+
+    def test_recovered_worker_dispatches(self):
+        shop._cache["shopmac"] = (time.monotonic() - shop.DOWN_TTL - 1, {"up": False, "load": None, "tools": {}})
+        self.answer(0, b"{ 1.00 0.50 0.25 }\n4\n")
+        self.assertTrue(shop.probe("shopmac")["up"])
+        self.assertEqual(shop.run("true", 5, alias="shopmac").returncode, 0)
+
+
 class UnittestGuardTest(unittest.TestCase):
     def test_real_run_never_starts_ssh_under_unittest(self):
         # No ShopCase patch here: a watchdog test that reaches shop_tick must never ssh the real shop Mac.

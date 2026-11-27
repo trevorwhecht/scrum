@@ -279,6 +279,12 @@ _ready = {}  # alias -> (time.monotonic() of the ready() check, its result)
 REAL_RUN = subprocess.run  # run() refuses ssh under unittest unless a test replaced subprocess.run
 
 
+def _mark_down(alias: str) -> None:
+    """A timed-out or failed ssh: cache the worker down so later steps skip their own full timeout."""
+    _cache[alias] = (time.monotonic(), {"up": False, "load": None, "tools": {}})
+    _ready.pop(alias, None)
+
+
 def run(cmd: str, timeout: float, input: str | bytes | None = None, alias: str = ALIAS) -> subprocess.CompletedProcess:
     """Run `cmd` on worker `alias` (a ~/.ssh/config Host). Secrets go in `input` (stdin), never in `cmd`. stdout and
     stderr come back as str. An alias off PROJECT_RE (an ssh option, user@host) returns 127 with no ssh, and so does
@@ -288,14 +294,21 @@ def run(cmd: str, timeout: float, input: str | bytes | None = None, alias: str =
         return subprocess.CompletedProcess(argv, 127, "", "bad ssh alias")
     if "unittest" in sys.modules and subprocess.run is REAL_RUN:  # a watchdog test must never dispatch to the real shop
         return subprocess.CompletedProcess(argv, 127, "", "ssh refused under unittest")
+    hit = _cache.get(alias)
+    if cmd != PROBE_CMD and hit and not hit[1]["up"] and time.monotonic() - hit[0] < DOWN_TTL:
+        return subprocess.CompletedProcess(argv, 255, "", "worker marked down")  # one failed call per outage
     feed = {"stdin": subprocess.DEVNULL} if input is None else {
         "input": input.encode("utf-8") if isinstance(input, str) else input}
     try:
         r = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, **feed)
     except subprocess.TimeoutExpired:
+        _mark_down(alias)
         return subprocess.CompletedProcess(argv, 124, "", f"ssh {alias} timed out after {timeout} s")
     except OSError as e:
+        _mark_down(alias)
         return subprocess.CompletedProcess(argv, 127, "", f"ssh {alias} could not start: {e}")
+    if r.returncode == 255:  # ssh's own failure; a remote command's 127 (gh missing) leaves a live worker up
+        _mark_down(alias)
     return subprocess.CompletedProcess(argv, r.returncode, r.stdout.decode("utf-8", "replace"),
                                        r.stderr.decode("utf-8", "replace"))
 
@@ -420,8 +433,11 @@ def _install(check: str, install: str, alias: str) -> tuple[str, str]:
 
 def _jev_key(alias: str) -> tuple[str, str]:
     """Pipe this Mac's Keychain TypeSafe key into the shop's JEV_KEY_FILE on stdin, unless that file is non-empty."""
-    if run(f'[ -s "{JEV_KEY_FILE}" ]', STEP_TIMEOUT, alias=alias).returncode == 0:
+    r = run(f'[ -s "{JEV_KEY_FILE}" ]', STEP_TIMEOUT, alias=alias)
+    if r.returncode == 0:
         return "ok", ""
+    if r.returncode in (124, 255):  # worker unreachable: no Keychain read for a key it cannot receive
+        return _done(r)
     key, note = _local_secret(JEV_KEYCHAIN)
     return _done(run(JEV_KEY_WRITE, STEP_TIMEOUT, input=key, alias=alias)) if key else ("failed", note)
 
