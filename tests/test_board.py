@@ -5011,7 +5011,7 @@ class BoardTest(unittest.TestCase):
         """job 1634: a reopened job's feature.md names the old job's points; none means no Points line."""
         old = board.cmd_new(self.root, "Sized one")
         board.cmd_set(self.root, old, ["stage=done"])
-        (self.root / "backlog.md").write_text("- [x] Sized one. (2 points) \u2192 001-sized-one\n")
+        (self.root / "backlog.md").write_text("- [x] [2] Sized one \u2192 001-sized-one\n")
         self.write(f"{old}/feature.md", "Do it\n")
         new = board.cmd_reopen(self.root, old, "Again")
         feature = (self.root / "jobs" / new / "feature.md").read_text()
