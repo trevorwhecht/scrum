@@ -10808,6 +10808,14 @@ class UiSweepScreensTest(unittest.TestCase):
                 "- the Leads table\n\n## Merge summary\nTitle: t\n- /y — nor this\n")
         self.assertEqual(board.ui_sweep_screens(text), [("/leads", "rows 160 px tall"), ("the Leads table", "")])
 
+    def test_indented_sub_bullets_join_the_why(self):
+        text = ("APPROVE\n## UI sweep\n- /admin/dashboard?view=leads — two things to look at again:\n"
+                "  - at 390 px the rows wrap\n  - at 1440 px the header clips\n- /y — z\n## Merge summary\n")
+        self.assertEqual(board.ui_sweep_screens(text), [
+            ("/admin/dashboard?view=leads",
+             "two things to look at again: at 390 px the rows wrap at 1440 px the header clips"),
+            ("/y", "z")])
+
     def test_missing_empty_none(self):
         self.assertEqual(board.ui_sweep_screens("APPROVE\n## Merge summary\n- /a — b\n"), [])
         self.assertEqual(board.ui_sweep_screens("APPROVE\n## UI sweep\n\n## Merge summary\n"), [])
