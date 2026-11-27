@@ -4714,12 +4714,19 @@ PR_SUBJECT_RE = re.compile(r"\(#(\d+)\)\s*$")
 
 def ui_sweep_screens(text) -> list[tuple[str, str]]:
     """decision.md's `## UI sweep` bullets as [(screen, why)]; `- <screen>` alone gives why "". [] when the section is
-    missing, empty or only `- none`."""
-    out = []
+    missing, empty or only `- none`. A `- ` line indented deeper than the bullet above it is a note on that screen:
+    its text joins that bullet's why with a space, never a screen of its own."""
+    out, indent = [], 0
     for line in (md_section(text, "UI sweep") or "").splitlines():
-        if (m := re.match(r"^\s*-\s+(.+?)\s*$", line)) and m[1].lower() != "none":
-            screen, _, why = m[1].partition(" — ")
-            out.append((screen.strip(), why.strip()))
+        if not (m := re.match(r"^(\s*)-\s+(.+?)\s*$", line)) or m[2].lower() == "none":
+            continue
+        if out and len(m[1]) > indent:
+            screen, why = out[-1]
+            out[-1] = (screen, f"{why} {m[2]}".strip())
+            continue
+        indent = len(m[1])
+        screen, _, why = m[2].partition(" — ")
+        out.append((screen.strip(), why.strip()))
     return out
 
 
