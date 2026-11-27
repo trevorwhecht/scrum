@@ -3051,6 +3051,14 @@ class ContractTest(unittest.TestCase):
         self.assertLess(lane.index("render.py"), lane.index("Spawn `scrum-review-ui`"))
         self.assertLess(lane.index("Spawn `scrum-review-ui`"), lane.index("Run `B ui-sweep-record"))
 
+    def test_uisweep_render_click(self):
+        lane = (SKILL_DIR / "lanes" / "uisweep.md").read_text()
+        step2 = next(l for l in lane.splitlines() if l.startswith("2. **Render.**"))
+        for phrase in ("`--click <path>=<selector>`", "a state behind a click (a modal, popover or switch)",
+                       "`aria-label`, `data-testid` or role", "`<slug>-clicked-<width>.png`",
+                       "`click_failed`", "- Unrendered: <path> — click_failed: <selector>"):
+            self.assertIn(phrase, step2, phrase)
+
     def test_approver_retro_p1_blocked_render_never_hard_stop(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
         rule = next(l for l in text.splitlines() if l.startswith("**UI must be rendered.**"))
