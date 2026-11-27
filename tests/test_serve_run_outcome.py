@@ -169,9 +169,13 @@ class BoardGetAndDiscussTest(unittest.TestCase):
         stub.chmod(0o755)
         proc = subprocess.Popen([str(stub), f"/trevskills-scrum discuss {job_id}"])  # argv as the Terminal window has it
         self.addCleanup(lambda: proc.poll() is None and proc.kill())
-        time.sleep(0.2)
         with mock.patch.object(serve, "DISCUSS_GRACE", 0):
-            entry = [e for e in self.get("/api/runs") if e["id"] == job_id]
+            deadline = time.time() + 30  # wait for the condition, never a fixed sleep
+            while True:
+                entry = [e for e in self.get("/api/runs") if e["id"] == job_id]
+                if entry or time.time() > deadline:
+                    break
+                time.sleep(0.05)
             self.assertEqual([(e["project"], e["action"], e["alive"]) for e in entry], [("repo", "discuss", True)])
             self.assertTrue(before <= entry[0]["started"] <= after)
             proc.kill()
