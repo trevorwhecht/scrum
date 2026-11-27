@@ -1124,6 +1124,7 @@ def cmd_reopen(root, job_id, note):
     """Start a new job that follows up a done or aborted one; its feature.md carries the old job's context."""
     old_dir = Path(root) / "jobs" / check_id(job_id)
     note = clean(note, ITEM_MAX)
+    points = _job_points(root, job_id)  # job 1634: carried so the new job is not read as a heavy no-points job
     with locked_board(root) as board:
         old = find(board, job_id)
         if old["stage"] not in ("done", "aborted"):
@@ -1137,6 +1138,7 @@ def cmd_reopen(root, job_id, note):
         parts = [("feature.md", read("feature.md")), ("spec.md", read("spec.md")),
                  ("Merge summary", decision and merge_summary(decision))]
         text = f"{note}\nReopened from {job_id}." + (f" PR: {old['pr']}" if old.get("pr") else "") + "\n" \
+            + (f"Points: {points}\n" if points is not None else "") \
             + "".join(f"\n## Original {name}\n\n{body}\n" for name, body in parts if body)
         new_id = add_job(root, board, f"Reopen {job_id.split('-')[0]}: {note}"[:60])
         (Path(root) / "jobs" / new_id / "feature.md").write_text(text)
