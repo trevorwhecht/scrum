@@ -5007,6 +5007,24 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((self.root / "jobs" / new2 / "feature.md").read_text(),
                          "Try again\nReopened from 003-aborted-one.\n\n## Original feature.md\n\nTry a thing\n")
 
+    def test_reopen_carries_points_so_it_is_not_heavy(self):
+        """job 1634: a reopened job's feature.md names the old job's points; none means no Points line."""
+        old = board.cmd_new(self.root, "Sized one")
+        board.cmd_set(self.root, old, ["stage=done"])
+        (self.root / "backlog.md").write_text("- [x] Sized one. (2 points) \u2192 001-sized-one\n")
+        self.write(f"{old}/feature.md", "Do it\n")
+        new = board.cmd_reopen(self.root, old, "Again")
+        feature = (self.root / "jobs" / new / "feature.md").read_text()
+        self.assertEqual(feature.splitlines()[:3], ["Again", f"Reopened from {old}.", "Points: 2"])
+        self.assertEqual(board._job_points(self.root, new), 2)
+        job = board.find(board.read_board(self.root), new)
+        self.assertEqual(job["stage"], "queued")
+        self.assertFalse(board.heavy_job(self.root, job))
+        bare = board.cmd_new(self.root, "Unsized one")
+        board.cmd_set(self.root, bare, ["stage=done"])
+        new2 = board.cmd_reopen(self.root, bare, "Again")
+        self.assertNotIn("Points:", (self.root / "jobs" / new2 / "feature.md").read_text())
+
     def test_reopen_refuses(self):
         live_job = board.cmd_new(self.root, "still going")
         board.cmd_set(self.root, live_job, ["stage=review"])
