@@ -127,6 +127,7 @@ For `## Time sinks`, use `DIGEST_DIR/timing.md`. Group the time lost by cause: E
 - Leave out the whole Queue of a job whose `JOBS_DIR/../board.json` entry lists `depends_on`, whose Queue cell has no `after depends_on` part, and whose Queue gate is `-` or only `depends_on:<id>` and `runs_alone:<id>` tokens naming jobs in that list, plus any `unnamed <m>`.
 - Leave out the round times of a job whose board.json entry has `autoPlayed: true`: it sat paused from the dashboard until serve.py's auto_play played it, so that time was a choice, not lost.
 - Leave out the round times of a job whose board.json entry has a `shop` field: its files came home in one cloud-home copy, so those cells end at that copy, not at each stage's end (job 1171); its Spec ends at the dispatch and its `Cloud` cell is the whole shop run, never a time sink.
+- Leave out `shop_unready:<alias>` minutes: serve.py `shop_tick` notes the gate only on a job this Mac's own gates already held, so its minutes overlap those gates, and a down shop Mac is the Stuck alert's job (digests 179 to 181).
 - Round 1's time starts at the build start, so it holds the builder's run: call a long round 1 a long build, never a long review round, and leave it out when that job's `## Token sinks` line says `needed` (job 1362).
 - Keep a cause only when it cost 3 or more different jobs or more than about 1 h in total.
 - Sort by count, highest first. Write `None` when no cause qualifies or the file is missing.
