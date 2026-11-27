@@ -10134,6 +10134,35 @@ class SweepParentsHeldTest(unittest.TestCase):
         self.assertIn("claim_off", self.gates("002-kid"))
         self.assertEqual(self.gates("003-kid"), {})
 
+    def test_claim_off_tick_names_the_cause_job(self):
+        """Job 1638: a claim=False tick whose cause is a known job notes claim_off:<id>, not the bare token."""
+        self.set_reason(None)
+        with mock.patch.object(self.serve, "start_ready"), mock.patch.object(self.serve, "respawn_orphans", return_value=False):
+            self.serve.sweep_parents("p", self.root, self.jobs, alive=lambda: (lambda j: True), claim=False,
+                                     cause="2082-stalled")
+        self.assertIn("claim_off:2082-stalled", self.gates("002-kid"))
+        self.assertNotIn("claim_off", self.gates("002-kid"))
+
+    def test_auto_resume_wait_keeps_first_stalled_job_as_claim_off_cause(self):
+        """Job 1638: inside a tick, auto_resume waiting on a stalled solo-wait job keeps its id; a later job never replaces it."""
+        s = self.serve
+        stalled = [{"id": f"20{n}-stalled", "title": "S", "stage": "check", "lane": "fast",
+                    "reason": self.board.STALL + self.board.LOAD_SOLO_WAIT, "updatedAt": self.board.now()} for n in (1, 2)]
+        for j in stalled:
+            (self.root / "jobs" / j["id"]).mkdir(parents=True)
+        with mock.patch.object(s, "CLAIM_OFF_BY", []), mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s.board, "stalled", return_value=True), \
+                mock.patch.object(s.board, "live_sessions", return_value=1), \
+                mock.patch.object(s, "note_stall_hold"):
+            busy = s.auto_resume("p", self.root, stalled)
+            self.assertTrue(busy)
+            self.assertEqual(s.CLAIM_OFF_BY, ["201-stalled"])
+
+    def test_claim_cause_is_a_no_op_outside_a_tick(self):
+        self.assertIsNone(self.serve.CLAIM_OFF_BY)
+        self.serve.claim_cause("x")
+        self.assertIsNone(self.serve.CLAIM_OFF_BY)
+
     def test_claim_off_idle_parent_notes_claim_off(self):
         self.set_reason(None)
         self.jobs[2]["stage"] = "done"

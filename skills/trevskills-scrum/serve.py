@@ -754,6 +754,15 @@ RESUME_ROOM: int | None = None  # watchdog_tick's per-tick resume budget (board.
 E2E_RESUMED: bool | None = None  # one E2E-queue resume per watchdog_tick across projects; None outside a tick = one per call
 RESUME_ONLY: tuple[str, str] | None = None  # (resolved scrum path, job id) of the queued solo holder (resume_budget):
 # only its own queued launch may spend RESUME_ROOM; None = any job may
+CLAIM_OFF_BY: list[str] | None = None  # job 1638: inside a tick, the id of the first job whose resume or Play wait, or auto_play start, turned the claim off ([] until then); None outside a tick
+
+
+def claim_cause(job_id) -> None:
+    """Keep job_id as the first job that turned this tick's claim off (CLAIM_OFF_BY); a no-op outside a tick or once one is kept."""
+    if CLAIM_OFF_BY is not None and not CLAIM_OFF_BY and job_id:
+        CLAIM_OFF_BY.append(str(job_id))
+
+
 MACHINE_WHY: str | None = None  # job 1540: the board.machine_ok refusal that zeroed this tick's RESUME_ROOM, None when clear
 
 
@@ -939,6 +948,8 @@ def play_queue_tick(project, root, jobs) -> bool:
         manual = bool(job.get("play_queued_manual"))
         if job.get("queued_launch"):
             result = launch_queued(project, root, job, jobs)
+            if result in ("stop", "waits", "started"):
+                claim_cause(job["id"])
             if result == "stop":
                 return True
             waits = waits or result == "waits"
@@ -955,9 +966,11 @@ def play_queue_tick(project, root, jobs) -> bool:
         if refusal:
             continue
         if not take_room() or not resume_job(project, root, job, jobs, manual=manual):
+            claim_cause(job["id"])
             mark_ram_hold(project, root, jobs)
             return True
         unqueue(root, job)
+        claim_cause(job["id"])
         started = True
     return started or waits
 
@@ -2526,7 +2539,12 @@ def auto_resume(project, root, jobs):
                     break
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 continue
+    prev_id, caused = None, False
     for job in jobs:
+        if busy and not caused:  # the previous job turned the claim off (job 1638)
+            caused = True
+            claim_cause(prev_id)
+        prev_id = job.get("id")
         if job.get("paused") or board.no_pr_job(job):  # an ops job has no worktree or builder: never resumed (lanes/ops.md)
             continue
         if job.get("limitResetAt") and job["stage"] in board.WATCHED:
@@ -2692,6 +2710,8 @@ def auto_resume(project, root, jobs):
             continue
         AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
         resume_job(project, root, job, jobs)
+    if busy and not caused:
+        claim_cause(prev_id)
     return busy
 
 
@@ -3615,7 +3635,12 @@ def parked_parent(project, root, job, by_id, alive):
     return ids
 
 
-def sweep_parents(project, root, jobs, alive=None, claim=True):
+def claim_off_gate(cause) -> str:
+    """The gate token for a claim=False tick: claim_off:<job id> when claim_cause kept one, else bare claim_off (job 1638)."""
+    return f"claim_off:{cause}" if cause else "claim_off"
+
+
+def sweep_parents(project, root, jobs, alive=None, claim=True, cause=None):
     """A Run-all/BigBoy run only moves when a child's session runs its chaining step. For each running runall/bigboy
     parent: respawn its orphaned children (respawn_orphans) unless a chaining session holds the lock. Then, with no
     child in progress: close a runall whose children all finished (a finished bigboy idle past ORPHAN_MINUTES, with no live chain
@@ -3625,7 +3650,8 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
     still in progress tops up its free slots each tick, unless a chaining session holds the lock. claim=False (this
     tick resumed or Played a job) skips both start_ready calls; everything else still runs. First, on every tick, a
     runall or bigboy parent whose reason starts with board.MACHINE_WAIT notes held_gate(reason less that prefix) on its ready waiting
-    children (note_held, text the full reason), so their held minutes keep running under GATE_HELD_GAP_SECS (job 1584)."""
+    children (note_held, text the full reason), so their held minutes keep running under GATE_HELD_GAP_SECS (job 1584).
+    A claim=False note names `cause`, the first job whose wait or start turned the claim off, as claim_off:<id> (job 1638)."""
     alive = alive or once(lambda: board.session_alive_fn())
     by_id = {j["id"]: j for j in jobs}
     for p in jobs:
@@ -3644,7 +3670,7 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
                 if not board.chain_lock_live(root, p["id"]) and claim:
                     start_ready(project, root, p["id"])  # top up free slots: cmd_ready applies the caps and file clashes
                 elif not machine_wait:  # a skipped top-up still names the wait (job 1604)
-                    note_held(root, "chain_lock" if claim else "claim_off", ready_waiting(root, p["id"]))
+                    note_held(root, "chain_lock" if claim else claim_off_gate(cause), ready_waiting(root, p["id"]))
             elif p["lane"] == "bigboy" and not machine_wait:  # only a runall tops up or notes; name the sibling wait (job 1635)
                 for k in kids:
                     if not board.idle(k):
@@ -3674,7 +3700,7 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
                 or any(running(project, k["id"]) for k in kids) or any(alive()(k) for k in kids) or not claim:
             if any(k.get("stage") == "waiting" for k in kids) and not machine_wait \
                     and (not claim or board.chain_lock_live(root, p["id"])):
-                note_held(root, "claim_off" if not claim else "chain_lock", ready_waiting(root, p["id"]))
+                note_held(root, claim_off_gate(cause) if not claim else "chain_lock", ready_waiting(root, p["id"]))
             continue
         start_ready(project, root, p["id"])
 
@@ -5132,6 +5158,7 @@ def auto_play(candidates: list[tuple[str, Path, dict, list[dict]]]) -> bool:
         if refusal:
             continue
         mark_auto_played(root, job)
+        claim_cause(job.get("id"))
         resume_job(project, root, job, jobs)
         if job.get("children") and not board.find(board.read_board(root), job["id"]).get("reason"):
             board.cmd_set(root, job["id"], [f"reason={AUTO_PLAYED}"], expect="running")
@@ -5292,7 +5319,8 @@ def watchdog_tick():
     guard; job 1312), then hard_stop_tick once (stops every scrum session on an account at board.HARD_STOP_PCT 7d, in
     its own guard; Trevor 2026-11-20). A no-git project (board.no_git, job 1362) runs every pass, and each git or gh
     pass returns early for it (main_ff_tick, e2e_full_tick, ui_sweep_tick, reclaim_disk, cloud_tick, actions_alert)."""
-    global RESUME_ROOM, E2E_RESUMED, RESUME_ONLY, MACHINE_WHY
+    global RESUME_ROOM, E2E_RESUMED, RESUME_ONLY, MACHINE_WHY, CLAIM_OFF_BY
+    CLAIM_OFF_BY = []
     try:
         board.record_cpu_sample()  # cpu_busy_pct's reading; first, so this tick's machine_ok sees it
     except (Exception, SystemExit) as e:
@@ -5411,6 +5439,8 @@ def watchdog_tick():
         except (Exception, SystemExit) as e:
             print(f"watchdog: auto play: {e}", file=sys.stderr, flush=True)
     claim = not pending and not played
+    cause = CLAIM_OFF_BY[0] if CLAIM_OFF_BY else None
+    CLAIM_OFF_BY = None
     for project, repo, root, jobs, flagged in seen:
         try:
             if claim:  # a flagged child frees its Run-all/BigBoy slot
@@ -5426,7 +5456,7 @@ def watchdog_tick():
                 except (Exception, SystemExit) as e:
                     print(f"watchdog: {project}: queue ready waiting: {e}", file=sys.stderr, flush=True)
             try:  # its own guard: a sweep failure must not skip the cloud poll
-                sweep_parents(project, root, jobs, alive, claim=claim)
+                sweep_parents(project, root, jobs, alive, claim=claim, cause=cause)
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
             cloud_tick(project, root, jobs)
