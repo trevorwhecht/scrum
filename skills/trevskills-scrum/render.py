@@ -374,6 +374,23 @@ def _busy(cdp: CDP) -> bool:
     return r.get("result", {}).get("value") is True
 
 
+def _log_console(ev: dict, path: str, width: int, log) -> int:
+    """Write a console error/warning or uncaught exception event to log as `<path> <width> <level>: <text>`;
+    1 for an error line, else 0 (other events are ignored)."""
+    m, p, line = ev.get("method"), ev.get("params", {}), None
+    if m == "Runtime.consoleAPICalled" and p.get("type") in ("error", "warning"):
+        line = (p["type"], _text(p))
+    elif m == "Runtime.exceptionThrown":
+        d = p.get("exceptionDetails", {})
+        line = ("error", d.get("exception", {}).get("description") or d.get("text", ""))
+    elif m == "Log.entryAdded" and p.get("entry", {}).get("level") == "error":
+        line = ("error", p["entry"].get("text", ""))
+    if not line:
+        return 0
+    log.write(f"{path} {width} {line[0]}: {' '.join(line[1].split())}\n")
+    return int(line[0] == "error")
+
+
 def _load(cdp: CDP, url: str, path: str, width: int, mobile: bool, deadline: float, log) -> dict:
     """Load url at width; {"status", "http_status", "final_url", "errors"}. Console lines go to log."""
     cdp.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": HEIGHT, "deviceScaleFactor": 1,
@@ -387,7 +404,6 @@ def _load(cdp: CDP, url: str, path: str, width: int, mobile: bool, deadline: flo
     def handle(ev):
         nonlocal loaded, last
         m, p = ev.get("method"), ev.get("params", {})
-        line = None
         if m == "Page.loadEventFired" and loaded is None:
             loaded = last = time.monotonic()
         elif m == "Network.requestWillBeSent":
@@ -398,16 +414,8 @@ def _load(cdp: CDP, url: str, path: str, width: int, mobile: bool, deadline: flo
             last = time.monotonic()
         elif m == "Network.responseReceived" and p.get("type") == "Document" and p.get("frameId") == frame:
             res["http_status"] = p.get("response", {}).get("status")
-        elif m == "Runtime.consoleAPICalled" and p.get("type") in ("error", "warning"):
-            line = (p["type"], _text(p))
-        elif m == "Runtime.exceptionThrown":
-            d = p.get("exceptionDetails", {})
-            line = ("error", d.get("exception", {}).get("description") or d.get("text", ""))
-        elif m == "Log.entryAdded" and p.get("entry", {}).get("level") == "error":
-            line = ("error", p["entry"].get("text", ""))
-        if line:
-            res["errors"] += line[0] == "error"
-            log.write(f"{path} {width} {line[0]}: {' '.join(line[1].split())}\n")
+        else:
+            res["errors"] += _log_console(ev, path, width, log)
 
     while True:
         now = time.monotonic()
@@ -443,26 +451,31 @@ def _route(url: str) -> tuple[str, str]:
 RANK = {"ok": 0, "redirected": 1, "http_error": 2, "click_failed": 3, "timeout": 4}
 
 CLICK_JS = """(() => {{
-  let e; try {{ e = document.querySelector({sel}); }} catch (x) {{ return false; }}
-  if (!e || e.getClientRects().length === 0) return false;
+  let e; try {{ e = [...document.querySelectorAll({sel})].find(n => n.getClientRects().length > 0); }}
+  catch (x) {{ return false; }}
+  if (!e) return false;
   e.click(); return true;
 }})()"""
 
 
 def _click(cdp: CDP, selector: str) -> bool:
-    """Click the first element matching selector when it is visible; False when there is none or the selector is bad."""
+    """Click the first visible element matching selector; False when there is none or the selector is bad."""
     r = cdp.call("Runtime.evaluate", {"expression": CLICK_JS.format(sel=json.dumps(selector)), "returnByValue": True},
                  timeout=10)
     return r.get("result", {}).get("value") is True
 
 
-def _settle(cdp: CDP, deadline: float):
-    """After a click: wait QUIET, then while a loading indicator shows (at most SETTLE_CAP s); events are dropped."""
+def _settle(cdp: CDP, deadline: float, path: str, width: int, log) -> int:
+    """After a click: wait QUIET, then while a loading indicator shows (at most SETTLE_CAP s); console lines raised
+    meanwhile go to log like _load's, other events are dropped. Returns the error count."""
     end = min(time.monotonic() + SETTLE_CAP, deadline)
     time.sleep(QUIET)
     while time.monotonic() < end and _busy(cdp):
         time.sleep(0.25)
-    cdp.events.clear()
+    errors = 0
+    while cdp.events:
+        errors += _log_console(cdp.events.popleft(), path, width, log)
+    return errors
 
 
 def render(url: str, out_dir: Path, paths: list[str], cookies: Path | None = None,
@@ -521,7 +534,7 @@ def render(url: str, out_dir: Path, paths: list[str], cookies: Path | None = Non
                                     if not _click(cdp, sel):
                                         res["status"] = "click_failed"
                                         break
-                                    _settle(cdp, deadline)
+                                    res["errors"] += _settle(cdp, deadline, path, width, log)
                                 else:
                                     shot = cdp.call("Page.captureScreenshot", {"format": "png"})["data"]
                                     name = f"{slug(path)}-clicked-{width}.png"
