@@ -3645,6 +3645,10 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
                     start_ready(project, root, p["id"])  # top up free slots: cmd_ready applies the caps and file clashes
                 elif not machine_wait:  # a skipped top-up still names the wait (job 1604)
                     note_held(root, "chain_lock" if claim else "claim_off", ready_waiting(root, p["id"]))
+            elif p["lane"] == "bigboy" and not machine_wait:  # only a runall tops up or notes; name the sibling wait (job 1635)
+                for k in kids:
+                    if not board.idle(k):
+                        note_held(root, f"bigboy_sibling:{k['id']}", ready_waiting(root, p["id"]))
             continue
         if finished_bigboy(p, by_id):
             # backstop for a missed chain-back: mark it MAIN_FF once it sits idle, so main_ff_tick resumes its final review
