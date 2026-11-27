@@ -327,6 +327,57 @@ class ClaudeMissingTest(AlertBase):
         probe.assert_not_called()
 
 
+class TailnetDownTest(AlertBase):
+    """Job 1652: tailnet_down_tick runs tailscale up once, then texts once, per episode."""
+
+    def setUp(self):
+        super().setUp()
+        self.ups = 0
+        q = mock.patch.object(serve, "TAILNET", {"mac.tail.ts.net"})
+        q.start()
+        self.addCleanup(q.stop)
+
+    def up(self):
+        self.ups += 1
+
+    def tick(self, state, now=1000.0):
+        return serve.tailnet_down_tick(now, state=lambda: state, up=self.up, send=self.send)
+
+    def record(self):
+        return Path(os.environ["SCRUM_PULSE"]).parent / "tailnet-down.json"
+
+    def test_unset_tailnet_does_nothing(self):
+        with mock.patch.object(serve, "TAILNET", set()):
+            self.assertIsNone(self.tick("Stopped"))
+            self.assertIsNone(self.tick("Stopped", 1060.0))
+        self.assertEqual((self.ups, self.sent), (0, []))
+        self.assertFalse(self.record().exists())
+
+    def test_one_up_then_one_text_no_repeat(self):
+        self.assertIsNone(self.tick("Stopped", 1000.0))
+        self.assertEqual((self.ups, self.sent), (1, []))
+        text = self.tick("Stopped", 1060.0)
+        self.assertEqual(text, "Tailscale stopped on this Mac, so the phone dashboard link is down. Open Tailscale or run tailscale up.")
+        self.assertNotRegex(text, r"^\w+:")
+        for n in range(3):
+            self.assertIsNone(self.tick("NeedsLogin", 1120.0 + n))
+        self.assertEqual((self.ups, len(self.sent)), (1, 1))
+        self.assertEqual(json.loads(self.record().read_text())["sent"], 1060.0)
+
+    def test_running_clears_episode(self):
+        self.tick("Stopped", 1000.0)
+        self.tick("Stopped", 1060.0)
+        self.assertIsNone(self.tick("Running", 1120.0))
+        self.assertFalse(self.record().exists())
+        self.tick("Stopped", 2000.0)
+        self.assertIsNotNone(self.tick("Stopped", 2060.0))  # a new episode: up again, text again
+        self.assertEqual((self.ups, len(self.sent)), (2, 2))
+
+    def test_unreadable_state_is_no_pulse(self):
+        self.assertIsNone(self.tick(None))
+        self.assertEqual(self.ups, 0)
+
+
 class SigninAlertTest(AlertBase):
     """Job 1527: signin_alert_tick texts once per account and end date, read from each account's newest run log."""
     NOW = datetime(2026, 11, 23, 12).timestamp()

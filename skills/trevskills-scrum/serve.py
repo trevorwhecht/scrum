@@ -51,12 +51,17 @@ LOCAL = {"localhost", "127.0.0.1"}
 TAILNET = set()  # the one extra hostname main() allows (the Mac's tailnet name); empty = localhost only
 
 
+def tailscale_exe() -> str:
+    """The tailscale executable: the one on PATH, else the Mac app's."""
+    return shutil.which("tailscale") or "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+
+
 def tailnet_host(explicit=""):
     """The tailnet hostname to also accept: explicit, else $SCRUM_TAILNET_HOST, else tailscale's Self.DNSName ("" if none)."""
     name = explicit or os.environ.get("SCRUM_TAILNET_HOST") or ""
     if not name:
         try:
-            exe = shutil.which("tailscale") or "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+            exe = tailscale_exe()
             out = subprocess.run([exe, "status", "--json"], capture_output=True, text=True, timeout=3)
             name = json.loads(out.stdout)["Self"]["DNSName"] if out.returncode == 0 else ""
         except Exception:
@@ -5700,7 +5705,7 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
         stuck_alert(now, why, sessions)
     except (Exception, SystemExit) as e:
         print(f"watchdog: pulse: stuck alert: {e}", file=sys.stderr, flush=True)
-    for step in (disk_alert_tick, claude_missing_tick, signin_alert_tick):  # job 1497: low disk on 2 pulses, a missing claude CLI; job 1527: a sign-in near its end
+    for step in (disk_alert_tick, claude_missing_tick, tailnet_down_tick, signin_alert_tick):  # job 1652: tailscale stopped; job 1497: low disk on 2 pulses, a missing claude CLI; job 1527: a sign-in near its end
         try:
             step(now)
         except (Exception, SystemExit) as e:
@@ -5819,6 +5824,7 @@ def stuck_mark(path: Path, now: float, key: str = "sent") -> None:
             cur = {}
         clear = "dclear" if key == "dsent" else "clear"  # job 1497: the low-disk episode has its own clear count
         own = (path.name == "signin-alert.json" or path.name == "claude-missing.json" and board.is_num(cur.get("since"))) if isinstance(cur, dict) else False
+        own = own or path.name == "tailnet-down.json" and isinstance(cur, dict) and board.is_num(cur.get("up"))
         if isinstance(cur, dict) and (key == "isent" or own or board.is_num(cur.get(clear)) and cur[clear] < STUCK_ALERT_CLEAR):
             stuck_write(path, {**cur, key: now}, cur)
 
@@ -6158,6 +6164,60 @@ def claude_missing_tick(now: float, probe=None, send=None, background=None) -> s
         return None
     text = f"The claude CLI is missing on this Mac, so no scrum session can start. Reinstall it with {CLAUDE_REINSTALL}"
     return alert_dispatch(claude_missing_path(), now, "claude CLI missing", text, "sent", send, background)
+
+
+TAILNET_DOWN_TEXT = "Tailscale stopped on this Mac, so the phone dashboard link is down. Open Tailscale or run tailscale up."
+
+
+def tailnet_state() -> str | None:
+    """BackendState from `tailscale status --json` (10 s timeout); None when it can't be read."""
+    try:
+        out = subprocess.run([tailscale_exe(), "status", "--json"], capture_output=True, text=True, timeout=10)
+        state = json.loads(out.stdout).get("BackendState")
+    except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
+        return None
+    return state if isinstance(state, str) and state else None
+
+
+def tailnet_up() -> None:
+    """Run `tailscale up` (10 s timeout); a failure is printed, never raised."""
+    try:
+        subprocess.run([tailscale_exe(), "up"], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"watchdog: tailnet down: tailscale up: {e}", file=sys.stderr, flush=True)
+
+
+def tailnet_down_tick(now: float, state=None, up=None, send=None, background=None) -> str | None:
+    """Job 1652: with TAILNET set, read BackendState (`state`, default tailnet_state). Running ends the episode
+    (tailnet-down.json beside pulse.log is deleted). Not Running with no record: `up` (tailscale up) runs once and
+    {"up": now} is written. Not Running again with the record and no `sent`: one text (TAILNET_DOWN_TEXT, never
+    `<word>:`) through alert_dispatch, key "sent" written only after a send exits 0. An unreadable state is no pulse.
+    Returns the text sent inline, else None."""
+    if not TAILNET or claude_missing_skip():
+        return None
+    st = (state or tailnet_state)()
+    if st is None:
+        return None
+    path = board.pulse_path().with_name("tailnet-down.json")
+    if st == "Running":
+        with STUCK_LOCK:
+            path.unlink(missing_ok=True)
+        return None
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        rec = None
+    if not (isinstance(rec, dict) and board.is_num(rec.get("up"))):
+        (up or tailnet_up)()
+        with STUCK_LOCK:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name("tailnet-down.json.tmp")
+            tmp.write_text(json.dumps({"up": now}))
+            os.replace(tmp, path)
+        return None
+    if rec.get("sent") is not None:
+        return None
+    return alert_dispatch(path, now, f"tailscale {st}", TAILNET_DOWN_TEXT, "sent", send, background)
 
 
 SIGNIN_ALERT_DAYS = 5  # signin_alert_tick: text once the earliest end date is this many days away or less
