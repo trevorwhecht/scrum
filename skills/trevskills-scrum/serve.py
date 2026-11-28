@@ -5754,12 +5754,34 @@ STUCK_IDLE_REPEAT_S = 24 * 3600  # stuck_alert: the idle text repeats at most on
 PULSE_SNAPSHOT: tuple | None = None  # (now, projects) of the pulse_tick that is calling stuck_alert
 DEV_SERVER_RE = re.compile(r"\bnext(-server\b| dev\b)|\bvite\b|\b(npm|pnpm|yarn|bun) (run )?dev\b|webpack-dev-server")
 SYSTEM_PATHS = ("/System/", "/usr/libexec/", "/usr/sbin/", "/sbin/", "/Library/Apple/")  # stuck_process: never kill
+TOP_MEM_RE = re.compile(r"^\s*(\d+)\s+(\d+(?:\.\d+)?)([BKMGT])[+-]?\s*$")
+
+
+def top_memory() -> tuple[int, float] | None:
+    """(pid, GB) of the process with the largest MEM in `top -l 1 -o mem -n 5 -stats pid,mem` (MEM counts compressed
+    and swapped memory, which ps's RSS leaves out), or None when top fails or prints no row (stuck_process then
+    keeps its RSS pick)."""
+    try:
+        out = subprocess.run(["top", "-l", "1", "-o", "mem", "-n", "5", "-stats", "pid,mem"], capture_output=True,
+                             text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    best = None
+    for line in out.stdout.splitlines() if out.returncode == 0 else []:
+        m = TOP_MEM_RE.match(line)
+        if m:
+            gb = float(m.group(2)) * 1024 ** ("BKMGT".index(m.group(3)) - 3)
+            if best is None or gb > best[1]:
+                best = (int(m.group(1)), gb)
+    return best
 
 
 def stuck_process(why: str) -> str:
     """stuck_alert's `Biggest by memory: <name>, pid <pid>, <GB> GB. Fix: kill <pid>` clause for a memory machine_ok
     reason (PULSE_GATES ram, vm_pressure, swap), `Biggest by CPU: <name>, pid <pid>, <N>% CPU, <GB> GB. Fix: ...` for a
-    CPU one (cpu_busy, cpu_load), else "". The biggest process by resident memory (CPU for a CPU reason) comes from one
+    CPU one (cpu_busy, cpu_load), else "". For a memory reason the pid with the largest MEM in top_memory() (it counts
+    compressed memory) is named, with that MEM as its GB, falling back to the RSS pick when top fails. The biggest process
+    by resident memory (CPU for a CPU reason) comes from one
     `ps -axo pid=,ppid=,uid=,rss=,pcpu=,command=` (no shell, 10 s; uid tells this user's process from another's); ps
     failing gives "". <name> is the program's basename (command_head) and its first argument (a path argument by its
     basename), never the rest; with ppid 1 and a DEV_SERVER_RE command it reads `leftover dev server <name>`. Never
@@ -5784,12 +5806,16 @@ def stuck_process(why: str) -> str:
     if not rows:
         return ""
     pid, ppid, uid, rss, pcpu, cmd = max(rows, key=lambda r: r[4] if cpu else r[3])
+    top_gb = None
+    if not cpu and (big := top_memory()) and any(r[0] == big[0] for r in rows):  # top's MEM counts compressed memory
+        pid, ppid, uid, rss, pcpu, cmd = next(r for r in rows if r[0] == big[0])
+        top_gb = big[1]
     prog, rest = command_head(cmd)
     arg = next((w for w in rest if w), "")
     arg = os.path.basename(arg) if "/" in arg and arg[0] != "-" else arg  # a path argument by its basename
     name = " ".join(w for w in (os.path.basename(prog), arg) if w)
     label = "leftover dev server " if ppid == 1 and DEV_SERVER_RE.search(cmd) else ""
-    size = f"{pcpu:.0f}% CPU, {rss / 1048576:.1f} GB" if cpu else f"{rss / 1048576:.1f} GB"
+    size = f"{pcpu:.0f}% CPU, {rss / 1048576:.1f} GB" if cpu else f"{(rss / 1048576 if top_gb is None else top_gb):.1f} GB"
     keep = ("the scrum server" if pid == os.getpid() or arg == "serve.py"
             else "a claude session" if board._is_claude(cmd)
             else "a system process" if uid < 500 or prog.startswith(SYSTEM_PATHS)
