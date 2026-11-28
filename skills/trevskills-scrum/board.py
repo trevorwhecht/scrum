@@ -7833,6 +7833,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
         overlap = []  # outside holder ids that alone hold a waiting child
         room = (1 if only or shop else max(0, ram_room(floor=0))) if go and not machine else 0  # one claim = one new session
         ram_full = not room and go and not machine  # no RAM room: claim nothing, leave the parent; start_ready retries
+        ram_raw = room  # the RAM room before the usage cap trims it (job 1689: a cap-trimmed room is no RAM hold)
         if cap is not None:
             room = min(room, cap)
         light_room = None  # read once a light kid meets a spent standard room: spawn's size for it (job 955)
@@ -7873,7 +7874,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
                 else:
                     no_room = True
                 if no_room:
-                    if not undone:  # job 1687: a child ready but for RAM names the hold in its queue-gates.txt
+                    if not undone and ram_raw <= len(ready):  # job 1687: a child ready but for RAM names the hold in its queue-gates.txt; job 1689: not when the usage cap, with RAM free, shrank the room
                         note_queue_gate(root, k["id"], "ram_room")
                     continue
             if undone:
