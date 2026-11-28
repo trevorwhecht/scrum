@@ -10163,6 +10163,11 @@ class SweepParentsHeldTest(unittest.TestCase):
             (self.root / "jobs" / j["id"]).mkdir(parents=True)
         (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
         self.jobs = jobs
+        self.fresh = self.REASON.removeprefix(self.board.MACHINE_WAIT)  # what a fresh machine_ok(claim=True) says; None once the gate clears
+        for name, ret in (("machine_ok", lambda root, **kw: self.fresh), ("finish_first", lambda *a, **kw: None)):
+            patcher = mock.patch.object(self.board, name, side_effect=ret)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def gates(self, job_id):
         path = self.root / "jobs" / job_id / "current-gates.json"
@@ -10219,6 +10224,7 @@ class SweepParentsHeldTest(unittest.TestCase):
 
     def set_reason(self, reason):
         self.jobs[0]["reason"] = reason
+        self.fresh = reason.removeprefix(self.board.MACHINE_WAIT) if reason else None
         (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
 
     def test_cooling_parent_notes_cool_down(self):
@@ -10246,6 +10252,39 @@ class SweepParentsHeldTest(unittest.TestCase):
         self.sweep(claim=False)
         self.assertEqual(self.gates("002-kid")["swap"]["text"], self.REASON)
         self.assertEqual(self.gates("003-kid"), {}, "a child in build is not a ready waiting child")
+
+    def test_cleared_swap_reason_names_the_real_holder_job_1685(self):
+        """Job 1685: the stored swap reason outlives the swap (a claim=False tick never runs start_ready), so a clear
+        machine_ok drops it and the claim_off note names the job that turned the claim off."""
+        self.fresh = None
+        with mock.patch.object(self.serve, "start_ready"), mock.patch.object(self.serve, "respawn_orphans", return_value=False):
+            self.serve.sweep_parents("p", self.root, self.jobs, alive=lambda: (lambda j: True), claim=False,
+                                     cause="015-daily-ad")
+        gates = self.gates("002-kid")
+        self.assertIn("claim_off:015-daily-ad", gates)
+        self.assertNotIn("swap", gates)
+
+    def test_cleared_swap_reason_names_chain_lock_job_1685(self):
+        self.fresh = None
+        (self.root / "jobs" / "001-par" / ".chain.lock").write_text("003-kid")
+        self.sweep(claim=True)
+        gates = self.gates("002-kid")
+        self.assertIn("chain_lock", gates)
+        self.assertNotIn("swap", gates)
+
+    def test_fresh_refusal_replaces_the_stored_reason_job_1685(self):
+        self.fresh = "free RAM 3% (< 10%)"
+        self.sweep(claim=False)
+        gates = self.gates("002-kid")
+        self.assertEqual(gates[self.serve.held_gate(self.fresh)]["text"], self.board.MACHINE_WAIT + self.fresh)
+        self.assertNotIn("swap", gates)
+
+    def test_usage_hold_keeps_the_stored_reason_job_1685(self):
+        reason = self.board.MACHINE_WAIT + "no account has room: main pace 5h 90%"
+        self.set_reason(reason)
+        self.fresh = None
+        self.sweep(claim=False)
+        self.assertEqual(self.gates("002-kid")[self.serve.held_gate(reason.removeprefix(self.board.MACHINE_WAIT))]["text"], reason)
 
     def test_claim_off_tick_notes_claim_off_when_not_machine_waiting(self):
         """Job 1604: a claim=False tick skips start_ready; the ready waiting child still reads a named gate."""
