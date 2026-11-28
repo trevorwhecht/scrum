@@ -28,8 +28,9 @@
    - Run `git fetch origin`.
    - **Fast-forward main (always, whatever the `Restart:` line says).** The dashboard and this skill are served from the main checkout, so it must not stay behind origin:
      1. **Guard (same test as step 1):** `git -C "$REPO" symbolic-ref --short HEAD` must equal `$DEFAULT`, and `git -C "$REPO" status --porcelain --untracked-files=no` must be empty.
-     2. If both pass, run `git -C "$REPO" pull --ff-only`.
+     2. If both pass, record `git -C "$REPO" rev-parse HEAD` as the old HEAD, then run `git -C "$REPO" pull --ff-only`.
      3. If a guard check or the fast-forward fails, report `main not updated: <reason>`, where reason is `not on <default>`, `uncommitted changes` or `fast-forward failed`. Never merge, reset, rebase or stash to make it work.
+     4. **Prisma client.** Only after the fast-forward succeeded, when `$REPO/prisma/schema.prisma` exists and `git -C "$REPO" diff --name-only <old HEAD> HEAD -- prisma/schema.prisma` is non-empty (schema changed), run `npx prisma generate` in `$REPO`, so the main checkout's generated client matches (its LaunchAgents run from it). Skip it when the schema is unchanged, there is no schema file, or the fast-forward did not succeed. A failure is reported as `prisma generate failed: <reason>` and never blocks the merge or the Restart; never run `prisma migrate` here.
    - **Restart.** Read the `Restart:` line from `$F/jobs/$ID/decision.md` (no line, e.g. a human-approved ESCALATE without one, counts as `none`). If it is not `Restart: none`, in order:
      1. **Skip if main wasn't updated:** if the fast-forward above did not succeed, do not restart. Report `Restart pending: <process> — <reason>`, with the same reason as `main not updated`.
      2. **Restart:** `<port>` is the number in the `Restart:` line's `on port <N>`; when the line names serve.py and gives no port, use 8765. A non-serve.py line with no port is not restarted: report `Restart pending: <process> — no port in Restart line` and treat it as `restart failed`. Start only an allowed command, and never one taken from the `Restart:` line:
