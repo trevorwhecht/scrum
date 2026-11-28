@@ -8231,8 +8231,8 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
                 what = " ".join(re.sub(r'["`$\\]', " ", detail or question).split()).rstrip(" .")  # shlex-safe in "..."
                 if recommend and recommend["key"] == "c":
                     recommend = None  # it named the option the send-back takes the place of
-                parsed = parsed[:2] + [{"key": "c", "label": "Send back with a note", "command": f"rework {job['id']} \"'{what}' "
-                                        "failed the same way after a solo run on a quiet machine: find the cause in the code or its test setup\""}]
+                note = f"'{what}' failed the same way after a solo run on a quiet machine: find the cause in the code or its test setup"
+                parsed = parsed[:2] + [{"key": "c", "label": "Send back with a note", "command": f'rework {job["id"]} "{note}"'}]
             job["loadParked"] = 1  # the next load ask after Trevor's Carry on starts loadWaits and loadSolo over
             question = f"Failed under machine load {LOAD_WAITS_MAX} times on a quiet machine: {question}"
             kind = None  # parked for Trevor: never spend an unblocker session on it
