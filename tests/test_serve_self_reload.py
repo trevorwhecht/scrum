@@ -17,6 +17,7 @@ os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")
 os.environ["SCRUM_SWAP_PCT"] = "1"
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # CPU nearly idle unless a test says so; no test runs top or reads the real CPU log
 os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly nil unless a test says so; no test reads the real load average
+os.environ["SCRUM_NET_UP"] = "1"  # the network lookup passes unless a test says so; no test resolves api.anthropic.com
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 import serve  # noqa: E402
 REAL_SELF_FILES = serve.SELF_FILES

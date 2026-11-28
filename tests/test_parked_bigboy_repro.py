@@ -11,6 +11,7 @@ os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")
 os.environ["SCRUM_SWAP_PCT"] = "1"
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"
 os.environ["SCRUM_CPU_LOAD_PCT"] = "1"
+os.environ["SCRUM_NET_UP"] = "1"  # the network lookup passes unless a test says so; no test resolves api.anthropic.com
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ.setdefault("SCRUM_PS", os.devnull)
 os.environ.setdefault("SCRUM_REGISTRY", os.path.join(tempfile.mkdtemp(), "projects.json"))  # job 971: finish_first reads every registered board; never the real ones

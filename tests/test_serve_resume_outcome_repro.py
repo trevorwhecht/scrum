@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"
 os.environ["SCRUM_CPU_LOAD_PCT"] = "1"
+os.environ["SCRUM_NET_UP"] = "1"  # the network lookup passes unless a test says so; no test resolves api.anthropic.com
 import serve  # noqa: E402
 
 board = serve.board
