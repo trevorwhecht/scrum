@@ -8226,16 +8226,14 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
                 questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
                                      "question": question, "reason": reason, "kind": "stall", "auto": True})
                 return {"stalled": True}
-            failed = re.sub(r'["`$\\\n]+', " ", question).strip()[:120]
-            send_back = {"label": "Send back with a note", "command": f'rework {job_id} "{failed} failed the same way after a '
-                         'solo run on a quiet machine: find the cause in the code or its test setup"'}
-            if not any(o["command"].startswith("rework ") for o in parsed):  # the park is not resume/abort only
-                parsed = parsed[:2] + [send_back]
-                for o, key in zip(parsed, "abc"):
-                    o["key"] = key
-                if recommend and recommend["key"] not in "abc"[:len(parsed)]:
-                    recommend = None
-            job["loadParked"] = 1
+            if not any(o["command"].startswith("rework ") for o in parsed):  # job 2082: never a resume/abort-only park
+                detail = question[len(QUIET_PREFIX):].lstrip(" :") if question.lower().startswith(QUIET_PREFIX) else question
+                what = " ".join(re.sub(r'["`$\\]', " ", detail or question).split()).rstrip(" .")  # shlex-safe in "..."
+                if recommend and recommend["key"] == "c":
+                    recommend = None  # it named the option the send-back takes the place of
+                parsed = parsed[:2] + [{"key": "c", "label": "Send back with a note", "command": f"rework {job['id']} \"'{what}' "
+                                        "failed the same way after a solo run on a quiet machine: find the cause in the code or its test setup\""}]
+            job["loadParked"] = 1  # the next load ask after Trevor's Carry on starts loadWaits and loadSolo over
             question = f"Failed under machine load {LOAD_WAITS_MAX} times on a quiet machine: {question}"
             kind = None  # parked for Trevor: never spend an unblocker session on it
         kinds = job.get("unblockKinds", [])
