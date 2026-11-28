@@ -1055,6 +1055,74 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((job["stage"], job["question"]),
                          ("needs-human", "Failed under machine load 3 times on a quiet machine: " + self.PLAIN_Q))
 
+    PARK_NOTE = "failed the same way after a solo run on a quiet machine: find the cause in the code or its test setup"
+
+    def test_ask_load_park_offers_send_back_note(self):
+        """Job 2082: the load park adds a Send back option naming what failed, so it is not a resume/abort-only stop."""
+        for q, what in (("waiting on a quiet machine: E2E global setup timed out at load 25.", "E2E global setup timed out at load 25"),
+                        ('waiting on a quiet machine: E2E "global setup" timed\\ out $HOME', "E2E global setup timed out HOME"),
+                        (self.PLAIN_Q, self.PLAIN_Q)):
+            with self.subTest(q=q):
+                job_id, env = self.heavy_job([("check", None, "23.78", 8)])  # PLAIN_Q is a load ask only on a loaded Mac
+                with env, mock.patch.object(board, "play"):
+                    for _ in range(5):
+                        board.cmd_ask(self.root, job_id, q, [f"Carry on=resume {job_id}", f"Remove this job=abort {job_id} --cascade"],
+                                      recommend=("a", "the machine was overloaded"), title="CHECKS_FAILING")
+                want = [{"key": "a", "label": "Carry on", "command": f"resume {job_id}"},
+                        {"key": "b", "label": "Remove this job", "command": f"abort {job_id} --cascade"},
+                        {"key": "c", "label": "Send back with a note", "command": f"rework {job_id} \"'{what}' {self.PARK_NOTE}\""}]
+                job = next(j for j in self.jobs() if j["id"] == job_id)
+                self.assertEqual((job["stage"], job["options"], job["loadParked"]), ("needs-human", want, 1))
+                self.assertEqual(self.log_lines()[-1]["options"], want)
+                self.assertEqual(shlex.split(job["options"][2]["command"]),  # serve.py option_command splits it this way
+                                 ["rework", job_id, f"'{what}' {self.PARK_NOTE}"])
+
+    def test_ask_load_park_send_back_takes_the_third_option(self):
+        job_id = self.staged("check")
+        opts = [f"Carry on=resume {job_id}", f"Put back=abort {job_id} --requeue", f"Remove this job=abort {job_id} --cascade"]
+        with mock.patch.object(board, "play"):
+            for _ in range(5):
+                board.cmd_ask(self.root, job_id, "waiting on a quiet machine: E2E timed out", opts,
+                              recommend=("c", "remove it"), title="CHECKS_FAILING")
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual([(o["key"], o["label"], o["command"]) for o in job["options"]],
+                         [("a", "Carry on", f"resume {job_id}"), ("b", "Put back", f"abort {job_id} --requeue"),
+                          ("c", "Send back with a note", f"rework {job_id} \"'E2E timed out' {self.PARK_NOTE}\"")])
+        self.assertNotIn("recommend", job)  # it named the option the send-back replaced
+
+    def test_ask_load_park_keeps_an_existing_send_back(self):
+        job_id = self.staged("build")
+        opts = [f"Send back with a note=rework {job_id} \"re-read assessment.md\"", f"Remove this job=abort {job_id} --cascade"]
+        with mock.patch.object(board, "play"):
+            for _ in range(5):
+                board.cmd_ask(self.root, job_id, self.LOAD_Q, opts, title="BUILDER_BLOCKED")
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual([o["command"] for o in job["options"]],
+                         [f"rework {job_id} \"re-read assessment.md\"", f"abort {job_id} --cascade"])
+        self.assertEqual(job["loadParked"], 1)
+
+    def test_ask_load_ask_after_park_starts_the_counts_over(self):
+        """Job 2082: Carry on after a park, then load again, stalls until load drops instead of parking at once."""
+        job_id, env = self.heavy_job([("check", None, "23.78", 8)])
+        with env, mock.patch.object(board, "play") as play:
+            for _ in range(5):
+                self.check_ask(job_id, self.PLAIN_Q, title="CHECKS_FAILING")
+            board.cmd_set(self.root, job_id, ["stage=check", "reason="])  # Trevor picked Carry on
+            play.reset_mock()
+            self.assertEqual(self.check_ask(job_id, self.PLAIN_Q, title="CHECKS_FAILING"), {"stalled": True})
+            play.assert_not_called()
+            job = next(j for j in self.jobs() if j["id"] == job_id)
+            self.assertEqual((job["stage"], job["stalled"], job["reason"], job["loadWaits"]),
+                             ("check", True, "stalled: waiting on a quiet machine: the checks ran at load5 23.78 on 8 cores", 1))
+            self.assertNotIn("loadSolo", job)
+            self.assertNotIn("loadParked", job)
+            for _ in range(2):  # the new count runs its full course: two more waits, then the solo run
+                self.check_ask(job_id, self.PLAIN_Q, title="CHECKS_FAILING")
+            self.assertEqual(self.check_ask(job_id, self.PLAIN_Q, title="CHECKS_FAILING"), {"stalled": True})
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual((job["stage"], job["reason"], job["loadWaits"], job["loadSolo"]),
+                         ("check", "stalled: waiting for a solo run: failed under machine load 3 times", 3, 1))
+
     def test_ask_checks_failing_in_merging_ignores_local_load(self):
         job_id, env = self.heavy_job([("e2e", None, "23.78", 8)], stage="merging")
         with env, mock.patch.object(board, "play") as play:
