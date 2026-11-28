@@ -16,7 +16,7 @@ import board, jev  # noqa: E402
 STEPS = {
     "model": ("How hard is this feature to implement", 1.5, "opus"),  # score index 0-3 = difficulty 1-4
     "spec-model": ("How much design work does this feature text leave open for the spec writer (which files, which approach, "
-                   "which edge cases)", 2.5, "opus"),  # scores what feature.md leaves open, not how hard the build is
+                   "which edge cases)", 2.75, "opus"),  # scores what feature.md leaves open, not how hard the build is
     "promote": (None, None, "opus"),
     "dupe": ("Item {i} is the same task as the query", 0.8, "add"),
     "approver": ("This diff changes payment, pricing, billing, authentication, session, role or permission logic",
