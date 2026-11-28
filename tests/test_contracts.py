@@ -2654,6 +2654,21 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, cleanup, phrase)
         self.assertNotIn("grep -F '<verify string>'", cleanup)
 
+    def test_merge_prisma_generate_after_schema_change(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "lanes" / "merge.md").read_text()
+        ff = self.section(text, "**Fast-forward main (always", "- **Restart.**")
+        pull = ff.index('git -C "$REPO" pull --ff-only')
+        self.assertLess(ff.index('git -C "$REPO" rev-parse HEAD'), pull)
+        gen = ff.index("npx prisma generate")
+        self.assertLess(pull, gen)
+        self.assertLess(ff.index("main not updated: <reason>"), gen)
+        tail = ff[gen - 600:]
+        for phrase in ('`$REPO/prisma/schema.prisma` exists', "schema changed",
+                       'diff --name-only <old HEAD> HEAD -- prisma/schema.prisma',
+                       "prisma generate failed: <reason>", "never blocks the merge or the Restart"):
+            self.assertIn(phrase, ff, phrase)
+        self.assertNotIn("prisma migrate", tail.replace("never run `prisma migrate`", ""))
+
     def test_merge_always_fast_forwards(self):
         text = skill_text()
         self.assertEqual(re.sub(r"` Fix: [^`]*`", "", text).count("pull --ff-only"), 1)  # Trevor-run fixes aside
