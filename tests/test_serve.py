@@ -21,6 +21,7 @@ os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")  # never 
 os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # CPU nearly idle unless a test says so; no test runs top or reads the real CPU log
 os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly nil unless a test says so; no test reads the real load average
+os.environ["SCRUM_NET_UP"] = "1"  # the network lookup passes unless a test says so; no test resolves api.anthropic.com
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ["SCRUM_HEAVY_STEPS_LOG"] = os.path.join(tempfile.mkdtemp(), "heavy-steps.log")  # e2e_full_run's buildlock.py
 os.environ.setdefault("SCRUM_USAGE", os.path.join(os.devnull, "no-usage.json"))  # never Trevor's real usage.json
@@ -1130,6 +1131,41 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(job["queued_launch"], {"action": "approve", "prompt": f"/trevskills-scrum approve {held}",
                                                 "stage": "needs-human"})
         self.assertEqual(self.gates_file(held).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\ncpu_load(501%)\n")
+
+    def test_spawn_net_down_queues_non_manual_launch(self):
+        """Job 1675: a non-manual gated launch while api.anthropic.com does not resolve queues with a net_down gate; a click starts."""
+        job_id = self.gate_job("Net down")
+        with mock.patch.dict(os.environ, SCRUM_NET_UP="0"):
+            self.assertIsNone(self.gate_spawn(job_id))
+            self.assertEqual(self.gates_file(job_id).read_text(), "net_down\n")
+            job = self.stage_of(job_id)
+            self.assertTrue(job.get("play_queued"), job)
+            self.assertEqual(job["queued_launch"]["action"], "approve")
+            clicked = self.gate_job("Net down click")
+            self.assertEqual(self.gate_spawn(clicked, manual=True), f"runs/{clicked}-approve.log")
+        started = self.gate_job("Net up")
+        with mock.patch.dict(os.environ, SCRUM_NET_UP="1"):
+            self.assertEqual(self.gate_spawn(started), f"runs/{started}-approve.log")
+        self.assertFalse(self.gates_file(started).exists())
+        with mock.patch.dict(os.environ, SCRUM_NET_UP="1"):  # the lookup passes: the queue tick starts the held launch
+            s = self.serve
+            with mock.patch.object(s, "take_room", return_value=True):
+                s.play_queue_tick("repo", self.root, s.board.read_board(self.root)["jobs"])
+            self.assertNotIn("net_down", self.stage_of(job_id).get("queued_launch", {}))
+
+    def test_net_down_lookup_cached_for_60s(self):
+        s = self.serve
+        s.NET_CHECK.clear()
+        with mock.patch.dict(os.environ, {"SCRUM_NET_UP": ""}), mock.patch.object(s.time, "time", return_value=1000.0), \
+                mock.patch.object(s.socket, "getaddrinfo", side_effect=OSError("ENOTFOUND")) as lookup:
+            self.assertTrue(s.net_down())
+            self.assertTrue(s.net_down())
+            self.assertEqual(lookup.call_args_list, [mock.call("api.anthropic.com", 443)])
+        with mock.patch.dict(os.environ, {"SCRUM_NET_UP": ""}), mock.patch.object(s.time, "time", return_value=1061.0), \
+                mock.patch.object(s.socket, "getaddrinfo", return_value=[("x",)]) as lookup:
+            self.assertFalse(s.net_down())
+            self.assertEqual(lookup.call_count, 1)
+        s.NET_CHECK.clear()
 
     def test_spawn_queue_records_cpu_gate(self):
         job_id = self.gate_job("CPU gate")
@@ -8266,6 +8302,22 @@ class AutoResumeTest(unittest.TestCase):
                 mock.patch.object(s, "resume_job", return_value="runs/net.log"):
             s.auto_resume("p", self.root, self.jobs)
         self.assertEqual(s.AUTO_RESUME["p/net"], [1, now + s.NET_RETRY_EVERY])
+
+    def test_net_error_while_net_down_spends_no_try(self):
+        """Job 1675: a net-error stall is not resumed while the lookup fails, and spends no try."""
+        s, now = self.serve, 1_800_000_000
+        self.jobs = [{"id": "net", "stage": "build", "stalled": True, "reason": "stalled: no live session",
+                      "updatedAt": "2026-01-01T00:00:00+00:00", "runlog": "runs/crash.log"}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        with mock.patch.object(s.time, "time", return_value=now), mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s, "resume_refusal", return_value=None), mock.patch.object(s, "take_room", return_value=True), \
+                mock.patch.object(s, "limit_reset", return_value=(False, None, False)), \
+                mock.patch.object(s, "net_error", return_value=True), mock.patch.dict(os.environ, SCRUM_NET_UP="0"), \
+                mock.patch.object(s, "resume_job", return_value="runs/net.log") as resume:
+            for _ in range(13):
+                self.assertIs(s.auto_resume("p", self.root, self.jobs), True)
+            resume.assert_not_called()
+            self.assertNotIn("p/net", s.AUTO_RESUME)
 
     def test_failed_spawn_spends_no_stall_retry(self):
         s = self.serve

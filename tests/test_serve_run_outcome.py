@@ -13,6 +13,7 @@ os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 os.environ["SCRUM_IDLE_CLEANUP"] = "0"  # a watchdog tick never signals a real dev server or quits Docker
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # watchdog_tick never runs top or writes the real CPU log
 os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly nil unless a test says so; no test reads the real load average
+os.environ["SCRUM_NET_UP"] = "1"  # the network lookup passes unless a test says so; no test resolves api.anthropic.com
 os.environ.setdefault("SCRUM_PS", os.devnull)  # the spawn RAM gate counts no real local claude sessions
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so
 os.environ["SCRUM_VM_PRESSURE"] = "1"  # kernel memory pressure normal unless a test says so; no test runs sysctl

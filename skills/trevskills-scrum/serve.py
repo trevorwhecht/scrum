@@ -30,7 +30,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, collections, errno, fcntl, functools, hashlib, json, os, pwd, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, threading, time
+import argparse, base64, collections, errno, fcntl, functools, hashlib, json, os, pwd, re, shlex, shutil, signal, socket, stat, subprocess, sys, tempfile, threading, time
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -212,6 +212,28 @@ def cpu_token():
     """The queue-gate token for a CPU-load hold: cpu_load(<pct>%) from board.cpu_load_pct(), bare cpu_load when unread."""
     cpu = board.cpu_load_pct()
     return "cpu_load" if cpu is None else f"cpu_load({cpu:.0f}%)"
+
+
+NET_HOST, NET_CHECK_SECS = ("api.anthropic.com", 443), 60
+NET_CHECK: dict = {}  # "at" (epoch s of the last lookup) and "down" (its result); net_down caches it for NET_CHECK_SECS
+
+
+def net_down():
+    """True when socket.getaddrinfo("api.anthropic.com", 443) fails (job 1675: a session started while the Mac's network is
+    down dies at once). The lookup is cached for NET_CHECK_SECS; SCRUM_NET_UP ("0"/"1") stands in for it."""
+    fake = os.environ.get("SCRUM_NET_UP")
+    if fake:
+        return fake == "0"
+    now = time.time()
+    if "at" in NET_CHECK and 0 <= now - NET_CHECK["at"] < NET_CHECK_SECS:
+        return NET_CHECK["down"]
+    try:
+        socket.getaddrinfo(*NET_HOST)
+        down = False
+    except OSError:  # socket.gaierror is an OSError
+        down = True
+    NET_CHECK.update(at=now, down=down)
+    return down
 
 
 def cpu_exempt(root, job):
@@ -412,7 +434,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     A board job whose session is still alive (board.spawn's LiveSession, job 1275) starts nothing: one stderr line, its
     queued launch dropped (unqueue), None. A `start` that board.spawn holds on a hot Mac (board.HeldStart, job 1312) stays
     queued (marked manual for a click), notes the hot_mac gate, prints one `spawn held` line and returns None.
-    A `resume` past the gates first stops a live-idle session (stop_live_idle)."""
+    A `resume` past the gates first stops a live-idle session (stop_live_idle).
+    A non-manual launch of a board job is queued with the net_down gate while net_down() (job 1675)."""
     reason, on_board, queued_at, hold, refused_live, held = None, False, None, None, None, None
     niced = {} if nice is None else {"nice": nice}
     if action in GATED:
@@ -423,6 +446,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
         except (SystemExit, OSError, ValueError):
             pass
     if on_board:
+        net_short = not manual and net_down()  # job 1675: read before the lock, a failing lookup can take seconds
         with LAUNCH_LOCK:
             cpu = None if manual else board.cpu_load_pct()
             light = board.light_job(root, job)
@@ -430,16 +454,17 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             cpu_short = cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT and not cpu_exempt(root, job)
             first = None if manual or cpu_short or action != "start" else cpu_first()
             behind = first is not None and tuple(first) != (project, job_id)  # the longest-held CPU launch goes first
-            if ram_short or cpu_short or behind:
+            if ram_short or cpu_short or behind or net_short:
                 proc = None
-                gates = ([board.ram_room_reason(light)] + [f"ram_room:{i}" for i in sorted(live_ids(project))]
+                gates = (["net_down"] if net_short else [board.ram_room_reason(light)] + [f"ram_room:{i}" for i in sorted(live_ids(project))]
                          if ram_short else [f"cpu_load({cpu:.0f}%)"] if cpu_short else ["cpu_queue"])
                 for gate in gates:
                     note_queue_gate(root, job_id, gate, reason=(
-                        f"{gate}: CPU load is over the {board.MAX_LAUNCH_CPU_LOAD_PCT}% launch limit" if gate.startswith("cpu_load(") else None))
-                if ram_short:
+                        f"{gate}: CPU load is over the {board.MAX_LAUNCH_CPU_LOAD_PCT}% launch limit" if gate.startswith("cpu_load(")
+                        else "net_down: api.anthropic.com does not resolve (the network is down)" if gate == "net_down" else None))
+                if ram_short and not net_short:
                     note_ram_hold(root, job_id)
-                if ram_short and held_over(queued_at):
+                if ram_short and not net_short and held_over(queued_at):
                     hold = ram_hold_text()
             else:
                 if action == "resume":  # a live-idle session ends first, once the gates let its replacement start
@@ -2688,7 +2713,9 @@ def auto_resume(project, root, jobs):
             if net_error(root, job):
                 if refused(job) is None:
                     busy = True
-                    if room(job) and resume_job(project, root, job, jobs):  # a queued launch spends no try
+                    if net_down():  # job 1675: a launch now dies at once; wait for the lookup, spending no try
+                        note_stall_hold(root, job["id"], "net_down")
+                    elif room(job) and resume_job(project, root, job, jobs):  # a queued launch spends no try
                         AUTO_RESUME[key] = [tries + 1, now + NET_RETRY_EVERY]
                 continue
             m = board.stall_stage(job)
