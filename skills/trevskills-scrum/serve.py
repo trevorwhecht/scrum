@@ -5942,9 +5942,12 @@ def alert_argv(text: str) -> list | None:
 
 def stuck_idle_ok(now: float) -> bool:
     """True when nothing explains zero sessions: cool down off, no usage hold (board.pick_account has an account and its
-    allowance is not 0) and no shop or cloud job running on any registered board. Any raise counts as not ok."""
+    allowance is not 0), no shop or cloud job running on any registered board, and neither this serve.py's own Full E2E
+    (E2E_FULL) nor a registered project's UI sweep (ui_sweep_record result `running`) in flight. Any raise counts as not ok."""
     try:
-        if board.cooling_down():
+        if board.cooling_down() or E2E_FULL["running"]:
+            return False
+        if any((ui_sweep_record(r / "scrum") or {}).get("result") == "running" for r in board.projects().values()):
             return False
         acc, allow = board.pick_account(now, 0)
         if acc is None or allow is not None and allow <= 0:

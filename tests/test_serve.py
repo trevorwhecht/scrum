@@ -16929,6 +16929,18 @@ class StuckAlertTest(unittest.TestCase):
         self.quiet_run(20)
         self.assertEqual(self.sent, [], "a running shop job")
 
+    def test_own_full_e2e_or_a_ui_sweep_running_sends_no_idle_text(self):
+        """2026-11-27 07:07: the idle text fired while serve.py's own Full E2E and a UI sweep ran with 0 sessions."""
+        with mock.patch.dict(self.serve.E2E_FULL, {"running": "app"}):
+            self.quiet_run(20)
+        self.assertEqual(self.sent, [], "Full E2E in flight")
+        (self.base / "app" / "scrum" / "ui-sweep.json").write_text(json.dumps({"at": self.NOW, "result": "running"}))
+        self.quiet_run(20)
+        self.assertEqual(self.sent, [], "UI sweep running")
+        (self.base / "app" / "scrum" / "ui-sweep.json").write_text(json.dumps({"at": self.NOW, "result": "pass"}))
+        self.quiet_run(20)
+        self.assertEqual(len(self.sent), 1, "a finished sweep no longer holds the text")
+
     def test_the_why_text_alone_fires_when_why_is_set(self):
         self.alert(0), self.alert(150)
         self.assertEqual(self.sent[0][2], self.LEFTOVER)
