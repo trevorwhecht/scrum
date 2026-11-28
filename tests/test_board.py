@@ -1749,6 +1749,27 @@ class BoardTest(unittest.TestCase):
         out = board.cmd_ready(self.root, parent)
         self.assertEqual((out["ready"], out["held"]), ([c1, c2], None))
 
+    def test_cmd_ready_usage_cap_room_is_no_ram_note(self):
+        """Job 1689: a child passed over because the usage cap trimmed the room, with RAM free, gets no ram_room note;
+        one passed over because RAM itself is spent still does."""
+        gates = lambda c: (self.root / "jobs" / c / "queue-gates.txt").read_text().split() \
+            if (self.root / "jobs" / c / "queue-gates.txt").exists() else []
+        parent, (c1, c2, _) = self.three()
+        self.spec(c1, "src/a.py")
+        self.spec(c2, "src/b.py")
+        capped = board.Allowance(1, "usage 5h 90% used")
+        with mock.patch.object(board, "ram_room", return_value=5), \
+                mock.patch.object(board, "pick_account", return_value=(None, capped)), \
+                mock.patch.object(board, "live_sessions", return_value=0):
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+        self.assertEqual(gates(c2), [])
+        parent, (d1, d2, _) = self.three()
+        self.spec(d1, "src/x.py")
+        self.spec(d2, "src/y.py")
+        with mock.patch.object(board, "ram_room", return_value=1):
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d1])
+        self.assertEqual(gates(d2), ["ram_room"])
+
     def test_cmd_ready_light_kid_uses_light_room(self):
         """Job 955: with no standard RAM room a fast kid still claims on the light room spawn sizes it with, as the
         call's only claim; a standard kid waits."""
