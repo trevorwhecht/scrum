@@ -8212,6 +8212,9 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
         loaded = title == "CHECKS_FAILING" and job["stage"] in WATCHED and job["stage"] not in ("merging", "deploying") \
             and checks_load(job)
         if job["stage"] in WATCHED and (_load_ask(question, title) or loaded):  # the machine, not the bug: wait, no unblocker
+            if job.get("loadParked"):  # Trevor picked Carry on after a park: start the counts over, stall until load drops
+                for k in ("loadWaits", "loadSolo", "loadParked"):
+                    job.pop(k, None)
             waits = job.get("loadWaits", 0)
             solo = waits >= LOAD_WAITS_MAX and not job.get("loadSolo")
             if waits < LOAD_WAITS_MAX or solo:
@@ -8223,6 +8226,16 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
                 questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
                                      "question": question, "reason": reason, "kind": "stall", "auto": True})
                 return {"stalled": True}
+            failed = re.sub(r'["`$\\\n]+', " ", question).strip()[:120]
+            send_back = {"label": "Send back with a note", "command": f'rework {job_id} "{failed} failed the same way after a '
+                         'solo run on a quiet machine: find the cause in the code or its test setup"'}
+            if not any(o["command"].startswith("rework ") for o in parsed):  # the park is not resume/abort only
+                parsed = parsed[:2] + [send_back]
+                for o, key in zip(parsed, "abc"):
+                    o["key"] = key
+                if recommend and recommend["key"] not in "abc"[:len(parsed)]:
+                    recommend = None
+            job["loadParked"] = 1
             question = f"Failed under machine load {LOAD_WAITS_MAX} times on a quiet machine: {question}"
             kind = None  # parked for Trevor: never spend an unblocker session on it
         kinds = job.get("unblockKinds", [])

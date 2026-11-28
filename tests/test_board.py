@@ -1055,6 +1055,30 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((job["stage"], job["question"]),
                          ("needs-human", "Failed under machine load 3 times on a quiet machine: " + self.PLAIN_Q))
 
+    def test_ask_load_park_offers_rework_and_sets_load_parked(self):
+        job_id, env = self.heavy_job([("check", None, "23.78", 8)])
+        with env, mock.patch.object(board, "play"):
+            for _ in range(5):
+                self.check_ask(job_id, self.PLAIN_Q, title="CHECKS_FAILING")
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual((job["stage"], job["loadParked"]), ("needs-human", 1))
+        cmds = [o["command"] for o in job["options"]]
+        self.assertTrue(any(c.startswith(f'rework {job_id} "') and "failed the same way after a solo run on a quiet machine" in c
+                            for c in cmds), cmds)
+        self.assertLessEqual(len(cmds), 3)
+
+    def test_ask_load_ask_after_park_resets_counters_and_stalls(self):
+        job_id, env = self.heavy_job([("check", None, "23.78", 8)])
+        with env, mock.patch.object(board, "play"):
+            for _ in range(5):
+                self.check_ask(job_id, self.PLAIN_Q, title="CHECKS_FAILING")
+            board.cmd_set(self.root, job_id, ["stage=check", "reason="])  # Trevor picked Carry on
+            self.assertEqual(self.check_ask(job_id, self.PLAIN_Q, title="CHECKS_FAILING"), {"stalled": True})
+        job = next(j for j in self.jobs() if j["id"] == job_id)
+        self.assertEqual((job["stage"], job["stalled"], job["loadWaits"]), ("check", True, 1))
+        self.assertNotIn("loadSolo", job)
+        self.assertNotIn("loadParked", job)
+
     def test_ask_checks_failing_in_merging_ignores_local_load(self):
         job_id, env = self.heavy_job([("e2e", None, "23.78", 8)], stage="merging")
         with env, mock.patch.object(board, "play") as play:
