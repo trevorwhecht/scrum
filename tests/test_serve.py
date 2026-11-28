@@ -16685,13 +16685,15 @@ class StuckAlertTest(unittest.TestCase):
         (self.base / "app" / "scrum").mkdir(parents=True)
         (self.base / "app" / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
         (self.base / "projects.json").write_text(json.dumps([str(self.base / "app")]))
-        self.ps_rows, self.ps_calls, self.sent = self.PS.format(uid=os.getuid()), [], []
+        self.ps_rows, self.ps_calls, self.sent, self.top_out = self.PS.format(uid=os.getuid()), [], [], ""
         real_run = subprocess.run
 
         def run(argv, *a, **kw):
             if argv and argv[0] == "ps":
                 self.ps_calls.append(argv)
                 return subprocess.CompletedProcess(argv, 0, stdout=self.ps_rows, stderr="")
+            if argv and argv[0] == "top":
+                return subprocess.CompletedProcess(argv, 0 if self.top_out else 1, stdout=self.top_out, stderr="")
             return real_run(argv, *a, **kw)
         for p in (mock.patch.dict(os.environ, SCRUM_PULSE=str(self.base / "pulse.log"), HOME=str(self.base / "home"),
                                   SCRUM_REGISTRY=str(self.base / "projects.json")),
@@ -16926,6 +16928,25 @@ class StuckAlertTest(unittest.TestCase):
             text = self.alert(150)
             self.assertEqual(text, self.HEAD + self.MEM + ". Biggest by memory: " + clause)
             self.assertNotIn("kill", text)
+
+    def test_memory_reason_names_top_mem_pid_with_its_gb(self):
+        """Job 1667: ps RSS leaves out compressed memory, so the biggest-by-RSS pid was a 0.4 GB claude session."""
+        small = f"  8851     1 {os.getuid()}   400000   0.5 /Users/x/.local/bin/claude -p x\n"
+        self.ps_rows = small + self.PS.format(uid=os.getuid())
+        self.top_out = "Processes: 1\nPID    MEM \n4403   12G+\n8851   400M\n"
+        self.alert(0)
+        text = self.alert(150)
+        self.assertIn("Biggest by memory: node vitest, pid 4403, 12.0 GB. Fix: kill 4403", text)
+
+    def test_memory_reason_keeps_rss_pick_when_top_fails_or_names_no_ps_pid(self):
+        self.top_out = ""
+        self.alert(0)
+        self.assertEqual(self.alert(150), self.HEAD + self.MEM + ". Biggest by memory: leftover dev server next-server "
+                                                               "(v15.1.0), pid 4617, 26.0 GB. Fix: kill 4617")
+        (self.base / "stuck-alert.json").unlink(missing_ok=True)
+        self.top_out = "PID    MEM \n99999  20G\n"
+        self.alert(0)
+        self.assertIn("pid 4617, 26.0 GB", self.alert(150))
 
     def test_cpu_reason_names_the_busiest_process(self):
         why = "CPU load 450% of 8 cores (> 300%)"
