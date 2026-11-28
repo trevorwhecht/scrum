@@ -7862,16 +7862,20 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
                     continue
             light = (k.get("lane") or header_value(jobs_dir / k["id"] / "spec.md", "Lane", LANES)
                      or header_value(jobs_dir / k["id"] / "feature.md", "Lane", LANES)) in LIGHT_LANES
+            undone = [dep for dep in k.get("depends_on") or [] if stage.get(dep) != "done"]
             if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the free RAM
                 # standard room spent; a light kid may still fit the light share, as spawn sizes it, but only as the
                 # call's first claim: spawn counts each earlier claim as a young standard session
-                if not light or ready:
+                if light and not ready:
+                    if light_room is None:
+                        light_room = ram_room(floor=0, light=True)
+                    no_room = light_room < 1
+                else:
+                    no_room = True
+                if no_room:
+                    if not undone:  # job 1687: a child ready but for RAM names the hold in its queue-gates.txt
+                        note_queue_gate(root, k["id"], "ram_room")
                     continue
-                if light_room is None:
-                    light_room = ram_room(floor=0, light=True)
-                if light_room < 1:
-                    continue
-            undone = [dep for dep in k.get("depends_on") or [] if stage.get(dep) != "done"]
             if undone:
                 k.pop("overlap_hold", None)
                 for dep in undone:

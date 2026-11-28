@@ -4112,6 +4112,18 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.child(parent)["stage"], "running")
 
     @mock.patch.object(board, "MAX_YOUNG_SESSIONS", 2 * board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
+    def test_ready_notes_ram_room_on_child_passed_over(self):
+        """Job 1687: a waiting child passed over once the claims reach the RAM room is noted ram_room in its queue-gates.txt."""
+        parent, kids = self.runall(7)
+        for i, k in enumerate(kids):
+            self.spec(k, f"src/m{i}.py")
+        with self.machine("40", "1000"):
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], kids[:4])
+        gates = lambda k: (self.root / "jobs" / k / "queue-gates.txt")
+        self.assertEqual([gates(k).read_text().split() if gates(k).exists() else [] for k in kids],
+                         [[]] * 4 + [["ram_room"]] * 3)
+
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", 2 * board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
     def test_ready_machine_guard_blocks_then_recovers(self):
         parent, (a, b, c) = self.runall(3)
         for i, k in enumerate((a, b, c)):

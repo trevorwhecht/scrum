@@ -16603,6 +16603,17 @@ class PulseTest(unittest.TestCase):
             s.auto_continue_tick({"app": True})
         self.assertIn("run_all_running", s.PULSE_HOLDS[root])
 
+    def test_start_ready_notes_runs_on_shop_beside_a_claim(self):
+        """Job 1687: `left` children are noted runs_on_shop even when cmd_ready claimed another child."""
+        s = self.serve
+        root = (self.base / "app" / "scrum").resolve()
+        self.addCleanup(s.PULSE_HOLDS.clear)
+        with mock.patch.object(s.board, "cmd_ready", return_value={"ready": ["006-dep"], "left": ["007-wait"], "held": None}), \
+                mock.patch.object(s, "cpu_hot", return_value=False), mock.patch.object(s, "spawn"), \
+                mock.patch.object(s, "note_held") as nh:
+            s.start_ready("app", root, "p")
+        nh.assert_called_once_with(root, "runs_on_shop", ["007-wait"])
+
     def test_start_ready_notes_heavy_cap_not_runs_on_shop(self):
         """Job 1623: children cmd_ready returns under `heavy` are noted heavy_cap with the cap text, never runs_on_shop."""
         s = self.serve
