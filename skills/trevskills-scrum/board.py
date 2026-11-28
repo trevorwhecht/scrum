@@ -3529,7 +3529,30 @@ def _union_secs(spans):
     return total
 
 
-def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=None):
+ASLEEP_GAP_S = 600  # write_timing: a pulse.log gap over this is the Mac asleep (serve.py writes a line about every 60 s awake)
+
+
+def _asleep_secs(gaps, spans):
+    """Seconds of the (a, b) gaps lying inside the union of `spans`; each second counts once."""
+    total, upto = 0, None
+    for a, b in sorted((max(a, c), min(b, d)) for a, b in gaps for c, d in _merge_spans(spans) if min(b, d) > max(a, c)):
+        a = a if upto is None else max(a, upto)
+        if b > a:
+            total, upto = total + b - a, b
+    return total
+
+
+def _merge_spans(spans):
+    out = []
+    for a, b in sorted(s for s in spans if s[1] > s[0]):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=None, asleep=()):
     """(row cells, wall secs, rounds, no-change rounds, E2E lock waits, stall secs to resume) for one claimed job. The no-change cell is the count and the later round of each
     equal pair, e.g. `2 (rounds 2,3)`. Created is feature.md's
     mtime (else spec.md's), Spec starts at claimed-at.txt (cmd_ready) when sane, the wait before it counting as Queue; a shop run (board `worker`/`shop`) ends Spec at shop-at.txt (serve.py shop_tick; else the claim, else feature.md) and shows done minus that as Cloud, the last cell; with no spec.md (a lilguy job) feature.md to the first run log is Queue; done is the board updatedAt; each round's time runs from the previous round's last file
@@ -3624,6 +3647,7 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
     # cmd_ready's claim: a BigBoy child's dependency wait counts as Queue, not Spec; with no claim (a hand start) the first run log before spec.md stands in
     claim = claimed if claimed is not None else next((r for r in runs if created and spec_at and created <= r <= spec_at), None)
     spec_from = created
+    dep_pieces = []  # the dependency waits moved from Spec to Queue
     if claim and spec_at and created and created <= claim <= spec_at:
         spec, queue, spec_from = spec_at - claim, queue + claim - created, claim
         pieces.append((created, claim))
@@ -3640,8 +3664,13 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
             if b > a:
                 total, upto = total + b - a, b
                 pieces.append((a, b))
+                dep_pieces.append((a, b))
         total = min(total, spec)
         spec, queue = spec - total, queue + total
+    spec_sleep = 0  # pulse.log gaps (the Mac asleep) inside the Spec window, less the dependency waits counted as Queue
+    if spec and spec_at:
+        spec_sleep = min(_asleep_secs(asleep, [(spec_from, spec_at)]) - _asleep_secs(asleep, [s for s in dep_pieces if s[0] >= spec_from]), spec)
+    queue_sleep = _asleep_secs(asleep, pieces) if queue else 0
     try:  # serve.py note_queue_gate: the launch gates that queued it
         gates = list(dict.fromkeys((folder / "queue-gates.txt").read_text(encoding="utf-8", errors="replace").split()))
     except OSError:
@@ -3677,14 +3706,18 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
     cells_g = [f"{g} {_mins(held[g])}" for g in sorted(gates, key=lambda g: -held[g])]
     dep_wait = max((h for g, h in held.items() if g.startswith("depends_on:")), default=0)  # blockers overlap: never summed
     other = _union_secs([sp for g in gates if not g.startswith("depends_on:") for sp in _head_spans(seen.get(g.split("(", 1)[0]))])  # job 1593: heads held at different times add up; overlaps count once
-    if queue and _mins(rest := max(queue - dep_wait - other, 0)) != "0m":  # job 1587: a machine gate holds after the depends_on wait
+    queue_sleep = min(queue_sleep, queue or 0)
+    if queue_sleep and _mins(queue_sleep) != "0m":  # the Mac asleep is its own gate, taken off the unnamed rest
+        cells_g.append(f"asleep {_mins(queue_sleep)}")
+    if queue and _mins(rest := max(queue - dep_wait - other - queue_sleep, 0)) != "0m":  # job 1587: a machine gate holds after the depends_on wait
         cells_g.append(f"unnamed {_mins(rest)}")
     gate_cell = ", ".join(cells_g) or "-"
     queue_cell = _mins(queue)
     if queue is not None and (blocked := _deps_done_at(job, by_id)) is not None:  # the part after the planned wait
         after = min(sum(max(b - max(a, blocked), 0) for a, b in pieces), queue)
         queue_cell += f" ({_mins(after)} after depends_on)"
-    cells = [job_id, _mins(wall), _mins(spec), queue_cell, gate_cell, str(len(rounds)), paused + ", ".join(times) or "-",
+    spec_cell = _mins(spec) + (f" (asleep {_mins(spec_sleep)})" if spec_sleep > 0 and _mins(spec_sleep) != "0m" else "")
+    cells = [job_id, _mins(wall), spec_cell, queue_cell, gate_cell, str(len(rounds)), paused + ", ".join(times) or "-",
              ", ".join(map(_mins, hwaits)) or "-", f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0",
              _mins(done - cloud if cloud and done and done >= cloud else None)]
     try:  # serve.py note_stall_hold: what held its stalls
@@ -3728,7 +3761,9 @@ def write_timing(root, digest_id, jobs):
             stalls.setdefault(q["job"], []).append(at)
         if q.get("kind") == "queue-wait" and at and isinstance(q.get("job"), str):
             queue.setdefault(q["job"], []).append(at)
-    rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ()), human.get(j, ()), queue.get(j, ()), board)
+    ticks = sorted(l["t"] for l in _json_lines(pulse_path()) if is_num(l.get("t")))  # read once: a gap over ASLEEP_GAP_S is the Mac asleep
+    gaps = [(a, b) for a, b in zip(ticks, ticks[1:]) if b - a > ASLEEP_GAP_S]
+    rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ()), human.get(j, ()), queue.get(j, ()), board, gaps)
             for j in jobs]
     lines = [f"# Timing: digest {digest_id}", "",
              "| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls | Cloud |",

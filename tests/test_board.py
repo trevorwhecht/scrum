@@ -6291,6 +6291,34 @@ class BoardTest(unittest.TestCase):
             board.write_timing(self.root, "001", ["j"])
         self.assertIn("| j | - | 0m | 0m | - | 1 | 2h00m | 0m | 0 | 0 | open, open | - |", (self.root / "digests" / "001" / "timing.md").read_text())
 
+    def test_timing_asleep_gaps_leave_queue_and_spec(self):
+        t0 = 1_700_000_000
+        for at, rel in ((0, "feature.md"), (7200, "spec.md"), (10800, "round-1/head.txt")):
+            p = self.write(f"j/{rel}", "x\n")
+            os.utime(p, (t0 + at, t0 + at))
+        (self.root / "jobs/j/claimed-at.txt").write_text(f"{t0 + 3600}\n")  # Queue 0-1h, Spec 1h-2h
+        (self.root / "runs").mkdir()
+        (self.root / "runs" / (datetime.fromtimestamp(t0 + 7200, timezone.utc).strftime("%Y%m%d-%H%M%S") + "-start-j.log")).write_text("x")
+        job = {"updatedAt": datetime.fromtimestamp(t0 + 10800, timezone.utc).isoformat()}
+        cells = board._timing_row(self.root, "j", job, {}, asleep=[(t0 + 600, t0 + 1800), (t0 + 4200, t0 + 5400)])[0]
+        self.assertEqual((cells[2], cells[3], cells[4]), ("1h00m (asleep 20m)", "1h00m", "asleep 20m, unnamed 40m"))
+        cells = board._timing_row(self.root, "j", job, {})[0]  # no gaps: the cells are as before
+        self.assertEqual((cells[2], cells[4]), ("1h00m", "unnamed 1h00m"))
+
+    def test_write_timing_reads_pulse_gaps_over_ten_minutes(self):
+        t0 = 1_700_000_000
+        for at, rel in ((0, "feature.md"), (3600, "spec.md"), (7200, "round-1/head.txt")):
+            p = self.write(f"j/{rel}", "x\n")
+            os.utime(p, (t0 + at, t0 + at))
+        (self.root / "jobs/j/claimed-at.txt").write_text(f"{t0}\n")  # all Spec
+        pulse = Path(self.tmp.name) / "pulse.log"
+        ts = [t0 + 60, t0 + 120, t0 + 120 + 1200, t0 + 120 + 1260, t0 + 1500 + 500]  # one 20m gap, one 500s gap (awake)
+        pulse.write_text("".join(json.dumps({"t": t}) + "\n" for t in ts))
+        (self.root / "digests" / "001").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json"), "SCRUM_PULSE": str(pulse)}):
+            board.write_timing(self.root, "001", ["j"])
+        self.assertIn("| j | - | 1h00m (asleep 20m) |", (self.root / "digests" / "001" / "timing.md").read_text())
+
     def test_timing_counts_queue_wait(self):
         t0 = 1_700_000_000
         self.timing_two_hour(t0)
