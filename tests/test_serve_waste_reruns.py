@@ -224,6 +224,25 @@ class SameTestsTest(unittest.TestCase):
         self.ages = {101: 9.0, 102: 8.0, 103: 7.0}
         self.assert_left_alone(procs)
 
+    def test_subshells_of_one_script_are_not_runs(self):
+        """Job 1679: three subshells of one `( ... ) &` script each carry the whole script as argv; none is a run, so
+        the Typecheck and Lint beside the Test are never stopped as its twins."""
+        script = f"( {TEST} ) & ( npx tsc --noEmit ) & ( npx eslint . ) & wait"
+        sh = f"/bin/bash -c {script}"
+        self.assertTrue(serve.multi_command_shell(sh, TEST))
+        self.assertFalse(serve.multi_command_shell(f"/bin/sh -c {TEST}", TEST))
+        self.assertFalse(serve.multi_command_shell(zsh(TEST), TEST))
+        self.assertTrue(serve.multi_command_shell(zsh(script), TEST))
+        procs = [(100, 1, 5.0, sh), (101, 100, 3.0, sh), (102, 100, 1.0, sh), (103, 100, 1.0, sh),
+                 (104, 101, 3.0, f"/opt/homebrew/bin/python3 /x/buildlock.py {TEST}"), (105, 102, 2.0, "node tsc --noEmit"),
+                 (200, 1, 5.0, sh), (201, 200, 3.0, sh), (202, 200, 1.0, sh), (203, 200, 1.0, sh),
+                 (204, 201, 3.0, f"/opt/homebrew/bin/python3 /x/buildlock.py {TEST}"), (205, 202, 2.0, "node tsc --noEmit")]
+        self.cwds = {p: self.wt["2001-a" if p < 200 else "2002-b"] for p in (104, 204)}
+        self.ages = {104: 20.0, 204: 2.0}
+        got, killed = self.run_pass(procs)
+        self.assertEqual(killed, [204])
+        self.assertEqual([l["kept"] for l in self.lines()], [104])
+
     def test_claude_line_never_a_run(self):
         quoting = f'/usr/local/bin/claude --permission-mode bypassPermissions -p "run {TEST}"'
         self.assertTrue(serve.suite_run(quoting, TEST))

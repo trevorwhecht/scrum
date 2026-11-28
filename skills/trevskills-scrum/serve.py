@@ -4846,6 +4846,29 @@ def suite_run(line: str, cmd: str) -> bool:
     return False
 
 
+SHELL_NAMES = ("sh", "bash", "zsh")  # multi_command_shell: a shell whose argv carries a whole script
+
+
+def multi_command_shell(line: str, cmd: str) -> bool:
+    """True when process line is an sh, bash or zsh whose script runs other commands besides cmd (its text, after the
+    leading NAME=value words, removed once): a `;`, `&`, `|` or newline is left in the script. The Bash tool's wrapper
+    (`source <file> && eval '<cmd> 2>&1 | tail -40' < /dev/null`) counts as one command: the text up to `eval '`, the
+    closing `' < /dev/null`, `N>&M` redirects and a final `| tail|head ...` are dropped first. A line cmd is not found in
+    as written (other quoting) is False. Job 1679: subshells of one `( ... ) &` script each carried the whole script."""
+    toks = line.split()
+    if not toks or os.path.basename(toks[0]) not in SHELL_NAMES:
+        return False
+    script = " ".join(line.split(None, 1)[1:])
+    script = re.sub(r"^.*?\beval '", "", script, count=1) if " eval '" in f" {script}" else script
+    script = re.sub(r"'?\s*<\s*/dev/null\s*$", "", script)
+    script = re.sub(r"\d*>&\d+|&>", "", script)
+    script = re.sub(r"\|\s*(tail|head)\b[^|;&\n]*$", "", script.rstrip())
+    want = cmd[board.ENV_PREFIX_RE.match(cmd).end():].strip()
+    if not want or want not in script:
+        return False
+    return any(ch in script.replace(want, "", 1) for ch in ";&|\n")
+
+
 def proc_ages(pids: list[int]) -> dict[int, float]:
     """{pid: minutes since it started} from one `ps -o pid=,etime= -p <pids>` call (timeout 5 s), each etime read with
     cpu_minutes. ps missing, failing or timing out gives {}; a pid ps does not print (it ended) is left out."""
@@ -4895,8 +4918,8 @@ def claude_step(line: str) -> tuple[str | None, str | None]:
 
 
 def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> list[int]:
-    """Waste kind same-tests. A run is the topmost process line, never a claude line (board._is_claude), that suite_run
-    matches against a registered project's `- Test:` or `- E2E:` command (e2e_command; "" or none skipped); a matching
+    """Waste kind same-tests. A run is the topmost process line, never a claude line (board._is_claude) nor a shell whose
+    script runs other commands (multi_command_shell), that suite_run matches against a registered project's `- Test:` or `- E2E:` command (e2e_command; "" or none skipped); a matching
     line below it is part of that run. Its cwd (one proc_cwds call) must be in a project's repo that owns the command,
     and its head is clean_head(cwd); a run failing either is skipped.
     Twins: 2+ runs with one project, command, head and checkout_rel(cwd) (the same relative command in two
@@ -4928,7 +4951,7 @@ def stop_same_tests(procs: list[tuple[int, int, float, str]] | None = None) -> l
     every = {c for own in cmds.values() for c in own.values()}
     matched = {}
     for pid, _, _, line in procs:
-        hits = set() if board._is_claude(line) else {c for c in every if suite_run(line, c)}
+        hits = set() if board._is_claude(line) else {c for c in every if suite_run(line, c) and not multi_command_shell(line, c)}
         if hits:
             matched[pid] = hits
     parent = {p: pp for p, pp, _, _ in procs}
