@@ -6305,6 +6305,20 @@ class BoardTest(unittest.TestCase):
         cells = board._timing_row(self.root, "j", job, {})[0]  # no gaps: the cells are as before
         self.assertEqual((cells[2], cells[4]), ("1h00m", "unnamed 1h00m"))
 
+    def test_timing_asleep_inside_depends_on_wait_not_taken_twice(self):
+        t0 = 1_700_000_000
+        for at, rel in ((0, "feature.md"), (7200, "spec.md"), (9000, "round-1/head.txt")):
+            p = self.write(f"j/{rel}", "x\n")
+            os.utime(p, (t0 + at, t0 + at))
+        (self.root / "jobs/j/claimed-at.txt").write_text(f"{t0 + 7200}\n")  # Queue 0-2h
+        iso = lambda at: datetime.fromtimestamp(t0 + at, timezone.utc).isoformat()
+        job = {"updatedAt": iso(9000), "depends_on": ["b"]}
+        by_id = {"b": {"stage": "done", "updatedAt": iso(3600)}}  # the blocker holds the first hour
+        cells = board._timing_row(self.root, "j", job, {}, by_id=by_id, asleep=[(t0 + 600, t0 + 2400)])[0]  # 30m asleep inside it
+        self.assertEqual(cells[4], "depends_on:b 1h00m, unnamed 1h00m")
+        cells = board._timing_row(self.root, "j", job, {}, by_id=by_id, asleep=[(t0 + 600, t0 + 2400), (t0 + 4000, t0 + 5800)])[0]
+        self.assertEqual(cells[4], "depends_on:b 1h00m, asleep 30m, unnamed 30m")
+
     def test_write_timing_reads_pulse_gaps_over_ten_minutes(self):
         t0 = 1_700_000_000
         for at, rel in ((0, "feature.md"), (3600, "spec.md"), (7200, "round-1/head.txt")):

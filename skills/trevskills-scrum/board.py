@@ -3695,19 +3695,24 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
         queue = min(queue, wall)
     if isinstance(job.get("depends_on"), list):  # waited on an earlier job by plan, beside any other gate (job 1587)
         gates = list(dict.fromkeys([*gates, *(f"depends_on:{d}" for d in job["depends_on"])]))
+    dep_spans = []
     for g in gates:  # job 1558: a depends_on head holds the Queue before its blocker's done updatedAt, else its held time, else all of it
         if g.startswith("depends_on:"):
             dep = (by_id or {}).get(g[11:])
             end = _epoch(dep.get("updatedAt")) if isinstance(dep, dict) and dep.get("stage") == "done" else None
+            dep_spans += pieces if end is None else [(x, min(y, end)) for x, y in pieces]  # where the sleep is already inside dep_wait
             held[g] = ((held.get(g) or queue or 0) if end is None
                        else min(sum(max(min(b, end) - a, 0) for a, b in pieces), queue or 0))
     if queue:  # job 1568: a head never holds more than the job's own Queue; the rest the longest leaves is unnamed
         held = {g: min(h, queue) for g, h in held.items()}
     cells_g = [f"{g} {_mins(held[g])}" for g in sorted(gates, key=lambda g: -held[g])]
     dep_wait = max((h for g, h in held.items() if g.startswith("depends_on:")), default=0)  # blockers overlap: never summed
-    other = _union_secs([sp for g in gates if not g.startswith("depends_on:") for sp in _head_spans(seen.get(g.split("(", 1)[0]))])  # job 1593: heads held at different times add up; overlaps count once
+    head_spans = [sp for g in gates if not g.startswith("depends_on:") for sp in _head_spans(seen.get(g.split("(", 1)[0]))]
+    other = _union_secs(head_spans)  # job 1593: heads held at different times add up; overlaps count once
     queue_sleep = min(queue_sleep, queue or 0)
-    if queue_sleep and _mins(queue_sleep) != "0m":  # the Mac asleep is its own gate, taken off the unnamed rest
+    gated_sleep = min(_asleep_secs(asleep, [*dep_spans, *head_spans]), queue_sleep)  # already inside dep_wait or a head's span
+    queue_sleep -= gated_sleep  # only the sleep outside the named gates is its own gate, taken off the unnamed rest
+    if queue_sleep and _mins(queue_sleep) != "0m":
         cells_g.append(f"asleep {_mins(queue_sleep)}")
     if queue and _mins(rest := max(queue - dep_wait - other - queue_sleep, 0)) != "0m":  # job 1587: a machine gate holds after the depends_on wait
         cells_g.append(f"unnamed {_mins(rest)}")
