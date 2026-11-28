@@ -6312,7 +6312,7 @@ class BoardTest(unittest.TestCase):
             os.utime(p, (t0 + at, t0 + at))
         (self.root / "jobs/j/claimed-at.txt").write_text(f"{t0}\n")  # all Spec
         pulse = Path(self.tmp.name) / "pulse.log"
-        ts = [t0 + 60, t0 + 120, t0 + 120 + 1200, t0 + 120 + 1260, t0 + 1500 + 500]  # one 20m gap, one 500s gap (awake)
+        ts = [t0 + 60, t0 + 120, t0 + 120 + 1200, t0 + 120 + 1260, t0 + 1380 + 500]  # one 20m gap, one 500s gap (awake)
         pulse.write_text("".join(json.dumps({"t": t}) + "\n" for t in ts))
         (self.root / "digests" / "001").mkdir(parents=True)
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json"), "SCRUM_PULSE": str(pulse)}):
