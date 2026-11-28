@@ -3702,9 +3702,14 @@ def sweep_parents(project, root, jobs, alive=None, claim=True, cause=None):
             continue
         kids = [by_id[k] for k in p["children"] if k in by_id]
         why = p.get("reason") or ""
-        if p["lane"] in ("runall", "bigboy") and why.startswith(board.MACHINE_WAIT):
-            note_held(root, held_gate(why.removeprefix(board.MACHINE_WAIT)), ready_waiting(root, p["id"]), why)  # every tick, so held minutes keep running (jobs 1584, 1587)
         machine_wait = why.startswith(board.MACHINE_WAIT)
+        if machine_wait:  # the stored reason only changes when start_ready runs (never on a claim=False tick), so re-check the gate (job 1685)
+            fresh = board.machine_ok(root, claim=True) or board.finish_first(root)
+            usage = why.removeprefix(board.MACHINE_WAIT).startswith("no account has room")  # a usage hold: machine_ok cannot re-check it
+            held = fresh or (why.removeprefix(board.MACHINE_WAIT) if usage else None)
+            machine_wait = held is not None  # a cleared gate leaves the claim_off and chain_lock notes to name the real holder
+            if machine_wait:
+                note_held(root, held_gate(held), ready_waiting(root, p["id"]), board.MACHINE_WAIT + held if fresh else why)  # every tick, so held minutes keep running (jobs 1584, 1587)
         if not board.chain_lock_live(root, p["id"]) and respawn_orphans(project, root, p, kids, alive, by_id):
             continue  # a child was just respawned (a resumed one now reads stalled, i.e. idle): not idle this tick
         if not all(board.idle(k) for k in kids):
