@@ -6319,6 +6319,21 @@ class BoardTest(unittest.TestCase):
         cells = board._timing_row(self.root, "j", job, {}, by_id=by_id, asleep=[(t0 + 600, t0 + 2400), (t0 + 4000, t0 + 5800)])[0]
         self.assertEqual(cells[4], "depends_on:b 1h00m, asleep 30m, unnamed 30m")
 
+    def test_timing_short_recorded_hold_keeps_asleep_gate_after_it(self):
+        """Job 1682: a not-done blocker with a recorded hold shorter than the Queue spans only that hold."""
+        t0 = 1_700_000_000
+        for at, rel in ((0, "feature.md"), (7200, "spec.md"), (9000, "round-1/head.txt")):
+            p = self.write(f"j/{rel}", "x\n")
+            os.utime(p, (t0 + at, t0 + at))
+        (self.root / "jobs/j/claimed-at.txt").write_text(f"{t0 + 7200}\n")  # Queue 0-2h
+        self.write("j/queue-gates.txt", "depends_on:b\n")
+        self.write("j/current-gates.json", json.dumps({"depends_on:b": {"at": 1.0, "held": 3600}}))
+        iso = lambda at: datetime.fromtimestamp(t0 + at, timezone.utc).isoformat()
+        job = {"updatedAt": iso(9000)}
+        by_id = {"b": {"stage": "build", "updatedAt": iso(1)}}  # not done: only the recorded hour counts
+        cells = board._timing_row(self.root, "j", job, {}, by_id=by_id, asleep=[(t0 + 4000, t0 + 5800)])[0]  # 30m asleep after the hour
+        self.assertEqual(cells[4], "depends_on:b 1h00m, asleep 30m, unnamed 30m")
+
     def test_write_timing_reads_pulse_gaps_over_ten_minutes(self):
         t0 = 1_700_000_000
         for at, rel in ((0, "feature.md"), (3600, "spec.md"), (7200, "round-1/head.txt")):

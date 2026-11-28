@@ -3700,7 +3700,16 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=(), by_id=
         if g.startswith("depends_on:"):
             dep = (by_id or {}).get(g[11:])
             end = _epoch(dep.get("updatedAt")) if isinstance(dep, dict) and dep.get("stage") == "done" else None
-            dep_spans += pieces if end is None else [(x, min(y, end)) for x, y in pieces]  # where the sleep is already inside dep_wait
+            rec = held.get(g) or 0  # job 1682: a recorded hold shorter than the Queue covers only its first seconds of it, so the asleep gate stays
+            if end is None and 0 < rec < (queue or 0):
+                left = rec
+                for x, y in pieces:
+                    if left <= 0:
+                        break
+                    dep_spans.append((x, min(y, x + left)))
+                    left -= y - x
+            else:
+                dep_spans += pieces if end is None else [(x, min(y, end)) for x, y in pieces]  # where the sleep is already inside dep_wait
             held[g] = ((held.get(g) or queue or 0) if end is None
                        else min(sum(max(min(b, end) - a, 0) for a, b in pieces), queue or 0))
     if queue:  # job 1568: a head never holds more than the job's own Queue; the rest the longest leaves is unnamed
